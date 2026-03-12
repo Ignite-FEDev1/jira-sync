@@ -227,8 +227,12 @@ export class JiraClient {
   /**
    * PUT 요청
    */
-  async put<T, D = Record<string, unknown> | unknown[]>(path: string, body: D) {
-    return this.request<T>(path, { method: 'PUT', body });
+  async put<T, D = Record<string, unknown> | unknown[]>(
+    path: string,
+    body: D,
+    params?: Record<string, string | number>
+  ) {
+    return this.request<T>(path, { method: 'PUT', body, params });
   }
 
   /**
