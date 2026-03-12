@@ -5,6 +5,7 @@ import {
   useContext,
   useState,
   useEffect,
+  useCallback,
   type ReactNode,
 } from 'react';
 
@@ -28,6 +29,7 @@ interface UserContextValue {
   currentUser: AppUser | null;
   setCurrentUser: (user: AppUser | null) => void;
   clearUser: () => void;
+  refreshUser: () => Promise<void>;
 }
 
 const UserContext = createContext<UserContextValue | null>(null);
@@ -38,36 +40,48 @@ export function UserProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUserState] = useState<AppUser | null>(null);
   const [loaded, setLoaded] = useState(false);
 
+  // API에서 최신 사용자 데이터 가져와 갱신
+  const refreshUser = useCallback(async () => {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (!stored) return;
+
+    let storedUser: AppUser;
+    try {
+      storedUser = JSON.parse(stored);
+    } catch {
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/users');
+      const json = await res.json();
+      if (json.success && Array.isArray(json.data)) {
+        const fresh = json.data.find((u: AppUser) => u.id === storedUser.id);
+        if (fresh) {
+          setCurrentUserState(fresh);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+        }
+      }
+    } catch {
+      // 네트워크 오류 시 캐시된 데이터 유지
+    }
+  }, []);
+
   // localStorage에서 복원 후 API에서 최신 정보로 갱신
   useEffect(() => {
-    let storedUser: AppUser | null = null;
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        storedUser = JSON.parse(stored);
-        setCurrentUserState(storedUser);
+        setCurrentUserState(JSON.parse(stored));
       }
     } catch {
       // ignore
     }
     setLoaded(true);
 
-    // 저장된 사용자가 있으면 API에서 최신 데이터로 갱신
-    if (storedUser) {
-      fetch('/api/users')
-        .then((res) => res.json())
-        .then((json) => {
-          if (json.success && Array.isArray(json.data)) {
-            const fresh = json.data.find((u: AppUser) => u.id === storedUser.id);
-            if (fresh) {
-              setCurrentUserState(fresh);
-              localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
-            }
-          }
-        })
-        .catch(() => {/* 네트워크 오류 시 캐시된 데이터 유지 */});
-    }
-  }, []);
+    // 항상 API에서 최신 데이터로 갱신
+    refreshUser();
+  }, [refreshUser]);
 
   const setCurrentUser = (user: AppUser | null) => {
     setCurrentUserState(user);
@@ -86,7 +100,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
   if (!loaded) return null;
 
   return (
-    <UserContext.Provider value={{ currentUser, setCurrentUser, clearUser }}>
+    <UserContext.Provider value={{ currentUser, setCurrentUser, clearUser, refreshUser }}>
       {children}
     </UserContext.Provider>
   );
