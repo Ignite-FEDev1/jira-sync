@@ -635,7 +635,7 @@ export default function Home() {
             <Link href="/generate-ticket">
               <Button variant="outline" className="relative">
                 <Sparkles className="mr-2 h-4 w-4" />
-                티켓 내용 생성(Beta)
+                AI 티켓 내용 생성
                 <span className="absolute -top-1 -right-1 inline-flex rounded-full h-5 w-5 bg-red-500 items-center justify-center">
                   <span className="text-[9px] font-bold text-white">N</span>
                 </span>

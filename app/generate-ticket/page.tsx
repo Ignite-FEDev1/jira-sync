@@ -9,7 +9,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Sparkles } from 'lucide-react';
 import { TicketContentForm } from '@/components/ticket-content-form';
 
 export default function GenerateTicketPage() {
@@ -24,9 +24,13 @@ export default function GenerateTicketPage() {
               </Button>
             </Link>
             <div>
-              <h1 className="text-2xl font-bold">티켓 내용 생성(Beta)</h1>
+              <h1 className="text-2xl font-bold flex items-center gap-2">
+                <Sparkles className="h-6 w-6 text-primary" />
+                AI 티켓 내용 생성
+                <span className="text-xs font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full">Beta</span>
+              </h1>
               <p className="text-sm text-muted-foreground">
-                입력 내용을 기반으로 Jira 티켓 설명을 자동 생성합니다
+                입력 내용을 기반으로 AI가 Jira 티켓 설명을 자동 생성합니다
               </p>
             </div>
           </div>
@@ -36,7 +40,7 @@ export default function GenerateTicketPage() {
       <div className="flex-1 container mx-auto px-6 py-6 overflow-auto">
         <Card className="max-w-3xl mx-auto">
           <CardHeader>
-            <CardTitle>티켓 설명 생성</CardTitle>
+            <CardTitle className="flex items-center gap-2">티켓 설명 생성</CardTitle>
             <CardDescription>
               각 항목을 채워주세요. 업무 배경 또는 업무 설명 중 하나는
               필수입니다.
