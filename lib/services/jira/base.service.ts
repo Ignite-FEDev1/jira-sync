@@ -41,32 +41,37 @@ export class BaseJiraService {
 
   /**
    * 이슈 조회
+   * @param fields 조회할 필드 목록 (미지정 시 DEFAULT_FIELDS 사용)
    */
-  async getIssue(issueKey: string) {
+  async getIssue(issueKey: string, fields?: string[]) {
     return this.client.get<JiraIssue>(JIRA_ROUTES.ISSUE(issueKey), {
-      fields: JIRA_CONFIG.DEFAULT_FIELDS.join(','),
+      fields: (fields || JIRA_CONFIG.DEFAULT_FIELDS).join(','),
     });
   }
 
   /**
    * JQL을 사용한 이슈 검색
+   * @param fields 조회할 필드 목록 (미지정 시 DEFAULT_FIELDS 사용)
    */
-  async searchIssues(jql: string, maxResults?: number) {
+  async searchIssues(jql: string, maxResults?: number, fields?: string[]) {
     return this.client.get<JiraSearchResult>(JIRA_ROUTES.ISSUE_SEARCH, {
       jql,
       maxResults: maxResults || JIRA_CONFIG.MAX_RESULTS,
-      fields: JIRA_CONFIG.DEFAULT_FIELDS.join(','),
+      fields: (fields || JIRA_CONFIG.DEFAULT_FIELDS).join(','),
     });
   }
 
   /**
    * JQL을 사용한 모든 이슈 검색 (페이지네이션 자동 처리)
+   * @param fields 조회할 필드 목록 (미지정 시 DEFAULT_FIELDS 사용)
    */
-  async searchAllIssues(jql: string): Promise<{
+  async searchAllIssues(jql: string, fields?: string[]): Promise<{
     success: boolean;
     data?: { issues: JiraIssue[]; total: number };
     error?: string;
   }> {
+    const fieldString = (fields || JIRA_CONFIG.DEFAULT_FIELDS).join(',');
+
     try {
       const allIssues: JiraIssue[] = [];
       const maxResults = 100;
@@ -79,7 +84,7 @@ export class BaseJiraService {
         {
           jql,
           maxResults: String(maxResults),
-          fields: JIRA_CONFIG.DEFAULT_FIELDS.join(','),
+          fields: fieldString,
         }
       );
 
@@ -95,8 +100,6 @@ export class BaseJiraService {
       let isLast = firstResult.data.isLast ?? true;
       pageCount++;
 
-      // 첫 페이지 조회 완료
-
       // 나머지 페이지 요청 (isLast가 false이고 nextPageToken이 있는 동안)
       while (!isLast && nextPageToken) {
         const result = await this.client.get<JiraSearchResult>(
@@ -104,7 +107,7 @@ export class BaseJiraService {
           {
             jql,
             maxResults: String(maxResults),
-            fields: JIRA_CONFIG.DEFAULT_FIELDS.join(','),
+            fields: fieldString,
             nextPageToken,
           }
         );
@@ -124,7 +127,7 @@ export class BaseJiraService {
         success: true,
         data: {
           issues: allIssues,
-          total: allIssues.length, // 새 방식에서는 total을 직접 계산
+          total: allIssues.length,
         },
       };
     } catch (error) {

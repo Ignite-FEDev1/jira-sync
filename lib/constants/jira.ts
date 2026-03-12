@@ -105,6 +105,7 @@ export const JIRA_CONFIG = {
   MAX_RESULTS: 100,
   DEFAULT_FIELDS: [
     'summary',
+    'description',
     'status',
     'assignee',
     'reporter',

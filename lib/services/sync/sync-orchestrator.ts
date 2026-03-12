@@ -7,7 +7,7 @@ import { IgniteSyncService } from './ignite-sync.service';
 import { HMGSyncService } from './hmg-sync.service';
 import { chunkArray } from './field-mapper';
 import { initSprintCache, preloadSprintCache } from './sprint-mapper';
-import { clearDbMappingCache, getSyncProfileInfo, getAllowedEpicsFromDb } from './db-field-mapper';
+import { clearDbMappingCache, getSyncProfileInfo, getAllowedEpicsFromDb, getSourceFieldsFromDb } from './db-field-mapper';
 import { clearTransitionCache } from './transition-helper';
 import { jira } from '@/lib/services/jira';
 import { ConfluenceEpicClient } from '@/lib/services/confluence/client';
@@ -157,10 +157,14 @@ export class SyncOrchestrator {
 
   /**
    * FEHG 티켓 조회
+   * DB sync_field_mappings에서 source_field 목록을 가져와 Jira API 요청 시 사용
    */
   private async fetchFehgTickets(options: SyncOptions): Promise<JiraIssue[]> {
     // DB 기반: 소스 프로젝트 키 결정
     const sourceProjectKey = await this.resolveSourceProjectKey(options.syncProfileId);
+
+    // DB 매핑 기반 필드 목록 결정
+    const fields = await this.resolveSourceFields(options.syncProfileId);
 
     // 에픽 단위 동기화 모드 (담당자 무관)
     if (options.epicId && options.syncAllInEpic) {
@@ -168,7 +172,7 @@ export class SyncOrchestrator {
         `${sourceProjectKey}-${options.epicId} 에픽 하위 전체 티켓 조회 중 (담당자 무관)...`
       );
       const jql = `"Epic Link" = ${sourceProjectKey}-${options.epicId} ORDER BY updated DESC`;
-      const result = await jira.ignite.searchAllIssues(jql);
+      const result = await jira.ignite.searchAllIssues(jql, fields);
       if (result.success && result.data) {
         this.logger.info(`에픽 하위 전체 티켓: ${result.data.issues.length}개`);
         return result.data.issues;
@@ -180,7 +184,7 @@ export class SyncOrchestrator {
     if (options.epicId) {
       this.logger.info(`${sourceProjectKey}-${options.epicId} 에픽 하위 티켓 조회 중...`);
       const jql = `"Epic Link" = ${sourceProjectKey}-${options.epicId} AND assignee = "${options.assigneeAccountId}" ORDER BY updated DESC`;
-      const result = await jira.ignite.searchAllIssues(jql);
+      const result = await jira.ignite.searchAllIssues(jql, fields);
       if (result.success && result.data) {
         this.logger.info(
           `에픽 하위 티켓: ${result.data.issues.length}개 (전체: ${result.data.total}개)`
@@ -193,7 +197,7 @@ export class SyncOrchestrator {
     // 티켓 지정 모드
     if (options.ticketId) {
       this.logger.info(`${sourceProjectKey}-${options.ticketId} 티켓 조회 중...`);
-      const result = await jira.ignite.getIssue(`${sourceProjectKey}-${options.ticketId}`);
+      const result = await jira.ignite.getIssue(`${sourceProjectKey}-${options.ticketId}`, fields);
       return result.success && result.data ? [result.data] : [];
     }
 
@@ -203,7 +207,7 @@ export class SyncOrchestrator {
 
     this.logger.info(`담당자: ${options.assigneeName || '알 수 없음'}`);
 
-    const result = await jira.ignite.searchAllIssues(jql);
+    const result = await jira.ignite.searchAllIssues(jql, fields);
     if (result.success && result.data) {
       this.logger.info(
         `티켓 조회 완료: ${result.data.issues.length}개 (Jira 전체: ${result.data.total}개)`
@@ -211,6 +215,53 @@ export class SyncOrchestrator {
       return result.data.issues;
     }
     return [];
+  }
+
+  /**
+   * DB 매핑 기반으로 소스 티켓 조회 시 필요한 필드 목록 결정
+   * - DB sync_field_mappings의 source_field 값들
+   * - 동기화 로직에 필수인 시스템 필드 (분류, 상태 동기화 등)
+   */
+  private async resolveSourceFields(syncProfileId?: string): Promise<string[]> {
+    // 동기화 분류/처리에 항상 필요한 시스템 필드
+    const systemFields = [
+      'summary',
+      'status',
+      'project',
+      'issuetype',
+      'parent',       // 에픽 분류
+      'issuelinks',   // 타겟 프로젝트 분류
+    ];
+
+    // 모든 프로필의 source fields를 수집
+    const allSourceFields = new Set<string>(systemFields);
+
+    // syncProfileId가 있으면 해당 프로필의 매핑 필드 추가
+    if (syncProfileId) {
+      const dbFields = await getSourceFieldsFromDb(syncProfileId);
+      dbFields.forEach((f) => allSourceFields.add(f));
+
+      // 프로필의 link field도 추가 (분류에 필요)
+      const profileInfo = await getSyncProfileInfo(syncProfileId);
+      if (profileInfo?.linkField) {
+        allSourceFields.add(profileInfo.linkField);
+      }
+    }
+
+    // AUTOWAY 프로필이 있으면 해당 매핑 필드도 추가
+    const autowayProf = await this.findAutowayProfile();
+    if (autowayProf) {
+      const autowayFields = await getSourceFieldsFromDb(autowayProf.id);
+      autowayFields.forEach((f) => allSourceFields.add(f));
+
+      if (autowayProf.linkField) {
+        allSourceFields.add(autowayProf.linkField);
+      }
+    }
+
+    const fields = Array.from(allSourceFields);
+    this.logger.info(`소스 필드 목록 (${fields.length}개): ${fields.join(', ')}`);
+    return fields;
   }
 
   /**
@@ -390,13 +441,9 @@ export class SyncOrchestrator {
     const createdResults = successResults.filter((r) => r.isNewlyCreated);
     const updatedResults = successResults.filter((r) => !r.isNewlyCreated);
 
-    this.logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━`);
     this.logger.success(
-      `동기화 완료 (${duration}초 소요) - 총 ${results.length}개 처리`
+      `동기화 완료 (${duration}초 소요) - 총 ${results.length}개 처리 (동기화: ${updatedResults.length}, 생성: ${createdResults.length}, 실패: ${failedResults.length})`
     );
-    this.logger.info(`  • 필드 동기화: ${updatedResults.length}개`);
-    this.logger.info(`  • 신규 생성: ${createdResults.length}개`);
-    this.logger.info(`  • 동기화 실패: ${failedResults.length}개`);
 
     if (failedResults.length > 0) {
       this.logger.warning(

@@ -774,14 +774,25 @@ export default function FieldMappingsPage() {
         const { error: mappingError } = await db
           .from('sync_field_mappings')
           .insert(
-            pendingMappings.map((m) => ({
-              profile_id: profileId,
-              source_field: m.sourceField,
-              source_field_name: m.sourceFieldName,
-              target_field: m.targetField,
-              target_field_name: m.targetFieldName,
-              transform_type: 'copy',
-            }))
+            pendingMappings.map((m) => {
+              // 인스턴스가 다를 때 사람 필드는 account_map 자동 적용
+              const ACCOUNT_FIELDS = ['assignee', 'reporter', 'creator'];
+              const isCrossInstance =
+                projects.find((p) => p.id === sourceProjectId)?.jiraInstance !==
+                projects.find((p) => p.id === targetProjectId)?.jiraInstance;
+              const isAccountField = ACCOUNT_FIELDS.includes(m.sourceField);
+              const transformType =
+                isCrossInstance && isAccountField ? 'account_map' : 'copy';
+
+              return {
+                profile_id: profileId,
+                source_field: m.sourceField,
+                source_field_name: m.sourceFieldName,
+                target_field: m.targetField,
+                target_field_name: m.targetFieldName,
+                transform_type: transformType,
+              };
+            })
           );
 
         if (mappingError) {

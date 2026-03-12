@@ -34,6 +34,15 @@ async function getFieldMappings(profileId: string): Promise<DbFieldMapping[]> {
 }
 
 /**
+ * 프로필의 매핑된 source 필드 목록 조회
+ * 소스 티켓 조회 시 어떤 필드를 가져와야 하는지 결정하는 데 사용
+ */
+export async function getSourceFieldsFromDb(profileId: string): Promise<string[]> {
+  const mappings = await getFieldMappings(profileId);
+  return mappings.map((m) => m.source_field);
+}
+
+/**
  * DB 매핑 캐시 초기화
  */
 export function clearDbMappingCache() {
@@ -47,6 +56,8 @@ export function clearDbMappingCache() {
  * DB 기반 필드 매핑 실행
  * sync_field_mappings에 저장된 규칙에 따라 FEHG 티켓 필드를 대상 필드로 변환
  */
+const ACCOUNT_FIELDS = ['assignee', 'reporter', 'creator'];
+
 export async function mapFieldsFromDb(
   fehgTicket: JiraIssue,
   profileId: string,
@@ -56,10 +67,24 @@ export async function mapFieldsFromDb(
   const fields: Record<string, unknown> = {};
   const fehgFields = fehgTicket.fields;
 
+  // 프로필의 소스/타겟 인스턴스가 다른지 확인
+  const profileInfo = await getSyncProfileInfo(profileId);
+  const isCrossInstance =
+    profileInfo != null &&
+    profileInfo.sourceInstance !== profileInfo.targetInstance;
+
   for (const mapping of mappings) {
     const { source_field, target_field, transform_type } = mapping;
 
-    switch (transform_type) {
+    // 안전장치: cross-instance에서 사람 필드가 copy로 되어 있으면 account_map으로 보정
+    const effectiveTransformType =
+      transform_type === 'copy' &&
+      isCrossInstance &&
+      ACCOUNT_FIELDS.includes(source_field)
+        ? 'account_map'
+        : transform_type;
+
+    switch (effectiveTransformType) {
       case 'copy': {
         // 단순 복사
         const value = getFieldValue(fehgTicket, fehgFields, source_field);
