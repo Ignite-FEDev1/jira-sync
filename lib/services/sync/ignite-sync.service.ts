@@ -5,7 +5,7 @@ import { SyncResult, SyncTargetProject } from './types';
 import { SyncLogger } from './logger';
 import { mapFieldsForIgniteProject } from './field-mapper';
 import { mapFieldsFromDb } from './db-field-mapper';
-import { syncStatusWithPath } from './transition-helper';
+import { syncStatusWithPath, syncStatusWithPathFromDb } from './transition-helper';
 import { jira } from '@/lib/services/jira';
 
 /**
@@ -120,7 +120,7 @@ export class IgniteSyncService {
 
       // 3. 상태 동기화 (HDD는 권한 문제로 제외)
       if (targetProject !== 'HDD') {
-        await this.syncIgniteStatus(fehgTicket, targetKey);
+        await this.syncIgniteStatus(fehgTicket, targetKey, syncProfileId);
       } else {
         this.logger.info(`${targetKey}: 상태 동기화 스킵 (HDD는 제외)`);
       }
@@ -154,7 +154,8 @@ export class IgniteSyncService {
    */
   private async syncIgniteStatus(
     fehgTicket: JiraIssue,
-    targetKey: string
+    targetKey: string,
+    syncProfileId?: string
   ): Promise<void> {
     const fehgStatusId = fehgTicket.fields.status?.id;
     if (!fehgStatusId) return;
@@ -173,17 +174,28 @@ export class IgniteSyncService {
         return;
       }
 
-      // 2. 동적 경로 탐색 및 순차 실행
-      const result = await syncStatusWithPath(
-        'ignite',
-        targetKey,
-        fehgStatusId,
-        currentStatusId,
-        async (issueKey, transitionId) => {
-          return await jira.ignite.updateIssueStatus(issueKey, transitionId);
-        },
-        this.logger
-      );
+      // 2. 동적 경로 탐색 및 순차 실행 (DB 매핑 우선)
+      const executeTransitionFn = async (issueKey: string, transitionId: string) => {
+        return await jira.ignite.updateIssueStatus(issueKey, transitionId);
+      };
+
+      const result = syncProfileId
+        ? await syncStatusWithPathFromDb(
+            syncProfileId,
+            targetKey,
+            fehgStatusId,
+            currentStatusId,
+            executeTransitionFn,
+            this.logger
+          )
+        : await syncStatusWithPath(
+            'ignite',
+            targetKey,
+            fehgStatusId,
+            currentStatusId,
+            executeTransitionFn,
+            this.logger
+          );
 
       if (!result.success && result.stepsExecuted > 0) {
         this.logger.warning(
