@@ -160,8 +160,8 @@ export class SyncOrchestrator {
    * DB sync_field_mappings에서 source_field 목록을 가져와 Jira API 요청 시 사용
    */
   private async fetchFehgTickets(options: SyncOptions): Promise<JiraIssue[]> {
-    // DB 기반: 소스 프로젝트 키 결정
-    const sourceProjectKey = await this.resolveSourceProjectKey(options.syncProfileId);
+    // 소스 프로젝트 키 결정: 명시적 전달 > DB 프로필 > 폴백
+    const sourceProjectKey = options.sourceProjectKey || await this.resolveSourceProjectKey(options.syncProfileId);
 
     // DB 매핑 기반 필드 목록 결정
     const fields = await this.resolveSourceFields(options.syncProfileId);

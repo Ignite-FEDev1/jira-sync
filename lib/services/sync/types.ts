@@ -58,6 +58,7 @@ export interface SyncOptions {
   epicId?: string; // 에픽 지정 모드
   ticketId?: string; // 티켓 지정 모드
   syncAllInEpic?: boolean; // 에픽 단위 동기화 (담당자 무관하게 에픽 하위 전체 동기화)
+  sourceProjectKey?: string; // 소스 프로젝트 키 (예: 'FEHG', 'BEDEV1')
   syncProfileId?: string; // DB 기반 동기화 시 사용할 프로필 ID
   chunkSize?: number; // 청크 크기 (기본: 15)
 }

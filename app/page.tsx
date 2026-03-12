@@ -336,6 +336,7 @@ export default function Home() {
             teamUsers,
             targetProjects: [target.projectName as SyncTargetProject],
             syncProfileId: target.syncProfileId,
+            sourceProjectKey: sourceProject,
             chunkSize: 15,
           });
 
@@ -396,6 +397,7 @@ export default function Home() {
         teamUsers,
         targetProjects,
         syncProfileId,
+        sourceProjectKey: sourceProject,
         ticketId: isSpecificMode ? epicOrTicketId : undefined,
         chunkSize: 15,
       });
