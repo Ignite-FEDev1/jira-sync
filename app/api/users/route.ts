@@ -4,7 +4,7 @@ import { dbServer } from '@/lib/db';
 export async function GET() {
   const { data, error } = await dbServer
     .from('users')
-    .select('*, teams:team_id(id, name, source_project:source_project_id(name, jira_project_id))')
+    .select('*, teams:team_id(id, name, source_project:source_project_id(name))')
     .order('name');
 
   if (error) {
@@ -12,13 +12,13 @@ export async function GET() {
   }
 
   const users = data.map((u: Record<string, unknown>) => {
-    const team = u.teams as { id: string; name: string; source_project: { name: string; jira_project_id: string } | null } | null;
+    const team = u.teams as { id: string; name: string; source_project: { name: string } | null } | null;
     return {
       id: u.id,
       name: u.name,
       teamId: u.team_id,
       teamName: team?.name ?? null,
-      sourceProject: team?.source_project?.jira_project_id ?? null,
+      sourceProject: team?.source_project?.name ?? null,
       igniteAccountId: u.ignite_account_id,
       igniteJiraEmail: u.ignite_jira_email,
       igniteJiraApiToken: u.ignite_jira_api_token,
