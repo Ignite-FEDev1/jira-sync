@@ -79,9 +79,9 @@ export function mapFieldsForAutoway(
   // summary (prefix 없이 그대로)
   fields.summary = fehgTicket.fields.summary;
 
-  // description (소스 티켓 내용 그대로 복사)
+  // description (소스 티켓 내용 복사, 첨부파일/이미지 노드 제거)
   if (fehgFields.description) {
-    fields.description = fehgFields.description;
+    fields.description = stripAdfMediaNodes(fehgFields.description);
   }
 
   // 종료일 매핑 (Gantt End Date)
@@ -176,6 +176,29 @@ export function isValidAutowayLink(url: string | null | undefined): boolean {
   if (!url) return false;
   // AUTOWAY-숫자 패턴이 있으면 유효
   return /AUTOWAY-\d+/.test(url);
+}
+
+/**
+ * ADF에서 미디어(첨부파일/이미지) 노드 제거
+ * mediaGroup, mediaSingle, media 타입 노드를 재귀적으로 필터링
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function stripAdfMediaNodes(adf: any): any {
+  if (!adf || typeof adf !== 'object') return adf;
+  if (!adf.content || !Array.isArray(adf.content)) return adf;
+
+  return {
+    ...adf,
+    content: adf.content
+      .filter((node: { type?: string }) =>
+        node.type !== 'mediaGroup' &&
+        node.type !== 'mediaSingle' &&
+        node.type !== 'media'
+      )
+      .map((node: { content?: unknown[] }) =>
+        node.content ? stripAdfMediaNodes(node) : node
+      ),
+  };
 }
 
 /**

@@ -58,6 +58,7 @@ CREATE TABLE sync_profiles (
   source_project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
   target_project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
   link_field TEXT,
+  source_link_field TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

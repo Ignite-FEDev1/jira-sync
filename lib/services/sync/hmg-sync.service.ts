@@ -174,7 +174,7 @@ export class HMGSyncService {
     assigneeAccountId: string,
     teamUsers?: SyncOptions['teamUsers'],
     syncProfileId?: string,
-    profileInfo?: { linkField: string | null; targetProjectKey: string; targetInstance: string } | null
+    profileInfo?: { linkField: string | null; sourceLinkField?: string | null; targetProjectKey: string; targetInstance: string } | null
   ): Promise<SyncResult> {
     const targetProjectKey = profileInfo?.targetProjectKey || 'AUTOWAY';
     const linkFieldId = profileInfo?.linkField || IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK;
@@ -189,13 +189,17 @@ export class HMGSyncService {
 
       const autowayIssueType = await this.resolveCreateIssueType(targetProjectKey);
 
-      // 2. 티켓 생성
+      // 2. 소스 링크 필드 병합
+      const sourceLinkFields = this.getSourceLinkFields(fehgTicket.key, profileInfo);
+
+      // 3. 티켓 생성
       const createPayload: JiraIssueCreatePayload = {
         fields: {
           project: { key: targetProjectKey },
           issuetype: autowayIssueType,
           summary: fehgTicket.fields.summary,
           ...mappedFields,
+          ...sourceLinkFields,
         },
       };
 
@@ -216,7 +220,7 @@ export class HMGSyncService {
       const createdKey = createResult.data.key;
       this.logger.success(`${createdKey}: ${targetProjectKey} 티켓 생성 완료`);
 
-      // 3. FEHG 티켓의 link field에 URL 저장
+      // 4. FEHG 티켓의 link field에 URL 저장
       const targetUrl = `${JIRA_ENDPOINTS.HMG}/browse/${createdKey}`;
       const linkResult = await jira.ignite.updateIssueFields(fehgTicket.key, {
         [linkFieldId]: targetUrl,
@@ -230,7 +234,7 @@ export class HMGSyncService {
         this.logger.success(`${fehgTicket.key}: ${targetProjectKey} 링크 저장 완료`);
       }
 
-      // 4. 상태 동기화
+      // 5. 상태 동기화
       await this.syncAutowayStatus(fehgTicket, createdKey, syncProfileId);
 
       return {
@@ -267,7 +271,7 @@ export class HMGSyncService {
     assigneeAccountId: string,
     teamUsers?: SyncOptions['teamUsers'],
     syncProfileId?: string,
-    profileInfo?: { targetProjectKey: string } | null
+    profileInfo?: { targetProjectKey: string; sourceLinkField?: string | null } | null
   ): Promise<SyncResult> {
     const targetProjectKey = profileInfo?.targetProjectKey || 'AUTOWAY';
 
@@ -279,14 +283,18 @@ export class HMGSyncService {
         ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey)
         : mapFieldsForAutoway(fehgTicket, assigneeAccountId, teamUsers);
 
-      // 2. 필드 매핑 로그
+      // 2. 소스 링크 필드 병합
+      const sourceLinkFields = this.getSourceLinkFields(fehgTicket.key, profileInfo);
+      const allFields = { ...mappedFields, ...sourceLinkFields };
+
+      // 3. 필드 매핑 로그
       this.logger.info(
-        `${targetKey}: 업데이트 필드 → ${JSON.stringify(Object.keys(mappedFields))}`
+        `${targetKey}: 업데이트 필드 → ${JSON.stringify(Object.keys(allFields))}`
       );
 
-      // 3. 필드 업데이트
+      // 4. 필드 업데이트
       const updateResult = await jira.hmg.updateIssue(targetKey, {
-        fields: mappedFields,
+        fields: allFields,
       });
 
       if (!updateResult.success) {
@@ -303,7 +311,7 @@ export class HMGSyncService {
 
       this.logger.success(`${targetKey}: 필드 업데이트 완료`);
 
-      // 4. 상태 동기화
+      // 5. 상태 동기화
       await this.syncAutowayStatus(fehgTicket, targetKey, syncProfileId);
 
       return {
@@ -327,6 +335,18 @@ export class HMGSyncService {
         error: errorMessage,
       };
     }
+  }
+
+  /**
+   * 소스 티켓 원본 링크 필드를 반환 (mappedFields에 병합용)
+   */
+  private getSourceLinkFields(
+    fehgKey: string,
+    profileInfo?: { sourceLinkField?: string | null } | null
+  ): Record<string, string> {
+    const sourceLinkField = profileInfo?.sourceLinkField;
+    if (!sourceLinkField) return {};
+    return { [sourceLinkField]: `${JIRA_ENDPOINTS.IGNITE}/browse/${fehgKey}` };
   }
 
   /**

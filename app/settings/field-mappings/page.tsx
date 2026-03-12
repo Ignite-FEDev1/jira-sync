@@ -51,6 +51,7 @@ interface SyncProfile {
   createdAt: string;
   mappingCount: number;
   linkField: string | null;
+  sourceLinkField: string | null;
   epicCount: number;
   statusMappingCount: number;
   workflowCount: number;
@@ -312,6 +313,9 @@ export default function FieldMappingsPage() {
   const [linkField, setLinkField] = useState('');
   const [linkFieldSearch, setLinkFieldSearch] = useState('');
   const [linkFieldDropdownOpen, setLinkFieldDropdownOpen] = useState(false);
+  const [sourceLinkField, setSourceLinkField] = useState('');
+  const [sourceLinkFieldSearch, setSourceLinkFieldSearch] = useState('');
+  const [sourceLinkFieldDropdownOpen, setSourceLinkFieldDropdownOpen] = useState(false);
   const [selectedEpics, setSelectedEpics] = useState<AllowedEpic[]>([]);
   const [fehgEpics, setFehgEpics] = useState<{ key: string; summary: string }[]>([]);
   const [loadingEpics, setLoadingEpics] = useState(false);
@@ -393,6 +397,7 @@ export default function FieldMappingsPage() {
           createdAt: p.created_at,
           mappingCount: countMap[p.id] || 0,
           linkField: p.link_field || null,
+          sourceLinkField: p.source_link_field || null,
           epicCount: epicCountMap[p.id] || 0,
           statusMappingCount: statusCountMap[p.id] || 0,
           workflowCount: workflowCountMap[p.id] || 0,
@@ -477,6 +482,9 @@ export default function FieldMappingsPage() {
     setLinkField('');
     setLinkFieldSearch('');
     setLinkFieldDropdownOpen(false);
+    setSourceLinkField('');
+    setSourceLinkFieldSearch('');
+    setSourceLinkFieldDropdownOpen(false);
     setSelectedEpics([]);
     if (projectId) {
       const project = projects.find((p) => p.id === projectId);
@@ -711,6 +719,7 @@ export default function FieldMappingsPage() {
             source_project_id: sourceProjectId,
             target_project_id: targetProjectId,
             link_field: isHmgTarget && linkField ? linkField : null,
+            source_link_field: isHmgTarget && sourceLinkField ? sourceLinkField : null,
             updated_at: new Date().toISOString(),
           })
           .eq('id', editingId);
@@ -753,6 +762,7 @@ export default function FieldMappingsPage() {
             source_project_id: sourceProjectId,
             target_project_id: targetProjectId,
             link_field: isHmgTarget && linkField ? linkField : null,
+            source_link_field: isHmgTarget && sourceLinkField ? sourceLinkField : null,
           })
           .select('id')
           .single();
@@ -905,8 +915,9 @@ export default function FieldMappingsPage() {
       fetchProjectStatuses(targetProject.name, targetProject.jiraInstance, setTargetStatuses, setLoadingTargetStatuses);
     }
 
-    // HMG 대상인 경우 link_field 및 allowed epics 로드
+    // HMG 대상인 경우 link_field, source_link_field 및 allowed epics 로드
     setLinkField(profile.linkField || '');
+    setSourceLinkField(profile.sourceLinkField || '');
     const targetInst = projects.find((p) => p.id === profile.targetProjectId)?.jiraInstance;
     if (targetInst === 'hmg') {
       // 허용 에픽 로드
@@ -1012,6 +1023,9 @@ export default function FieldMappingsPage() {
     setLinkField('');
     setLinkFieldSearch('');
     setLinkFieldDropdownOpen(false);
+    setSourceLinkField('');
+    setSourceLinkFieldSearch('');
+    setSourceLinkFieldDropdownOpen(false);
     setSelectedEpics([]);
     setFehgEpics([]);
     setEpicSearch('');
@@ -1296,6 +1310,103 @@ export default function FieldMappingsPage() {
                 </div>
                 <p className="text-[11px] text-muted-foreground">
                   소스 티켓에서 HMG 티켓 키를 저장하는 커스텀 필드를 선택하세요.
+                </p>
+              </div>
+
+              {/* 소스 티켓 링크 저장 필드 선택 */}
+              <div className="space-y-1">
+                <label className="text-xs font-medium">
+                  소스 티켓 링크 저장 필드
+                </label>
+                <div className="relative max-w-md z-10">
+                  {sourceLinkField && !sourceLinkFieldDropdownOpen ? (
+                    <div
+                      className="flex items-center justify-between w-full rounded-md border bg-background px-3 py-2 text-sm cursor-pointer hover:bg-muted/30"
+                      onClick={() => setSourceLinkFieldDropdownOpen(true)}
+                    >
+                      <span>
+                        {targetFields.find((f) => f.id === sourceLinkField)?.name || sourceLinkField}
+                        <code className="ml-1.5 text-[10px] text-muted-foreground font-mono">
+                          ({sourceLinkField})
+                        </code>
+                      </span>
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSourceLinkField('');
+                          setSourceLinkFieldSearch('');
+                        }}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                      <Input
+                        placeholder="타겟 필드 검색... (이름 또는 ID)"
+                        value={sourceLinkFieldSearch}
+                        onChange={(e) => {
+                          setSourceLinkFieldSearch(e.target.value);
+                          setSourceLinkFieldDropdownOpen(true);
+                        }}
+                        onFocus={() => setSourceLinkFieldDropdownOpen(true)}
+                        className="pl-8 h-9 text-sm"
+                      />
+                    </div>
+                  )}
+
+                  {sourceLinkFieldDropdownOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0"
+                        onClick={() => setSourceLinkFieldDropdownOpen(false)}
+                      />
+                      <div className="absolute z-10 top-full left-0 right-0 mt-1 border rounded-md bg-background shadow-lg overflow-hidden">
+                        <div className="max-h-48 overflow-y-auto">
+                          {targetFields
+                            .filter((f) => f.custom && (f.schema?.type === 'url' || (f.schema?.type === 'string' && f.schema?.custom?.includes(':textfield'))))
+                            .filter((f) => {
+                              if (!sourceLinkFieldSearch.trim()) return true;
+                              const q = sourceLinkFieldSearch.toLowerCase();
+                              return (
+                                f.name.toLowerCase().includes(q) ||
+                                f.id.toLowerCase().includes(q)
+                              );
+                            })
+                            .map((f) => (
+                              <button
+                                key={f.id}
+                                type="button"
+                                className={`w-full flex items-center gap-2 px-3 py-2 text-xs text-left hover:bg-muted/40 transition-colors ${
+                                  sourceLinkField === f.id ? 'bg-primary/10' : ''
+                                }`}
+                                onClick={() => {
+                                  setSourceLinkField(f.id);
+                                  setSourceLinkFieldSearch('');
+                                  setSourceLinkFieldDropdownOpen(false);
+                                }}
+                              >
+                                <span className="truncate flex-1">{f.name}</span>
+                                <code className="text-[10px] font-mono text-muted-foreground shrink-0">
+                                  {f.id}
+                                </code>
+                              </button>
+                            ))}
+                          {targetFields.filter((f) => f.custom && (f.schema?.type === 'url' || (f.schema?.type === 'string' && f.schema?.custom?.includes(':textfield')))).length === 0 && (
+                            <div className="px-3 py-2 text-xs text-muted-foreground">
+                              {loadingTargetFields ? '필드 로딩 중...' : '텍스트/URL 타입 커스텀 필드 없음'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  타겟(HMG) 티켓에서 소스 티켓 원본 링크를 저장할 텍스트/URL 타입 커스텀 필드를 선택하세요.
                 </p>
               </div>
 
@@ -1847,11 +1958,6 @@ export default function FieldMappingsPage() {
 
                       <span className="text-xs text-muted-foreground">
                         {profile.mappingCount}개 매핑
-                        {profile.linkField && (
-                          <span className="ml-1.5">
-                            · <Link2 className="inline h-3 w-3 -mt-0.5" /> {profile.linkField}
-                          </span>
-                        )}
                         {profile.epicCount > 0 && (
                           <span className="ml-1.5">· {profile.epicCount}개 에픽</span>
                         )}

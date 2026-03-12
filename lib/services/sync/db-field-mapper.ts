@@ -4,6 +4,7 @@
 import { JiraIssue } from '@/lib/types/jira';
 import { dbServer } from '@/lib/db';
 import { mapSprintToTarget } from './sprint-mapper';
+import { stripAdfMediaNodes } from './field-mapper';
 
 interface DbFieldMapping {
   source_field: string;
@@ -92,6 +93,9 @@ export async function mapFieldsFromDb(
           // assignee는 accountId 형태로 래핑
           if (source_field === 'assignee' && typeof value === 'object' && value !== null && 'accountId' in value) {
             fields[target_field] = { accountId: (value as { accountId: string }).accountId };
+          } else if (source_field === 'description' && typeof value === 'object') {
+            // description ADF에서 미디어 노드 제거
+            fields[target_field] = stripAdfMediaNodes(value);
           } else {
             fields[target_field] = value;
           }
@@ -173,6 +177,7 @@ export interface SyncProfileInfo {
   id: string;
   name: string;
   linkField: string | null;
+  sourceLinkField: string | null;
   targetProjectKey: string;
   targetInstance: string;
   sourceProjectKey: string;
@@ -189,7 +194,7 @@ export async function getSyncProfileInfo(profileId: string): Promise<SyncProfile
   const { data } = await dbServer
     .from('sync_profiles')
     .select(`
-      id, name, link_field,
+      id, name, link_field, source_link_field,
       source:source_project_id(name, jira_instance),
       target:target_project_id(name, jira_instance)
     `)
@@ -205,6 +210,7 @@ export async function getSyncProfileInfo(profileId: string): Promise<SyncProfile
     id: data.id,
     name: data.name,
     linkField: data.link_field,
+    sourceLinkField: data.source_link_field || null,
     targetProjectKey: target.name,
     targetInstance: target.jira_instance,
     sourceProjectKey: source.name,
