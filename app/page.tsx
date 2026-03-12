@@ -103,6 +103,7 @@ export default function Home() {
     sourceProjectName: string;
   }
   const [teamSyncTargets, setTeamSyncTargets] = useState<TeamSyncTarget[]>([]);
+  const [isLoadingTargets, setIsLoadingTargets] = useState(true);
 
   // 에픽 목록 (에픽 지정 모드용)
   const [epicList, setEpicList] = useState<JiraIssue[]>([]);
@@ -182,7 +183,7 @@ export default function Home() {
       );
     };
 
-    loadTeamTargets();
+    loadTeamTargets().finally(() => setIsLoadingTargets(false));
   }, [currentUser?.teamId]);
 
   // 에픽 목록 로드 (에픽 지정 선택 시)
@@ -269,7 +270,9 @@ export default function Home() {
   };
 
   const isTicketSyncReady =
-    !!currentUser && (!isSpecificMode || epicOrTicketId.trim() !== '');
+    !!currentUser &&
+    (!isSpecificMode || epicOrTicketId.trim() !== '') &&
+    !isLoadingTargets;
 
   const resetResultArea = () => {
     setSyncLogs([]);
@@ -328,6 +331,11 @@ export default function Home() {
 
       if (syncType === '전체') {
         // DB 기반 전체 동기화: 팀의 모든 대상 프로젝트를 순회
+        if (teamSyncTargets.length === 0) {
+          toast.error('동기화 대상이 아직 로드되지 않았습니다. 잠시 후 다시 시도해주세요.');
+          setIsSyncing(false);
+          return;
+        }
         syncLabel = '전체 (팀 설정 기반)';
         toast.success(`${selectedUser} 담당자 - "${syncLabel}" 동기화를 시작합니다.`);
 
