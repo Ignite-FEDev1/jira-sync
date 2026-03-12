@@ -63,7 +63,7 @@ export class IgniteJiraService extends BaseJiraService {
    * 이슈 필드 업데이트
    */
   async updateIssueFields(issueKey: string, fields: Record<string, unknown>) {
-    return this.client.put(`issue/${issueKey}`, { fields }, { notifyUsers: 'false' });
+    return this.client.put(`issue/${issueKey}`, { fields });
   }
 
   // 추가적인 이그나이트 전용 메서드들을 여기에 정의할 수 있습니다.

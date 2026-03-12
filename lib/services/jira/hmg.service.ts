@@ -40,7 +40,7 @@ export class HMGJiraService extends BaseJiraService {
    * HMG Jira 이슈 업데이트
    */
   async updateIssue(issueKey: string, payload: JiraIssueUpdatePayload) {
-    return this.client.put(`issue/${issueKey}`, payload, { notifyUsers: 'false' });
+    return this.client.put(`issue/${issueKey}`, payload);
   }
 
   /**
