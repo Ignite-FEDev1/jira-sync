@@ -38,6 +38,7 @@ interface User {
   hmgJiraEmail: string;
   hmgJiraApiToken: string;
   hmgUserId: string;
+  hChatApiKey: string;
   teamId: string;
 }
 
@@ -55,6 +56,7 @@ interface FormState {
   hmgJiraEmail: string;
   hmgJiraApiToken: string;
   hmgUserId: string;
+  hChatApiKey: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -65,6 +67,7 @@ const EMPTY_FORM: FormState = {
   hmgJiraEmail: '',
   hmgJiraApiToken: '',
   hmgUserId: '',
+  hChatApiKey: '',
 };
 
 export default function UsersPage() {
@@ -110,6 +113,7 @@ export default function UsersPage() {
           hmgJiraEmail: u.hmg_jira_email || '',
           hmgJiraApiToken: u.hmg_jira_api_token || '',
           hmgUserId: u.hmg_user_id || '',
+          hChatApiKey: u.h_chat_api_key || '',
           teamId: u.team_id || '',
         }))
       );
@@ -247,6 +251,7 @@ export default function UsersPage() {
     hmg_jira_email: form.hmgJiraEmail.trim(),
     hmg_jira_api_token: form.hmgJiraApiToken.trim(),
     hmg_user_id: form.hmgUserId.trim(),
+    h_chat_api_key: form.hChatApiKey.trim(),
   });
 
   const handleAdd = async () => {
@@ -288,6 +293,7 @@ export default function UsersPage() {
       hmgJiraEmail: user.hmgJiraEmail,
       hmgJiraApiToken: user.hmgJiraApiToken,
       hmgUserId: user.hmgUserId,
+      hChatApiKey: user.hChatApiKey,
     });
     // 기존 사용자는 이미 검증된 것으로 간주
     if (user.igniteJiraEmail && user.igniteJiraApiToken) {
@@ -329,10 +335,11 @@ export default function UsersPage() {
       return;
     }
 
-    // setup 모드에서 저장 시 currentUser 갱신 후 홈으로 이동
-    if (setupUserId && editingId === setupUserId && currentUser?.id === setupUserId) {
+    // 현재 로그인한 사용자를 편집한 경우 컨텍스트 갱신
+    if (currentUser && editingId === currentUser.id) {
       setCurrentUser({
         ...currentUser,
+        name: form.name.trim(),
         igniteAccountId: igniteVerified?.accountId || '',
         igniteJiraEmail: form.igniteJiraEmail.trim(),
         igniteJiraApiToken: form.igniteJiraApiToken.trim(),
@@ -340,7 +347,12 @@ export default function UsersPage() {
         hmgJiraEmail: form.hmgJiraEmail.trim(),
         hmgJiraApiToken: form.hmgJiraApiToken.trim(),
         hmgUserId: form.hmgUserId.trim(),
+        hChatApiKey: form.hChatApiKey.trim(),
       });
+    }
+
+    // setup 모드면 홈으로 이동
+    if (setupUserId && editingId === setupUserId) {
       resetForm();
       toast.success('Jira 인증 설정이 완료되었습니다.');
       router.push('/');
@@ -537,6 +549,31 @@ export default function UsersPage() {
         'hmgJiraEmail',
         'hmgJiraApiToken',
       )}
+
+      {/* H Chat API Key */}
+      <div className="space-y-2 pt-1">
+        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+          H Chat API Key
+        </p>
+        <div className="space-y-1">
+          <label className="text-xs font-medium">API Key</label>
+          <Input
+            type="password"
+            placeholder="H Chat API Key를 입력하세요"
+            value={form.hChatApiKey}
+            onChange={(e) => updateForm('hChatApiKey', e.target.value)}
+          />
+        </div>
+        <a
+          href="https://h-chat-platform.autoever.com/docs/ko/get-started/overview"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+        >
+          <ExternalLink className="h-3 w-3" />
+          H Chat API Key 발급 가이드
+        </a>
+      </div>
 
       {/* 저장 버튼 */}
       <div className="flex items-center justify-between border-t pt-3">

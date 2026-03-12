@@ -39,6 +39,7 @@ CREATE TABLE users (
   hmg_jira_email TEXT NOT NULL DEFAULT '',
   hmg_jira_api_token TEXT NOT NULL DEFAULT '',
   hmg_user_id TEXT NOT NULL DEFAULT '',
+  h_chat_api_key TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

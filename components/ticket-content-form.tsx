@@ -11,8 +11,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Copy, Check, Loader2, Sparkles, Plus, X } from 'lucide-react';
+import { Copy, Check, Loader2, Sparkles, Plus, X, AlertTriangle, ExternalLink, Settings } from 'lucide-react';
 import { toast } from 'sonner';
+import { useCurrentUser } from '@/contexts/user-context';
+import Link from 'next/link';
 
 const TICKET_TYPES = [
   { value: 'feature', label: '기능 개발' },
@@ -29,6 +31,9 @@ interface TicketContentFormProps {
 }
 
 export function TicketContentForm({ className }: TicketContentFormProps) {
+  const { currentUser } = useCurrentUser();
+  const hasApiKey = !!currentUser?.hChatApiKey;
+
   // Pre-info options
   const [ticketType, setTicketType] = useState('');
   const [needsDeploy, setNeedsDeploy] = useState(false);
@@ -101,7 +106,7 @@ export function TicketContentForm({ className }: TicketContentFormProps) {
       const response = await fetch('/api/generate/ticket-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: buildPrompt() }),
+        body: JSON.stringify({ prompt: buildPrompt(), apiKey: currentUser?.hChatApiKey }),
       });
 
       const data = await response.json();
@@ -133,6 +138,37 @@ export function TicketContentForm({ className }: TicketContentFormProps) {
 
   return (
     <div className={className}>
+      {/* API Key 미등록 안내 */}
+      {!hasApiKey && (
+        <div className="mb-5 flex items-start gap-3 rounded-lg border border-amber-500/50 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-200 dark:border-amber-500/30">
+          <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-600" />
+          <div className="space-y-1">
+            <p className="font-medium">H Chat API Key가 등록되지 않았습니다</p>
+            <p className="text-amber-800/80 dark:text-amber-300/70">
+              티켓 내용 생성을 사용하려면 H Chat API Key를 먼저 등록해주세요.
+            </p>
+            <div className="flex items-center gap-3 mt-2">
+              <Link
+                href="/settings/users"
+                className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100 underline"
+              >
+                <Settings className="h-3 w-3" />
+                사용자 설정에서 등록
+              </Link>
+              <a
+                href="https://h-chat-platform.autoever.com/docs/ko/get-started/overview"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100 underline"
+              >
+                <ExternalLink className="h-3 w-3" />
+                API Key 발급 가이드
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Pre-info options */}
       <div className="space-y-4">
         <div className="space-y-2">
@@ -249,7 +285,7 @@ export function TicketContentForm({ className }: TicketContentFormProps) {
       {/* Generate button */}
       <Button
         onClick={handleGenerate}
-        disabled={isLoading || !canGenerate}
+        disabled={isLoading || !canGenerate || !hasApiKey}
         className="w-full mt-5"
       >
         {isLoading ? (

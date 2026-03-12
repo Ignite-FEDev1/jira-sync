@@ -64,18 +64,17 @@ const SYSTEM_PROMPT = `당신은 Jira 티켓 내용을 생성하는 전문가입
 - 입력이 부족한 섹션은 적절히 추론하되, 확실하지 않은 내용은 [확인 필요]로 표시`;
 
 export async function POST(request: NextRequest) {
-  const apiKey = process.env.H_CHAT_API_KEY;
   const model = process.env.H_CHAT_API_MODEL || 'claude-sonnet-4-6';
 
-  if (!apiKey) {
-    return NextResponse.json(
-      { success: false, error: 'H_CHAT_API_KEY가 설정되지 않았습니다.' },
-      { status: 500 }
-    );
-  }
-
   try {
-    const { prompt } = await request.json();
+    const { prompt, apiKey } = await request.json();
+
+    if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length === 0) {
+      return NextResponse.json(
+        { success: false, error: 'H Chat API Key가 제공되지 않았습니다. 사용자 설정에서 키를 등록해주세요.' },
+        { status: 400 }
+      );
+    }
 
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
       return NextResponse.json(
@@ -88,7 +87,7 @@ export async function POST(request: NextRequest) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: apiKey,
+        Authorization: apiKey.trim(),
       },
       body: JSON.stringify({
         model,

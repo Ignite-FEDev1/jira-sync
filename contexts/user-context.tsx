@@ -21,6 +21,7 @@ export interface AppUser {
   hmgJiraEmail: string;
   hmgJiraApiToken: string;
   hmgUserId: string;
+  hChatApiKey: string;
 }
 
 interface UserContextValue {
