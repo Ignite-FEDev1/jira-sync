@@ -108,6 +108,9 @@ export async function findTransitionPathFromDb(
 
 /**
  * DB 기반 상태 동기화 통합 함수
+ * DB 워크플로우는 BFS 경로 탐색에만 사용하고,
+ * 실제 transition 실행 시에는 Jira API로 available transitions를 조회하여
+ * 목표 상태에 맞는 transition을 찾아 실행 (이슈 타입별 워크플로우 차이 대응)
  */
 export async function syncStatusWithPathFromDb(
   profileId: string,
@@ -115,7 +118,8 @@ export async function syncStatusWithPathFromDb(
   fehgStatusId: string,
   currentTargetStatusId: string,
   executeTransition: (issueKey: string, transitionId: string) => Promise<{ success: boolean; error?: string }>,
-  logger?: { info: (msg: string) => void; error: (msg: string) => void; success: (msg: string) => void }
+  logger?: { info: (msg: string) => void; error: (msg: string) => void; success: (msg: string) => void },
+  getAvailableTransitions?: (issueKey: string) => Promise<Array<{ id: string; to: { id: string; name: string } }>>
 ): Promise<TransitionResult> {
   const mapping = await getDbStatusMapping(profileId);
   const targetStatusId = mapping[fehgStatusId] || null;
@@ -131,6 +135,19 @@ export async function syncStatusWithPathFromDb(
     return { success: true, stepsExecuted: 0, finalStatusId: targetStatusId };
   }
 
+  // getAvailableTransitions가 제공된 경우: 런타임 BFS (Jira API 기반)
+  if (getAvailableTransitions) {
+    return await runtimeBfsTransition(
+      issueKey,
+      currentTargetStatusId,
+      targetStatusId,
+      executeTransition,
+      getAvailableTransitions,
+      logger
+    );
+  }
+
+  // 폴백: DB 정적 워크플로우 기반 BFS
   const path = await findTransitionPathFromDb(profileId, currentTargetStatusId, targetStatusId);
 
   if (!path) {
@@ -152,6 +169,72 @@ export async function syncStatusWithPathFromDb(
   }
 
   return result;
+}
+
+/**
+ * 런타임 상태 전이: Jira API에서 available transitions를 조회하며
+ * 타겟 상태까지 순차 전이 실행 (visited 추적으로 루프 방지)
+ */
+async function runtimeBfsTransition(
+  issueKey: string,
+  currentStatusId: string,
+  targetStatusId: string,
+  executeTransition: (issueKey: string, transitionId: string) => Promise<{ success: boolean; error?: string }>,
+  getAvailableTransitions: (issueKey: string) => Promise<Array<{ id: string; to: { id: string; name: string } }>>,
+  logger?: { info: (msg: string) => void; error: (msg: string) => void; success: (msg: string) => void },
+  maxSteps: number = 10
+): Promise<TransitionResult> {
+  let stepsExecuted = 0;
+  let currentStatus = currentStatusId;
+  const visited = new Set<string>([currentStatusId]);
+
+  for (let step = 0; step < maxSteps; step++) {
+    const transitions = await getAvailableTransitions(issueKey);
+
+    // 1. 직접 타겟으로 가는 transition 찾기
+    const directTransition = transitions.find((t) => t.to.id === targetStatusId);
+    if (directTransition) {
+      logger?.info(
+        `${issueKey}: 상태 전이 실행 (${currentStatus} → ${targetStatusId} "${directTransition.to.name}", transition=${directTransition.id})`
+      );
+      const result = await executeTransition(issueKey, directTransition.id);
+      if (result.success) {
+        stepsExecuted++;
+        logger?.success(`${issueKey}: 상태 동기화 완료 (${stepsExecuted}단계 실행)`);
+        return { success: true, stepsExecuted, finalStatusId: targetStatusId };
+      } else {
+        logger?.error(`${issueKey}: 상태 전이 실패 - ${result.error}`);
+        return { success: false, stepsExecuted, error: result.error };
+      }
+    }
+
+    // 2. 방문하지 않은 중간 상태로 이동
+    const unvisitedTransitions = transitions.filter((t) => !visited.has(t.to.id));
+    if (unvisitedTransitions.length === 0) {
+      const error = `${currentStatus}: 타겟(${targetStatusId})으로 갈 수 있는 경로 없음 (방문 가능한 상태 소진)`;
+      logger?.error(`${issueKey}: ${error}`);
+      return { success: false, stepsExecuted, error };
+    }
+
+    const nextTransition = unvisitedTransitions[0];
+    logger?.info(
+      `${issueKey}: 중간 상태 전이 (${currentStatus} → ${nextTransition.to.id} "${nextTransition.to.name}", transition=${nextTransition.id})`
+    );
+    const result = await executeTransition(issueKey, nextTransition.id);
+    if (!result.success) {
+      logger?.error(`${issueKey}: 중간 상태 전이 실패 - ${result.error}`);
+      return { success: false, stepsExecuted, error: result.error };
+    }
+    stepsExecuted++;
+    currentStatus = nextTransition.to.id;
+    visited.add(currentStatus);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  const error = `최대 전이 단계(${maxSteps}) 초과`;
+  logger?.error(`${issueKey}: ${error}`);
+  return { success: false, stepsExecuted, error };
 }
 
 interface TransitionPath {

@@ -67,20 +67,27 @@ export function UserProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // localStorage에서 복원 후 API에서 최신 정보로 갱신
+  // localStorage에서 복원 후 API에서 최신 정보로 갱신 (완료 후 렌더)
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        setCurrentUserState(JSON.parse(stored));
+    const init = async () => {
+      // 1. localStorage에서 즉시 복원
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          setCurrentUserState(JSON.parse(stored));
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
-    }
-    setLoaded(true);
 
-    // 항상 API에서 최신 데이터로 갱신
-    refreshUser();
+      // 2. API에서 최신 데이터로 갱신 (완료될 때까지 대기)
+      await refreshUser();
+
+      // 3. 모든 데이터 준비 후 렌더 허용
+      setLoaded(true);
+    };
+
+    init();
   }, [refreshUser]);
 
   const setCurrentUser = (user: AppUser | null) => {

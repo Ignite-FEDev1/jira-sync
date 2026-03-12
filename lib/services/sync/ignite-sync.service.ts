@@ -179,6 +179,14 @@ export class IgniteSyncService {
         return await jira.ignite.updateIssueStatus(issueKey, transitionId);
       };
 
+      const getTransitionsFn = async (issueKey: string) => {
+        const res = await jira.ignite.getIssueTransitions(issueKey);
+        if (res.success && res.data) {
+          return (res.data as { transitions: Array<{ id: string; to: { id: string; name: string } }> }).transitions || [];
+        }
+        return [];
+      };
+
       const result = syncProfileId
         ? await syncStatusWithPathFromDb(
             syncProfileId,
@@ -186,7 +194,8 @@ export class IgniteSyncService {
             fehgStatusId,
             currentStatusId,
             executeTransitionFn,
-            this.logger
+            this.logger,
+            getTransitionsFn
           )
         : await syncStatusWithPath(
             'ignite',

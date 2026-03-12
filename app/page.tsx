@@ -28,7 +28,7 @@ import { toast } from 'sonner';
 import {
   JIRA_ENDPOINTS,
 } from '@/lib/constants/jira';
-import { useCurrentUser } from '@/contexts/user-context';
+import { useCurrentUser, type AppUser } from '@/contexts/user-context';
 import {
   SyncOrchestrator,
   SyncLog,
@@ -71,7 +71,7 @@ function emphasizeLogMessage(message: string): ReactNode[] {
 }
 
 export default function Home() {
-  const { currentUser } = useCurrentUser();
+  const { currentUser, setCurrentUser } = useCurrentUser();
   const router = useRouter();
 
   // 사용자 미선택 시 선택 페이지로 이동
@@ -301,6 +301,25 @@ export default function Home() {
     setIsSyncing(true);
 
     try {
+      // 최신 사용자 정보에서 소스 프로젝트 키 조회
+      let freshSourceProject = sourceProject;
+      try {
+        const usersRes = await fetch('/api/users');
+        const usersJson = await usersRes.json();
+        if (usersJson.success && Array.isArray(usersJson.data)) {
+          const freshUser = usersJson.data.find((u: AppUser) => u.id === currentUser.id);
+          if (freshUser?.sourceProject) {
+            freshSourceProject = freshUser.sourceProject;
+            // currentUser도 갱신
+            if (freshUser.sourceProject !== currentUser.sourceProject) {
+              setCurrentUser(freshUser);
+            }
+          }
+        }
+      } catch {
+        // API 실패 시 기존 값 사용
+      }
+
       // 대상 프로젝트 결정
       let syncLabel = syncType;
       const orchestrator = new SyncOrchestrator((log) => {
@@ -336,7 +355,7 @@ export default function Home() {
             teamUsers,
             targetProjects: [target.projectName as SyncTargetProject],
             syncProfileId: target.syncProfileId,
-            sourceProjectKey: sourceProject,
+            sourceProjectKey: freshSourceProject,
             chunkSize: 15,
           });
 
@@ -386,7 +405,7 @@ export default function Home() {
       // 동기화 시작 메시지
       let message = `${selectedUser} 담당자 - "${syncLabel}" 동기화를 시작합니다.`;
       if (isSpecificMode) {
-        const ticketKey = `${sourceProject}-${epicOrTicketId}`;
+        const ticketKey = `${freshSourceProject}-${epicOrTicketId}`;
         message = `${selectedUser} 담당자 - ${ticketKey} 동기화를 시작합니다.`;
       }
       toast.success(message);
@@ -397,8 +416,10 @@ export default function Home() {
         teamUsers,
         targetProjects,
         syncProfileId,
-        sourceProjectKey: sourceProject,
-        ticketId: isSpecificMode ? epicOrTicketId : undefined,
+        sourceProjectKey: freshSourceProject,
+        epicId: syncType === '에픽 지정' ? epicOrTicketId : undefined,
+        ticketId: syncType === '티켓 지정' ? epicOrTicketId : undefined,
+        syncAllInEpic: syncType === '에픽 지정' ? true : undefined,
         chunkSize: 15,
       });
 

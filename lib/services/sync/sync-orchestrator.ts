@@ -21,6 +21,7 @@ export class SyncOrchestrator {
   private logger: SyncLogger;
   private igniteSyncService: IgniteSyncService;
   private hmgSyncService: HMGSyncService;
+  private _sourceProjectKey: string | null = null;
 
   constructor(onLog?: (log: SyncLog) => void) {
     this.logger = new SyncLogger(onLog);
@@ -41,7 +42,10 @@ export class SyncOrchestrator {
       clearDbMappingCache();
       clearTransitionCache();
 
-      this.logger.info('동기화 시작');
+      // 소스 프로젝트 키 결정 (execute 시작 시 1회, 이후 모든 내부 메서드에서 재사용)
+      this._sourceProjectKey = options.sourceProjectKey || await this.resolveSourceProjectKey(options.syncProfileId);
+
+      this.logger.info(`동기화 시작 (소스 프로젝트: ${this._sourceProjectKey})`);
 
       // AUTOWAY 동기화 프로필 조회 (DB 기반)
       const autowayProfile = await this.findAutowayProfile();
@@ -160,8 +164,8 @@ export class SyncOrchestrator {
    * DB sync_field_mappings에서 source_field 목록을 가져와 Jira API 요청 시 사용
    */
   private async fetchFehgTickets(options: SyncOptions): Promise<JiraIssue[]> {
-    // 소스 프로젝트 키 결정: 명시적 전달 > DB 프로필 > 폴백
-    const sourceProjectKey = options.sourceProjectKey || await this.resolveSourceProjectKey(options.syncProfileId);
+    // 소스 프로젝트 키: execute()에서 이미 결정된 값 사용
+    const sourceProjectKey = this.getSourceProjectKey();
 
     // DB 매핑 기반 필드 목록 결정
     const fields = await this.resolveSourceFields(options.syncProfileId);
@@ -265,9 +269,17 @@ export class SyncOrchestrator {
   }
 
   /**
+   * 소스 프로젝트 키 반환 (execute에서 이미 결정된 값 우선)
+   */
+  private getSourceProjectKey(): string {
+    return this._sourceProjectKey || 'FEHG';
+  }
+
+  /**
    * 소스 프로젝트 키 결정 (DB 또는 기본값)
    */
   private async resolveSourceProjectKey(syncProfileId?: string): Promise<string> {
+    if (this._sourceProjectKey) return this._sourceProjectKey;
     if (syncProfileId) {
       const profileInfo = await getSyncProfileInfo(syncProfileId);
       if (profileInfo) return profileInfo.sourceProjectKey;
@@ -378,12 +390,14 @@ export class SyncOrchestrator {
     teamUsers?: SyncOptions['teamUsers'],
     syncProfileId?: string
   ): Promise<SyncResult[]> {
-    // AUTOWAY인 경우 DB 프로필 자동 해석
+    // syncProfileId가 없으면 소스/타겟 프로젝트 기준으로 DB에서 자동 검색
     let effectiveProfileId = syncProfileId;
-    if (targetProject === 'AUTOWAY' && !effectiveProfileId) {
-      const autowayProf = await this.findAutowayProfile();
-      if (autowayProf) {
-        effectiveProfileId = autowayProf.id;
+    if (!effectiveProfileId) {
+      if (targetProject === 'AUTOWAY') {
+        const autowayProf = await this.findAutowayProfile();
+        if (autowayProf) effectiveProfileId = autowayProf.id;
+      } else {
+        effectiveProfileId = await this.findProfileForTarget(targetProject);
       }
     }
 
@@ -468,7 +482,7 @@ export class SyncOrchestrator {
   private async determineTargetProjectsForTicket(
     ticketId: string
   ): Promise<Array<'KQ' | 'HDD' | 'HB' | 'AUTOWAY'>> {
-    const srcKey = await this.resolveSourceProjectKey();
+    const srcKey = this.getSourceProjectKey();
     try {
       // 티켓 조회
       this.logger.info(`${srcKey}-${ticketId}: 티켓 정보 조회 중...`);
@@ -566,7 +580,7 @@ export class SyncOrchestrator {
   private async determineTargetProjectsForEpic(
     epicId: string
   ): Promise<Array<'KQ' | 'HDD' | 'HB' | 'AUTOWAY'>> {
-    const srcKey = await this.resolveSourceProjectKey();
+    const srcKey = this.getSourceProjectKey();
     try {
       // 1. 에픽 ID 숫자 추출
       const epicNumber = parseInt(epicId, 10);
@@ -642,6 +656,38 @@ export class SyncOrchestrator {
       );
       return ['KQ', 'HB', 'HDD'];
     }
+  }
+
+  /**
+   * 소스/타겟 프로젝트 기준으로 DB에서 sync_profile 검색
+   */
+  private async findProfileForTarget(targetProjectKey: string): Promise<string | undefined> {
+    const sourceKey = this.getSourceProjectKey();
+    // projects 테이블에서 이름으로 소스/타겟 프로젝트 ID 조회
+    const { data: projects } = await dbServer
+      .from('projects')
+      .select('id, name')
+      .in('name', [sourceKey, targetProjectKey]);
+
+    if (!projects || projects.length < 2) return undefined;
+
+    const sourceProjectId = projects.find((p) => p.name === sourceKey)?.id;
+    const targetProjectId = projects.find((p) => p.name === targetProjectKey)?.id;
+    if (!sourceProjectId || !targetProjectId) return undefined;
+
+    const { data: profile } = await dbServer
+      .from('sync_profiles')
+      .select('id')
+      .eq('source_project_id', sourceProjectId)
+      .eq('target_project_id', targetProjectId)
+      .limit(1)
+      .single();
+
+    if (profile) {
+      this.logger.info(`${sourceKey} → ${targetProjectKey}: DB 프로필 자동 발견 (${profile.id})`);
+      return profile.id;
+    }
+    return undefined;
   }
 
   /**
