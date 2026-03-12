@@ -26,6 +26,8 @@ import {
   Copy,
   RefreshCw,
   FileText,
+  Sparkles,
+  ChevronDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -35,6 +37,7 @@ import { useCurrentUser } from '@/contexts/user-context';
 import { jira } from '@/lib/services/jira';
 import { JiraIssue } from '@/lib/types/jira';
 import { SyncOrchestrator } from '@/lib/services/sync';
+import { TicketContentForm } from '@/components/ticket-content-form';
 
 export default function CreateTicketPage() {
   const { currentUser } = useCurrentUser();
@@ -59,6 +62,9 @@ export default function CreateTicketPage() {
 
   // 동기화 상태
   const [isSyncingTicket, setIsSyncingTicket] = useState(false);
+
+  // AI 설명 생성 토글
+  const [showAIForm, setShowAIForm] = useState(false);
 
   // 소속팀 기준 프로젝트 키
   const sourceProject = currentUser?.sourceProject || 'FEHG';
@@ -506,6 +512,28 @@ export default function CreateTicketPage() {
                       onChange={(e) => setEndDate(e.target.value)}
                     />
                   </div>
+                </div>
+
+                {/* AI 설명 생성 (접이식) */}
+                <div className="pt-4 border-t">
+                  <button
+                    type="button"
+                    onClick={() => setShowAIForm(!showAIForm)}
+                    className="flex w-full items-center justify-between rounded-md border px-4 py-3 text-sm font-medium hover:bg-accent transition-colors"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4" />
+                      AI로 티켓 설명 생성(Beta)
+                    </span>
+                    <ChevronDown
+                      className={`h-4 w-4 transition-transform ${showAIForm ? 'rotate-180' : ''}`}
+                    />
+                  </button>
+                  {showAIForm && (
+                    <div className="mt-4 rounded-md border p-4 bg-muted/30">
+                      <TicketContentForm />
+                    </div>
+                  )}
                 </div>
 
                 {/* 생성 버튼 */}

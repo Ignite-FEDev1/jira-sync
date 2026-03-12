@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { RefreshCw, User, Plus, ExternalLink, Settings, LogOut } from 'lucide-react';
+import { RefreshCw, User, Plus, ExternalLink, Settings, LogOut, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   JIRA_ENDPOINTS,
@@ -621,18 +621,24 @@ export default function Home() {
           </div>
           <div className="flex gap-2">
             <Link href="/deployment">
-              <Button variant="outline" className="relative">
+              <Button variant="outline">
                 <ExternalLink className="mr-2 h-4 w-4" />
                 배포 대장
-                <span className="absolute -top-1 -right-1 inline-flex rounded-full h-5 w-5 bg-red-500 items-center justify-center">
-                  <span className="text-[9px] font-bold text-white">N</span>
-                </span>
               </Button>
             </Link>
             <Link href="/templates">
               <Button variant="outline">
                 <ExternalLink className="mr-2 h-4 w-4" />
                 배포 템플릿
+              </Button>
+            </Link>
+            <Link href="/generate-ticket">
+              <Button variant="outline" className="relative">
+                <Sparkles className="mr-2 h-4 w-4" />
+                티켓 내용 생성(Beta)
+                <span className="absolute -top-1 -right-1 inline-flex rounded-full h-5 w-5 bg-red-500 items-center justify-center">
+                  <span className="text-[9px] font-bold text-white">N</span>
+                </span>
               </Button>
             </Link>
             {/* @deprecated Flow Chart, 에픽 생성 - 관리자 페이지로 이전 예정 */}
@@ -846,7 +852,7 @@ export default function Home() {
             </CardHeader>
             <CardContent className="flex-1 p-0 overflow-hidden">
               <ScrollArea ref={resultScrollRef} className="h-full px-6 pb-6">
-                <div className="space-y-3 font-mono text-sm leading-relaxed">
+                <div className="space-y-3 font-mono text-sm leading-relaxed break-all">
                   {/* @deprecated 정적 분석 결과 - 관리자 페이지로 이전 예정
                   {Object.keys(staticAnalysisResults).length > 0 && (
                     <>
@@ -1122,109 +1128,81 @@ export default function Home() {
                         </div>
                       ))}
 
-                      {/* 동기화 완료 후 결과 링크 */}
-                      {syncSummary && syncSummary.results.length > 0 && (
-                        <>
-                          <div className="text-muted-foreground opacity-50 my-4">
-                            ━━━━━━━━━━━━━━━━━━━━━━━━
-                          </div>
-                          <div className="font-semibold text-foreground mb-2">
-                            📊 동기화 결과
-                          </div>
-                          {/* 통계 요약 */}
-                          <div className="mb-4 p-4 bg-muted/30 rounded-lg border border-muted space-y-2 font-sans text-sm">
-                            <div className="flex items-center justify-between">
-                              <span className="text-muted-foreground">
-                                필드 동기화
-                              </span>
-                              <span className="font-bold text-base">
-                                {syncSummary.totalUpdated}개
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-muted-foreground">
-                                신규 생성
-                              </span>
-                              <span className="font-bold text-base text-green-600">
-                                {syncSummary.totalCreated}개
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-muted-foreground">
-                                동기화 실패
-                              </span>
-                              <span className="font-bold text-base text-red-600">
-                                {syncSummary.totalFailed}개
-                              </span>
-                            </div>
-                          </div>
-                          <div className="text-sm text-muted-foreground mb-2 font-semibold">
-                            상세 결과
-                          </div>
-                          <div className="space-y-1">
-                            {syncSummary.results.map((result, idx) => (
-                              <div
-                                key={idx}
-                                className="flex items-center gap-2"
-                              >
-                                <span
-                                  className={
-                                    result.success
-                                      ? 'text-green-600'
-                                      : 'text-red-600'
-                                  }
-                                >
-                                  {result.success ? '✓' : '✗'}
-                                </span>
-                                <a
-                                  href={`${JIRA_ENDPOINTS.IGNITE}/browse/${result.fehgKey}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 hover:underline inline-flex items-center gap-1"
-                                >
-                                  {result.fehgKey}
-                                  <ExternalLink className="h-3 w-3" />
-                                </a>
-                                <span className="text-muted-foreground">→</span>
-                                {result.targetKey ? (
-                                  <>
-                                    <a
-                                      href={`${
-                                        result.targetProject === 'AUTOWAY'
-                                          ? JIRA_ENDPOINTS.HMG
-                                          : JIRA_ENDPOINTS.IGNITE
-                                      }/browse/${result.targetKey}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-blue-600 hover:underline inline-flex items-center gap-1"
-                                    >
-                                      {result.targetKey}
-                                      <ExternalLink className="h-3 w-3" />
-                                    </a>
-                                    {result.isNewlyCreated && (
-                                      <span className="text-xs font-semibold text-green-600 bg-green-50 px-2 py-0.5 rounded">
-                                        신규
-                                      </span>
-                                    )}
-                                  </>
-                                ) : (
-                                  <span className="text-red-600">
-                                    생성 실패
-                                  </span>
-                                )}
-                                {result.error && (
-                                  <span className="text-xs text-red-500">
-                                    ({result.error})
-                                  </span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </>
-                      )}
                     </>
                   )}
                 </div>
+
+                {/* 동기화 완료 후 결과 박스 */}
+                {syncSummary && syncSummary.results.length > 0 && (
+                  <div className="mt-4 px-1 text-sm font-sans">
+                    <div className="font-semibold text-foreground mb-2">
+                      📊 동기화 결과
+                    </div>
+                    <div className="mb-4 p-4 bg-muted/30 rounded-lg border border-muted space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">필드 동기화</span>
+                        <span className="font-bold text-base">{syncSummary.totalUpdated}개</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">신규 생성</span>
+                        <span className="font-bold text-base text-green-600">{syncSummary.totalCreated}개</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">동기화 실패</span>
+                        <span className="font-bold text-base text-red-600">{syncSummary.totalFailed}개</span>
+                      </div>
+                    </div>
+                    <div className="text-muted-foreground mb-2 font-semibold">
+                      상세 결과
+                    </div>
+                    <div className="space-y-1">
+                      {syncSummary.results.map((result, idx) => (
+                        <div key={idx} className="flex items-center gap-2">
+                          <span className={result.success ? 'text-green-600' : 'text-red-600'}>
+                            {result.success ? '✓' : '✗'}
+                          </span>
+                          <a
+                            href={`${JIRA_ENDPOINTS.IGNITE}/browse/${result.fehgKey}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:underline inline-flex items-center gap-1"
+                          >
+                            {result.fehgKey}
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                          <span className="text-muted-foreground">→</span>
+                          {result.targetKey ? (
+                            <>
+                              <a
+                                href={`${
+                                  result.targetProject === 'AUTOWAY'
+                                    ? JIRA_ENDPOINTS.HMG
+                                    : JIRA_ENDPOINTS.IGNITE
+                                }/browse/${result.targetKey}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-blue-600 hover:underline inline-flex items-center gap-1"
+                              >
+                                {result.targetKey}
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                              {result.isNewlyCreated && (
+                                <span className="text-xs font-semibold text-green-600 bg-green-50 px-2 py-0.5 rounded">
+                                  신규
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-red-600">생성 실패</span>
+                          )}
+                          {result.error && (
+                            <span className="text-xs text-red-500">({result.error})</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </ScrollArea>
             </CardContent>
           </Card>
