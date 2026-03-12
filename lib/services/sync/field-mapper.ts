@@ -5,7 +5,6 @@ import {
   STATUS_MAPPING,
   IGNITE_CUSTOM_FIELDS,
   HMG_CUSTOM_FIELDS,
-  JIRA_ENDPOINTS,
 } from '@/lib/constants/jira';
 import { SyncTargetProject, SyncOptions } from './types';
 import { mapSprintToTarget } from './sprint-mapper';
@@ -80,39 +79,10 @@ export function mapFieldsForAutoway(
   // summary (prefix 없이 그대로)
   fields.summary = fehgTicket.fields.summary;
 
-  // description (Atlassian Document Format)
-  const fehgUrl = `${JIRA_ENDPOINTS.IGNITE}/browse/${fehgTicket.key}`;
-  fields.description = {
-    type: 'doc',
-    version: 1,
-    content: [
-      {
-        type: 'paragraph',
-        content: [
-          {
-            type: 'text',
-            text: '자동 생성된 FEHG 티켓 연동 (원본: ',
-          },
-          {
-            type: 'text',
-            text: fehgTicket.key,
-            marks: [
-              {
-                type: 'link',
-                attrs: {
-                  href: fehgUrl,
-                },
-              },
-            ],
-          },
-          {
-            type: 'text',
-            text: ')',
-          },
-        ],
-      },
-    ],
-  };
+  // description (소스 티켓 내용 그대로 복사)
+  if (fehgFields.description) {
+    fields.description = fehgFields.description;
+  }
 
   // 종료일 매핑 (Gantt End Date)
   if (fehgFields.duedate) {
