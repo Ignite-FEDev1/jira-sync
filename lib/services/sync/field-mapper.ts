@@ -179,26 +179,29 @@ export function isValidAutowayLink(url: string | null | undefined): boolean {
 }
 
 /**
- * ADF에서 미디어(첨부파일/이미지) 노드 제거
- * mediaGroup, mediaSingle, media 타입 노드를 재귀적으로 필터링
+ * ADF에서 HMG Jira와 호환되지 않는 노드 제거
+ * - 미디어 노드 (mediaGroup, mediaSingle, media)
+ * - 빈 content 배열을 가진 노드 (HMG Jira INVALID_INPUT 유발)
+ *
+ * 순서: 먼저 자식을 재귀 정리 → 그 결과로 빈 노드가 되면 제거
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function stripAdfMediaNodes(adf: any): any {
   if (!adf || typeof adf !== 'object') return adf;
   if (!adf.content || !Array.isArray(adf.content)) return adf;
 
-  return {
-    ...adf,
-    content: adf.content
-      .filter((node: { type?: string }) =>
-        node.type !== 'mediaGroup' &&
-        node.type !== 'mediaSingle' &&
-        node.type !== 'media'
-      )
-      .map((node: { content?: unknown[] }) =>
-        node.content ? stripAdfMediaNodes(node) : node
-      ),
-  };
+  const REMOVE_TYPES = ['mediaGroup', 'mediaSingle', 'media'];
+
+  const cleaned = adf.content
+    .filter((node: { type?: string }) => !REMOVE_TYPES.includes(node.type || ''))
+    .map((node: { content?: unknown[] }) =>
+      node.content ? stripAdfMediaNodes(node) : node
+    )
+    .filter((node: { content?: unknown[] }) =>
+      !(Array.isArray(node.content) && node.content.length === 0)
+    );
+
+  return { ...adf, content: cleaned };
 }
 
 /**

@@ -6,10 +6,15 @@
 import { dbServer } from '@/lib/db';
 
 export interface DbUser {
+  id: string;
   name: string;
   igniteAccountId: string;
   hmgAccountId: string;
   hmgUserId: string;
+  igniteJiraEmail: string;
+  igniteJiraApiToken: string;
+  hmgJiraEmail: string;
+  hmgJiraApiToken: string;
 }
 
 /**
@@ -18,17 +23,22 @@ export interface DbUser {
 export async function getTeamUsers(teamId: string): Promise<DbUser[]> {
   const { data } = await dbServer
     .from('users')
-    .select('name, ignite_account_id, hmg_account_id, hmg_user_id')
+    .select('id, name, ignite_account_id, hmg_account_id, hmg_user_id, ignite_jira_email, ignite_jira_api_token, hmg_jira_email, hmg_jira_api_token')
     .eq('team_id', teamId)
     .order('name');
 
   if (!data) return [];
 
   return data.map((u) => ({
+    id: u.id,
     name: u.name,
     igniteAccountId: u.ignite_account_id || '',
     hmgAccountId: u.hmg_account_id || '',
     hmgUserId: u.hmg_user_id || '',
+    igniteJiraEmail: u.ignite_jira_email || '',
+    igniteJiraApiToken: u.ignite_jira_api_token || '',
+    hmgJiraEmail: u.hmg_jira_email || '',
+    hmgJiraApiToken: u.hmg_jira_api_token || '',
   }));
 }
 
@@ -38,16 +48,21 @@ export async function getTeamUsers(teamId: string): Promise<DbUser[]> {
 export async function getAllUsers(): Promise<DbUser[]> {
   const { data } = await dbServer
     .from('users')
-    .select('name, ignite_account_id, hmg_account_id, hmg_user_id')
+    .select('id, name, ignite_account_id, hmg_account_id, hmg_user_id, ignite_jira_email, ignite_jira_api_token, hmg_jira_email, hmg_jira_api_token')
     .order('name');
 
   if (!data) return [];
 
   return data.map((u) => ({
+    id: u.id,
     name: u.name,
     igniteAccountId: u.ignite_account_id || '',
     hmgAccountId: u.hmg_account_id || '',
     hmgUserId: u.hmg_user_id || '',
+    igniteJiraEmail: u.ignite_jira_email || '',
+    igniteJiraApiToken: u.ignite_jira_api_token || '',
+    hmgJiraEmail: u.hmg_jira_email || '',
+    hmgJiraApiToken: u.hmg_jira_api_token || '',
   }));
 }
 

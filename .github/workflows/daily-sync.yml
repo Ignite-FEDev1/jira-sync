@@ -27,11 +27,8 @@ jobs:
       - name: Run daily sync
         env:
           BATCH_MODE: 'true'
-          IGNITE_JIRA_EMAIL: ${{ secrets.IGNITE_JIRA_EMAIL }}
-          IGNITE_JIRA_API_TOKEN: ${{ secrets.IGNITE_JIRA_API_TOKEN }}
-          HMG_JIRA_EMAIL: ${{ secrets.HMG_JIRA_EMAIL }}
-          HMG_JIRA_API_TOKEN: ${{ secrets.HMG_JIRA_API_TOKEN }}
           NEXT_PUBLIC_DB_URL: ${{ secrets.NEXT_PUBLIC_DB_URL }}
           NEXT_PUBLIC_DB_ANON_KEY: ${{ secrets.NEXT_PUBLIC_DB_ANON_KEY }}
           DB_SERVICE_ROLE_KEY: ${{ secrets.DB_SERVICE_ROLE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
         run: npx tsx scripts/daily-sync.ts
