@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { jiraFetch } from '@/lib/jira-fetch';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Card,
   CardContent,
@@ -54,6 +55,7 @@ export default function CreateTicketPage() {
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
   const [relatedLink, setRelatedLink] = useState<string>('');
+  const [description, setDescription] = useState<string>('');
 
   // 생성 상태
   const [isCreating, setIsCreating] = useState(false);
@@ -159,21 +161,39 @@ export default function CreateTicketPage() {
           originalEstimate: estimatedTime.trim(),
         };
       }
-      if (relatedLink.trim()) {
+      const hasDescription = description.trim().length > 0;
+      const hasRelatedLink = relatedLink.trim().length > 0;
+      if (hasDescription || hasRelatedLink) {
+        const adfContent: Array<Record<string, unknown>> = [];
+
+        if (hasDescription) {
+          const lines = description.trim().split('\n');
+          for (const line of lines) {
+            adfContent.push({
+              type: 'paragraph',
+              content: line
+                ? [{ type: 'text', text: line }]
+                : [],
+            });
+          }
+        }
+
+        if (hasRelatedLink) {
+          if (hasDescription) {
+            adfContent.push({ type: 'paragraph', content: [] });
+          }
+          adfContent.push({
+            type: 'paragraph',
+            content: [
+              { type: 'text', text: `관련 업무: ${relatedLink.trim()}` },
+            ],
+          });
+        }
+
         fields.description = {
           type: 'doc',
           version: 1,
-          content: [
-            {
-              type: 'paragraph',
-              content: [
-                {
-                  type: 'text',
-                  text: `관련 업무: ${relatedLink.trim()}`,
-                },
-              ],
-            },
-          ],
+          content: adfContent,
         };
       }
 
@@ -201,6 +221,7 @@ export default function CreateTicketPage() {
         setStartDate('');
         setEndDate('');
         setRelatedLink('');
+        setDescription('');
       } else {
         toast.error(result.error || '티켓 생성에 실패했습니다.');
       }
@@ -469,6 +490,20 @@ export default function CreateTicketPage() {
                   <p className="text-xs text-muted-foreground">
                     업무 요청이 온 슬랙/두레이 링크를 입력하면 티켓 설명에
                     자동으로 추가됩니다
+                  </p>
+                </div>
+
+                {/* 티켓 설명 */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">티켓 설명</label>
+                  <Textarea
+                    placeholder="티켓 설명 (선택사항)"
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    rows={4}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    관련 업무 링크와 함께 입력하면 설명 아래에 링크가 함께 추가됩니다
                   </p>
                 </div>
 
