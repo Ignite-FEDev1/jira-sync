@@ -43,6 +43,19 @@ export async function getTeamUsers(teamId: string): Promise<DbUser[]> {
 }
 
 /**
+ * 팀 이름으로 팀 ID 조회
+ */
+export async function getTeamIdByName(teamName: string): Promise<string | null> {
+  const { data } = await dbServer
+    .from('teams')
+    .select('id')
+    .eq('name', teamName)
+    .single();
+
+  return data?.id ?? null;
+}
+
+/**
  * 전체 사용자 목록 조회 (배치용)
  */
 export async function getAllUsers(): Promise<DbUser[]> {

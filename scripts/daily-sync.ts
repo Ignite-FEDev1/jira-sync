@@ -15,7 +15,7 @@ process.env.BATCH_MODE = 'true';
 
 import { SyncOrchestrator } from '@/lib/services/sync/sync-orchestrator';
 import { SyncSummary } from '@/lib/services/sync/types';
-import { getAllUsers } from '@/lib/services/user-lookup';
+import { getTeamIdByName, getTeamUsers } from '@/lib/services/user-lookup';
 import { sendSyncReportEmail } from '@/lib/services/email/resend-client';
 
 interface UserSyncResult {
@@ -42,7 +42,14 @@ async function main() {
     process.exit(1);
   }
 
-  const users = await getAllUsers();
+  const teamName = process.env.SYNC_TEAM_NAME || 'FE1';
+  const teamId = await getTeamIdByName(teamName);
+  if (!teamId) {
+    console.error(`팀 '${teamName}'을 찾을 수 없습니다.`);
+    process.exit(1);
+  }
+
+  const users = await getTeamUsers(teamId);
   const results: UserSyncResult[] = [];
 
   console.log(`대상 담당자: ${users.length}명`);
