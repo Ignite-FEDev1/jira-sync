@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const H_CHAT_BASE_URL =
-  'https://internal-apigw-kr.hmg-corp.io/hchat-in/api/v3/claude';
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 const SYSTEM_PROMPT = `당신은 Jira 티켓 내용을 생성하는 전문가입니다.
 
@@ -64,17 +64,17 @@ const SYSTEM_PROMPT = `당신은 Jira 티켓 내용을 생성하는 전문가입
 - 입력이 부족한 섹션은 적절히 추론하되, 확실하지 않은 내용은 [확인 필요]로 표시`;
 
 export async function POST(request: NextRequest) {
-  const model = process.env.H_CHAT_API_MODEL || 'claude-sonnet-4-6';
+  const apiKey = process.env.GROQ_API_KEY;
+
+  if (!apiKey) {
+    return NextResponse.json(
+      { success: false, error: 'GROQ_API_KEY가 설정되지 않았습니다.' },
+      { status: 500 }
+    );
+  }
 
   try {
-    const { prompt, apiKey } = await request.json();
-
-    if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length === 0) {
-      return NextResponse.json(
-        { success: false, error: 'H Chat API Key가 제공되지 않았습니다. 사용자 설정에서 키를 등록해주세요.' },
-        { status: 400 }
-      );
-    }
+    const { prompt } = await request.json();
 
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
       return NextResponse.json(
@@ -83,22 +83,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const response = await fetch(`${H_CHAT_BASE_URL}/messages`, {
+    const response = await fetch(GROQ_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: apiKey.trim(),
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model,
+        model: GROQ_MODEL,
         max_tokens: 4096,
-        stream: false,
-        system: SYSTEM_PROMPT,
         messages: [
-          {
-            role: 'user',
-            content: prompt.trim(),
-          },
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: prompt.trim() },
         ],
       }),
     });
@@ -108,7 +104,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: `H Chat API 오류 (${response.status}): ${errorBody}`,
+          error: `Groq API 오류 (${response.status}): ${errorBody}`,
         },
         { status: 500 }
       );
@@ -116,15 +112,15 @@ export async function POST(request: NextRequest) {
 
     const data = await response.json();
 
-    const content = data.content?.[0];
-    if (!content || content.type !== 'text') {
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) {
       return NextResponse.json(
         { success: false, error: '예상치 못한 응답 형식입니다.' },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({ success: true, data: content.text });
+    return NextResponse.json({ success: true, data: text });
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : '알 수 없는 오류가 발생했습니다.';
