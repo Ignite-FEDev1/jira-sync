@@ -167,22 +167,36 @@ export function TicketContentForm({ className }: TicketContentFormProps) {
       {/* Input fields */}
       <div className="space-y-4">
         <div className="space-y-2">
-          <label className="text-sm font-medium">업무 배경 / 히스토리</label>
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium">업무 배경 / 히스토리</label>
+            <span className={`text-xs ${background.length > 30000 ? 'text-destructive' : 'text-muted-foreground'}`}>
+              {background.length.toLocaleString()} / 30,000
+            </span>
+          </div>
           <Textarea
             placeholder="슬랙, 두레이 등에서 공유된 내용을 붙여넣으세요."
             value={background}
-            onChange={(e) => setBackground(e.target.value)}
+            onChange={(e) => {
+              if (e.target.value.length <= 30000) setBackground(e.target.value);
+            }}
             className="min-h-[100px] resize-none"
             disabled={isLoading}
           />
         </div>
 
         <div className="space-y-2">
-          <label className="text-sm font-medium">업무 설명</label>
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium">업무 설명</label>
+            <span className={`text-xs ${description.length > 5000 ? 'text-destructive' : 'text-muted-foreground'}`}>
+              {description.length.toLocaleString()} / 5,000
+            </span>
+          </div>
           <Textarea
             placeholder="어떤 작업을 해야 하는지 자유롭게 설명해주세요."
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={(e) => {
+              if (e.target.value.length <= 5000) setDescription(e.target.value);
+            }}
             className="min-h-[100px] resize-none"
             disabled={isLoading}
           />
