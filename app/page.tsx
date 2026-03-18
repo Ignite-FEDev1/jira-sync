@@ -663,17 +663,15 @@ export default function Home() {
                 배포 템플릿
               </Button>
             </Link>
-            {process.env.NODE_ENV === 'development' && (
-              <Link href="/generate-ticket">
-                <Button variant="outline" className="relative">
-                  <Sparkles className="mr-2 h-4 w-4" />
-                  AI 티켓 내용 생성
-                  <span className="absolute -top-1 -right-1 inline-flex rounded-full h-5 w-5 bg-red-500 items-center justify-center">
-                    <span className="text-[9px] font-bold text-white">N</span>
-                  </span>
-                </Button>
-              </Link>
-            )}
+            <Link href="/generate-ticket">
+              <Button variant="outline" className="relative">
+                <Sparkles className="mr-2 h-4 w-4" />
+                AI 티켓 내용 생성
+                <span className="absolute -top-1 -right-1 inline-flex rounded-full h-5 w-5 bg-red-500 items-center justify-center">
+                  <span className="text-[9px] font-bold text-white">N</span>
+                </span>
+              </Button>
+            </Link>
             {/* @deprecated Flow Chart, 에픽 생성 - 관리자 페이지로 이전 예정 */}
             <Link href="/create-ticket">
               <Button>

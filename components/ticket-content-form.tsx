@@ -31,8 +31,6 @@ interface TicketContentFormProps {
 export function TicketContentForm({ className }: TicketContentFormProps) {
   // Pre-info options
   const [ticketType, setTicketType] = useState('');
-  const [needsDeploy, setNeedsDeploy] = useState(false);
-  const [needsQA, setNeedsQA] = useState(false);
   const [needsNotice, setNeedsNotice] = useState(false);
 
   // Input fields
@@ -63,8 +61,6 @@ export function TicketContentForm({ className }: TicketContentFormProps) {
         TICKET_TYPES.find((t) => t.value === ticketType)?.label || ticketType;
       preInfo.push(`- 티켓 종류: ${label}`);
     }
-    preInfo.push(`- 배포 작업: ${needsDeploy ? '예' : '아니오'}`);
-    preInfo.push(`- QA 시나리오 필요: ${needsQA ? '예' : '아니오'}`);
     preInfo.push(`- 사용자 전달 내용 필요: ${needsNotice ? '예' : '아니오'}`);
     parts.push(`[사전 정보]\n${preInfo.join('\n')}`);
 
@@ -156,20 +152,6 @@ export function TicketContentForm({ className }: TicketContentFormProps) {
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <ToggleChip
-            checked={needsDeploy}
-            onChange={setNeedsDeploy}
-            disabled={isLoading}
-          >
-            배포 작업
-          </ToggleChip>
-          <ToggleChip
-            checked={needsQA}
-            onChange={setNeedsQA}
-            disabled={isLoading}
-          >
-            QA 시나리오 필요
-          </ToggleChip>
           <ToggleChip
             checked={needsNotice}
             onChange={setNeedsNotice}
