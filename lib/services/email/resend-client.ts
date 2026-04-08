@@ -33,6 +33,7 @@ interface SendSyncReportEmailParams {
   userResults: UserSuccessSummary[];
   userFailures: UserFailureSummary[];
   syncDate: string;
+  cutoffDate: string;
 }
 
 /**
@@ -43,6 +44,7 @@ export async function sendSyncReportEmail({
   userResults,
   userFailures,
   syncDate,
+  cutoffDate,
 }: SendSyncReportEmailParams): Promise<void> {
   const totalProcessed = userResults.reduce((sum, u) => sum + u.processed, 0);
   const totalSuccess = userResults.reduce((sum, u) => sum + u.success, 0);
@@ -64,8 +66,13 @@ export async function sendSyncReportEmail({
     return `  [${u.userName}] (${u.failures.length}건)\n${list}`;
   });
 
+  // cutoffDate (YYYY-MM-DD)를 n월 n일 형식으로 변환
+  const [, cutoffMonth, cutoffDay] = cutoffDate.split('-');
+  const cutoffLabel = `${Number(cutoffMonth)}월 ${Number(cutoffDay)}일`;
+
   const body = [
     `${syncDate} Daily Sync 결과`,
+    `대상: 마감일 ${cutoffLabel} 이후 티켓`,
     '',
     `전체: 처리 ${totalProcessed}건, 성공 ${totalSuccess}건 (업데이트 ${totalSuccess - totalCreated}, 신규 ${totalCreated}), 실패 ${totalFailed}건`,
     '',

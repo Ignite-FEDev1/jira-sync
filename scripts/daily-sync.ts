@@ -189,9 +189,11 @@ async function main() {
     }
   }
 
+  const cutoffDate = SyncOrchestrator.getCutoffDate();
+
   if (hasResendKey) {
     try {
-      await sendSyncReportEmail({ userResults: userResultSummaries, userFailures, syncDate });
+      await sendSyncReportEmail({ userResults: userResultSummaries, userFailures, syncDate, cutoffDate });
     } catch (emailError) {
       console.error('[이메일] 발송 중 오류:', emailError);
     }

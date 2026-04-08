@@ -30,6 +30,16 @@ export class SyncOrchestrator {
   }
 
   /**
+   * 동기화 대상 마감일 기준일 계산 (현재 시점 - 1개월)
+   * 예: 오늘이 4/8이면 3/8 반환
+   */
+  static getCutoffDate(): string {
+    const now = new Date();
+    now.setMonth(now.getMonth() - 1);
+    return now.toISOString().slice(0, 10);
+  }
+
+  /**
    * 동기화 실행
    */
   async execute(options: SyncOptions): Promise<SyncSummary> {
@@ -207,7 +217,9 @@ export class SyncOrchestrator {
 
     // 일반 모드: 담당자의 모든 티켓 (완료 포함, 페이지네이션 자동 처리)
     this.logger.info('담당자의 모든 티켓 조회 중...');
-    const jql = `project = ${sourceProjectKey} AND assignee = "${options.assigneeAccountId}" AND due >= "2026-01-01" ORDER BY updated DESC`;
+    const cutoffDate = SyncOrchestrator.getCutoffDate();
+    const jql = `project = ${sourceProjectKey} AND assignee = "${options.assigneeAccountId}" AND due >= "${cutoffDate}" ORDER BY updated DESC`;
+    this.logger.info(`마감일 기준: ${cutoffDate} 이후`);
 
     this.logger.info(`담당자: ${options.assigneeName || '알 수 없음'}`);
 
