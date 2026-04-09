@@ -194,7 +194,6 @@ export default function UsersPage() {
   const resetIgniteVerify = () => {
     setIgniteVerified(null);
     setIgniteVerifyError(null);
-    setForm((prev) => ({ ...prev, igniteJiraEmail: '', igniteJiraApiToken: '' }));
   };
 
   // HMG Jira 검증
@@ -236,7 +235,6 @@ export default function UsersPage() {
   const resetHmgVerify = () => {
     setHmgVerified(null);
     setHmgVerifyError(null);
-    setForm((prev) => ({ ...prev, hmgJiraEmail: '', hmgJiraApiToken: '', hmgUserId: '' }));
   };
 
   const bothVerified = !!igniteVerified && !!hmgVerified;
