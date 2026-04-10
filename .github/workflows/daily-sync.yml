@@ -2,8 +2,10 @@ name: Daily Jira Sync
 
 on:
   schedule:
-    # 평일(월~금) 한국시간 오전 8시 (UTC 전날 23시: 일~목)
-    - cron: '0 23 * * 0-4'
+    # 평일(월~금) 한국시간 오전 7시 30분 (UTC 전날 22:30: 일~목)
+    - cron: '30 22 * * 0-4'
+    # 평일(월~금) 한국시간 낮 12시 (UTC 당일 03:00: 월~금)
+    - cron: '0 3 * * 1-5'
   workflow_dispatch: # 수동 실행 가능
 
 jobs:
