@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { RefreshCw, User, Plus, ExternalLink, Settings, LogOut, Sparkles } from 'lucide-react';
+import { RefreshCw, User, Plus, ExternalLink, Settings, LogOut, Sparkles, Rocket } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   JIRA_ENDPOINTS,
@@ -651,6 +651,12 @@ export default function Home() {
             </p>
           </div>
           <div className="flex gap-2">
+            <Link href="/deploy-room">
+              <Button variant="outline">
+                <Rocket className="mr-2 h-4 w-4" />
+                배포방
+              </Button>
+            </Link>
             <Link href="/deployment">
               <Button variant="outline">
                 <ExternalLink className="mr-2 h-4 w-4" />
