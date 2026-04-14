@@ -1,6 +1,8 @@
 import { db } from '@/lib/db';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import type {
+  ChecklistItemStatus,
+  ChecklistUserStatus,
   DeployRoomChecklistItem,
   DeployRoomMr,
   DeployRoomMrStatus,
@@ -47,6 +49,7 @@ type MrRow = {
   title: string;
   url: string;
   author_name: string | null;
+  assignee_name: string | null;
   source_branch: string | null;
   target_branch: string | null;
   included: boolean;
@@ -66,6 +69,7 @@ function mapMr(row: MrRow): DeployRoomMr {
     title: row.title,
     url: row.url,
     authorName: row.author_name,
+    assigneeName: row.assignee_name,
     sourceBranch: row.source_branch,
     targetBranch: row.target_branch,
     included: row.included,
@@ -99,12 +103,33 @@ function mapTimeline(row: TimelineRow): DeployRoomTimelineEvent {
   };
 }
 
+type UserStatusRow = {
+  id: string;
+  session_id: string;
+  checklist_item_id: string;
+  user_name: string;
+  status: string;
+  updated_at: string;
+};
+
+function mapUserStatus(row: UserStatusRow): ChecklistUserStatus {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    checklistItemId: row.checklist_item_id,
+    userName: row.user_name,
+    status: row.status as ChecklistItemStatus,
+    updatedAt: row.updated_at,
+  };
+}
+
 type SessionRow = {
   id: string;
   title: string;
   template_id: string;
   deploy_date: string;
   confluence_page_url: string | null;
+  inactive_participants: string[] | null;
   status: string;
   created_by: string | null;
   created_at: string;
@@ -118,10 +143,47 @@ function mapSession(row: SessionRow): DeployRoomSession {
     templateId: row.template_id,
     deployDate: row.deploy_date,
     confluencePageUrl: row.confluence_page_url,
+    confluenceTasks: null, // realtime payload에는 미포함 — page에서 기존 값 보존
+    inactiveParticipants: row.inactive_participants ?? [],
     status: row.status as DeployRoomSessionStatus,
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+// ---------- Presence ----------
+
+export interface PresenceUser {
+  userId: string;
+  name: string;
+}
+
+/**
+ * 배포방 입장 시 presence를 broadcast하고, 현재 접속자 목록을 실시간으로 수신.
+ * 반환된 cleanup 함수를 unmount 시 호출하면 자동으로 퇴장 처리된다.
+ */
+export function trackPresence(
+  sessionId: string,
+  user: PresenceUser,
+  onSync: (users: PresenceUser[]) => void
+): () => void {
+  const channel = db.channel(`deploy-room-presence-${sessionId}`);
+
+  channel
+    .on('presence', { event: 'sync' }, () => {
+      const state = channel.presenceState<PresenceUser>();
+      const users = Object.values(state).flat();
+      onSync(users);
+    })
+    .subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        await channel.track(user);
+      }
+    });
+
+  return () => {
+    db.removeChannel(channel);
   };
 }
 
@@ -144,6 +206,10 @@ interface DeployRoomRealtimeHandlers {
   onSessionChange?: (event: {
     type: EventType;
     newRow: DeployRoomSession | null;
+  }) => void;
+  onUserStatusChange?: (event: {
+    type: EventType;
+    newRow: ChecklistUserStatus | null;
   }) => void;
 }
 
@@ -230,6 +296,25 @@ export function subscribeDeployRoom(
           newRow:
             payload.new && Object.keys(payload.new).length > 0
               ? mapSession(payload.new as SessionRow)
+              : null,
+        });
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'deploy_room_checklist_user_status',
+        filter: `session_id=eq.${sessionId}`,
+      },
+      (payload) => {
+        if (!handlers.onUserStatusChange) return;
+        handlers.onUserStatusChange({
+          type: payload.eventType as EventType,
+          newRow:
+            payload.new && Object.keys(payload.new).length > 0
+              ? mapUserStatus(payload.new as UserStatusRow)
               : null,
         });
       }

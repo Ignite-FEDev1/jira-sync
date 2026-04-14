@@ -1,5 +1,27 @@
 // 배포방 (Deploy Room) 도메인 타입
 
+export type ChecklistItemStatus = 'pending' | 'in_progress' | 'done';
+
+export interface ChecklistUserStatus {
+  id: string;
+  sessionId: string;
+  checklistItemId: string;
+  userName: string;
+  status: ChecklistItemStatus;
+  updatedAt: string;
+}
+
+export interface ConfluenceTask {
+  id: number;
+  body: string;
+  status: 'complete' | 'incomplete';
+}
+
+export interface ConfluenceDeployTasks {
+  before: ConfluenceTask[];
+  after: ConfluenceTask[];
+}
+
 export type DeployRoomSessionStatus =
   | 'preparing'
   | 'in_progress'
@@ -12,6 +34,8 @@ export interface DeployRoomSession {
   templateId: string;
   deployDate: string; // YYYY-MM-DD
   confluencePageUrl: string | null;
+  confluenceTasks: ConfluenceDeployTasks | null;
+  inactiveParticipants: string[];
   status: DeployRoomSessionStatus;
   createdBy: string | null;
   createdAt: string;
@@ -40,6 +64,7 @@ export interface DeployRoomMr {
   title: string;
   url: string;
   authorName: string | null;
+  assigneeName: string | null;
   sourceBranch: string | null;
   targetBranch: string | null;
   included: boolean;

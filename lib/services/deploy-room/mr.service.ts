@@ -10,6 +10,7 @@ type MrRow = {
   title: string;
   url: string;
   author_name: string | null;
+  assignee_name: string | null;
   source_branch: string | null;
   target_branch: string | null;
   included: boolean;
@@ -29,6 +30,7 @@ export function toMr(row: MrRow): DeployRoomMr {
     title: row.title,
     url: row.url,
     authorName: row.author_name,
+    assigneeName: row.assignee_name,
     sourceBranch: row.source_branch,
     targetBranch: row.target_branch,
     included: row.included,

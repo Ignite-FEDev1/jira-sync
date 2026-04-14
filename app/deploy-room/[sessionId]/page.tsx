@@ -9,30 +9,25 @@ import {
   Circle,
   ExternalLink,
   GitMerge,
+  GitPullRequest,
+  Loader2,
+  MousePointer2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/contexts/user-context';
-import { subscribeDeployRoom } from '@/lib/services/deploy-room/realtime';
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+  subscribeDeployRoom,
+  trackPresence,
+  type PresenceUser,
+} from '@/lib/services/deploy-room/realtime';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { DEPLOY_ROOM_TEMPLATES } from '@/lib/constants/deploy-room';
 import type {
+  ChecklistItemStatus,
+  ChecklistUserStatus,
   DeployRoomChecklistItem,
   DeployRoomMr,
-  DeployRoomMrStatus,
   DeployRoomSession,
   DeployRoomSessionStatus,
   DeployRoomTimelineEvent,
@@ -46,39 +41,118 @@ const SESSION_STATUS_LABELS: Record<DeployRoomSessionStatus, string> = {
 };
 
 const SESSION_STATUS_STYLES: Record<DeployRoomSessionStatus, string> = {
-  preparing: 'bg-slate-100 text-slate-700',
-  in_progress: 'bg-blue-100 text-blue-700',
-  completed: 'bg-emerald-100 text-emerald-700',
-  rolled_back: 'bg-amber-100 text-amber-700',
+  preparing: 'bg-slate-100 text-slate-600 ring-1 ring-slate-200',
+  in_progress: 'bg-blue-50 text-blue-700 ring-1 ring-blue-200',
+  completed: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
+  rolled_back: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
 };
 
-const MR_STATUS_LABELS: Record<string, string> = {
-  pending: '대기',
-  approved: '승인',
-  merged: '머지',
-  conflict: '충돌',
-};
 
-const MR_STATUS_STYLES: Record<string, string> = {
-  pending: 'bg-slate-100 text-slate-700',
-  approved: 'bg-blue-100 text-blue-700',
-  merged: 'bg-emerald-100 text-emerald-700',
-  conflict: 'bg-rose-100 text-rose-700',
-};
+// 담당자별 MR 현황 stage
+type AssigneeStage =
+  | { key: 'done';     label: '완료';      dot: string; bar: string; card: string }
+  | { key: 'conflict'; label: '충돌';      dot: string; bar: string; card: string }
+  | { key: 'merging';  label: '머지 중';   dot: string; bar: string; card: string }
+  | { key: 'approved'; label: '승인 대기'; dot: string; bar: string; card: string }
+  | { key: 'idle';     label: '준비 중';   dot: string; bar: string; card: string };
+
+function calcMrStage(mrs: DeployRoomMr[]): AssigneeStage {
+  const included = mrs.filter((m) => m.included);
+  const base = included.length > 0 ? included : mrs;
+  const conflict = base.some((m) => m.status === 'conflict');
+  const allMerged = base.length > 0 && base.every((m) => m.status === 'merged');
+  const anyMerged = base.some((m) => m.status === 'merged');
+  const anyApproved = base.some((m) => m.status === 'approved');
+
+  if (conflict)    return { key: 'conflict', label: '충돌',      dot: 'bg-rose-500',    bar: 'bg-rose-400',    card: 'border-rose-300 bg-rose-50/60' };
+  if (allMerged)   return { key: 'done',     label: '완료',      dot: 'bg-emerald-500', bar: 'bg-emerald-400', card: 'border-emerald-300 bg-emerald-50/60' };
+  if (anyMerged)   return { key: 'merging',  label: '머지 중',   dot: 'bg-amber-500',   bar: 'bg-amber-400',   card: 'border-amber-300 bg-amber-50/40' };
+  if (anyApproved) return { key: 'approved', label: '승인 대기', dot: 'bg-blue-500',    bar: 'bg-blue-400',    card: 'border-blue-300 bg-blue-50/40' };
+  return            { key: 'idle',     label: '준비 중',   dot: 'bg-slate-300',   bar: 'bg-slate-300',   card: 'border-slate-200 bg-white' };
+}
 
 const TIMELINE_ACTION_LABELS: Record<string, string> = {
   'session.create': '세션 생성',
   'session.status': '상태 변경',
-  'checklist.check': '체크 완료',
+  'checklist.check': '✓ 체크',
   'checklist.uncheck': '체크 해제',
   'mr.include': 'MR 포함',
   'mr.exclude': 'MR 제외',
   'mr.status': 'MR 상태 변경',
   'mr.owner': 'MR 담당자 변경',
   'mr.notes': 'MR 메모 변경',
-  'gitlab.import.success': 'GitLab MR import 성공',
-  'gitlab.import.failed': 'GitLab MR import 실패',
+  'gitlab.import.success': 'GitLab import 완료',
+  'gitlab.import.failed': 'GitLab import 실패',
 };
+
+const ASSIGNEE_COLORS = [
+  { border: 'border-l-indigo-400', headerBg: 'bg-indigo-50', avatarBg: 'bg-indigo-500', nameFg: 'text-indigo-800', badge: 'bg-indigo-100 text-indigo-700' },
+  { border: 'border-l-emerald-400', headerBg: 'bg-emerald-50', avatarBg: 'bg-emerald-500', nameFg: 'text-emerald-800', badge: 'bg-emerald-100 text-emerald-700' },
+  { border: 'border-l-violet-400', headerBg: 'bg-violet-50', avatarBg: 'bg-violet-500', nameFg: 'text-violet-800', badge: 'bg-violet-100 text-violet-700' },
+  { border: 'border-l-amber-400', headerBg: 'bg-amber-50', avatarBg: 'bg-amber-500', nameFg: 'text-amber-800', badge: 'bg-amber-100 text-amber-700' },
+  { border: 'border-l-cyan-400', headerBg: 'bg-cyan-50', avatarBg: 'bg-cyan-500', nameFg: 'text-cyan-800', badge: 'bg-cyan-100 text-cyan-700' },
+  { border: 'border-l-rose-400', headerBg: 'bg-rose-50', avatarBg: 'bg-rose-500', nameFg: 'text-rose-800', badge: 'bg-rose-100 text-rose-700' },
+  { border: 'border-l-teal-400', headerBg: 'bg-teal-50', avatarBg: 'bg-teal-500', nameFg: 'text-teal-800', badge: 'bg-teal-100 text-teal-700' },
+  { border: 'border-l-orange-400', headerBg: 'bg-orange-50', avatarBg: 'bg-orange-500', nameFg: 'text-orange-800', badge: 'bg-orange-100 text-orange-700' },
+];
+
+function getAssigneeColor(name: string) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  return ASSIGNEE_COLORS[Math.abs(hash) % ASSIGNEE_COLORS.length];
+}
+
+function getInitials(name: string): string {
+  return name.replace(/\/.*$/, '').trim().charAt(0);
+}
+
+// ---- 체크리스트 aggregate 계산 ----
+
+interface AggregateResult {
+  status: 'pending' | 'in_progress' | 'done';
+  doneUsers: string[];
+  inProgressUsers: string[];
+}
+
+function getAggregate(
+  item: DeployRoomChecklistItem,
+  userStatuses: ChecklistUserStatus[],
+  activeParticipants: string[]
+): AggregateResult {
+  if (activeParticipants.length === 0) return { status: 'pending', doneUsers: [], inProgressUsers: [] };
+
+  const itemStatuses = userStatuses.filter((s) => s.checklistItemId === item.id);
+  const doneUsers: string[] = [];
+  const inProgressUsers: string[] = [];
+  let pendingCount = 0;
+
+  const norm = (n: string) => n.replace(/\/.*$/, '').trim();
+
+  for (const p of activeParticipants) {
+    const s = itemStatuses.find((st) => st.userName === p || norm(st.userName) === norm(p));
+    if (!s || s.status === 'pending') pendingCount++;
+    else if (s.status === 'in_progress') inProgressUsers.push(p);
+    else if (s.status === 'done') doneUsers.push(p);
+  }
+
+  if (doneUsers.length === activeParticipants.length) return { status: 'done', doneUsers, inProgressUsers };
+  if (pendingCount === activeParticipants.length) return { status: 'pending', doneUsers, inProgressUsers };
+  return { status: 'in_progress', doneUsers, inProgressUsers };
+}
+
+const USER_STATUS_LABELS: Record<ChecklistItemStatus, string> = {
+  pending: '진행전',
+  in_progress: '진행중',
+  done: '진행완료',
+};
+
+function cycleStatus(s: ChecklistItemStatus): ChecklistItemStatus {
+  if (s === 'pending') return 'in_progress';
+  if (s === 'in_progress') return 'done';
+  return 'pending';
+}
+
+// ---- 메인 컴포넌트 ----
 
 export default function DeployRoomDetailPage() {
   const params = useParams<{ sessionId: string }>();
@@ -89,24 +163,24 @@ export default function DeployRoomDetailPage() {
   const [checklist, setChecklist] = useState<DeployRoomChecklistItem[]>([]);
   const [mrs, setMrs] = useState<DeployRoomMr[]>([]);
   const [timeline, setTimeline] = useState<DeployRoomTimelineEvent[]>([]);
+  const [userStatuses, setUserStatuses] = useState<ChecklistUserStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
-  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [onlineUsers, setOnlineUsers] = useState<PresenceUser[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [sessionRes, mrsRes, timelineRes] = await Promise.all([
+      const [sessionRes, mrsRes, timelineRes, statusesRes] = await Promise.all([
         fetch(`/api/deploy-room/sessions/${sessionId}`),
         fetch(`/api/deploy-room/mrs?sessionId=${sessionId}`),
         fetch(`/api/deploy-room/timeline?sessionId=${sessionId}`),
+        fetch(`/api/deploy-room/checklist-user-status?sessionId=${sessionId}`),
       ]);
+
       const sessionJson = await sessionRes.json();
       if (!sessionJson.success) {
-        if (sessionRes.status === 404) {
-          setNotFound(true);
-          return;
-        }
+        if (sessionRes.status === 404) { setNotFound(true); return; }
         toast.error(`세션 조회 실패: ${sessionJson.error}`);
         return;
       }
@@ -118,23 +192,22 @@ export default function DeployRoomDetailPage() {
 
       const timelineJson = await timelineRes.json();
       if (timelineJson.success) setTimeline(timelineJson.events);
+
+      const statusesJson = await statusesRes.json();
+      if (statusesJson.success) setUserStatuses(statusesJson.statuses);
     } catch (error) {
-      toast.error(
-        `조회 실패: ${error instanceof Error ? error.message : String(error)}`
-      );
+      toast.error(`조회 실패: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setLoading(false);
     }
   }, [sessionId]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
-  // Supabase Realtime 구독
+  // Realtime 구독
   useEffect(() => {
     if (!sessionId) return;
-    const unsubscribe = subscribeDeployRoom(sessionId, {
+    return subscribeDeployRoom(sessionId, {
       onChecklistChange: ({ type, newRow, oldRow }) => {
         if (type === 'DELETE' && oldRow) {
           setChecklist((prev) => prev.filter((c) => c.id !== oldRow.id));
@@ -143,23 +216,9 @@ export default function DeployRoomDetailPage() {
         if (!newRow) return;
         setChecklist((prev) => {
           const exists = prev.some((c) => c.id === newRow.id);
-          if (exists) {
-            return prev.map((c) => (c.id === newRow.id ? newRow : c));
-          }
-          return [...prev, newRow].sort(
-            (a, b) => a.orderIndex - b.orderIndex
-          );
+          if (exists) return prev.map((c) => (c.id === newRow.id ? newRow : c));
+          return [...prev, newRow].sort((a, b) => a.orderIndex - b.orderIndex);
         });
-        // 다른 사람이 체크한 경우 토스트
-        if (
-          type === 'UPDATE' &&
-          newRow.checked &&
-          newRow.checkedBy &&
-          newRow.checkedBy !== currentUser?.id &&
-          oldRow?.checked === false
-        ) {
-          toast(`${newRow.checkedBy}님이 '${newRow.title}'을 체크했습니다`);
-        }
       },
       onMrChange: ({ type, newRow, oldRow }) => {
         if (type === 'DELETE' && oldRow) {
@@ -169,9 +228,7 @@ export default function DeployRoomDetailPage() {
         if (!newRow) return;
         setMrs((prev) => {
           const exists = prev.some((m) => m.id === newRow.id);
-          if (exists) {
-            return prev.map((m) => (m.id === newRow.id ? newRow : m));
-          }
+          if (exists) return prev.map((m) => (m.id === newRow.id ? newRow : m));
           return [...prev, newRow];
         });
       },
@@ -182,284 +239,599 @@ export default function DeployRoomDetailPage() {
         });
       },
       onSessionChange: ({ newRow }) => {
-        if (newRow) setSession(newRow);
+        if (newRow) {
+          // confluenceTasks는 realtime payload에 없으므로 기존 값 보존
+          setSession((prev) => prev ? { ...newRow, confluenceTasks: prev.confluenceTasks } : newRow);
+        }
+      },
+      onUserStatusChange: ({ type, newRow }) => {
+        if (type === 'DELETE' || !newRow) return;
+        setUserStatuses((prev) => {
+          const exists = prev.some(
+            (s) => s.checklistItemId === newRow.checklistItemId && s.userName === newRow.userName
+          );
+          if (exists) return prev.map((s) =>
+            s.checklistItemId === newRow.checklistItemId && s.userName === newRow.userName ? newRow : s
+          );
+          return [...prev, newRow];
+        });
       },
     });
-    return unsubscribe;
-  }, [sessionId, currentUser?.id]);
+  }, [sessionId]);
 
-  const handleToggle = async (item: DeployRoomChecklistItem) => {
-    if (togglingId) return;
-    const nextChecked = !item.checked;
-    setTogglingId(item.id);
-    // optimistic update
-    setChecklist((prev) =>
-      prev.map((c) =>
-        c.id === item.id
-          ? {
-              ...c,
-              checked: nextChecked,
-              checkedBy: nextChecked ? currentUser?.id ?? null : null,
-              checkedAt: nextChecked ? new Date().toISOString() : null,
-            }
-          : c
-      )
-    );
+  // Presence
+  useEffect(() => {
+    if (!sessionId || !currentUser) return;
+    return trackPresence(sessionId, { userId: currentUser.id, name: currentUser.name }, setOnlineUsers);
+  }, [sessionId, currentUser]);
+
+  // 사용자 체크리스트 상태 변경 (3-state 토글)
+  const handleUserStatus = async (itemId: string) => {
+    const userName = currentUser?.name;
+    if (!userName) return;
+
+    const current = userStatuses.find(
+      (s) => s.checklistItemId === itemId && s.userName === userName
+    )?.status ?? 'pending';
+    const next = cycleStatus(current);
+
+    // 낙관적 업데이트
+    setUserStatuses((prev) => {
+      const exists = prev.some((s) => s.checklistItemId === itemId && s.userName === userName);
+      if (exists) return prev.map((s) =>
+        s.checklistItemId === itemId && s.userName === userName ? { ...s, status: next } : s
+      );
+      return [...prev, { id: 'tmp', sessionId, checklistItemId: itemId, userName, status: next, updatedAt: new Date().toISOString() }];
+    });
+
     try {
-      const res = await fetch(`/api/deploy-room/checklist/${item.id}`, {
-        method: 'PATCH',
+      const res = await fetch('/api/deploy-room/checklist-user-status', {
+        method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          checked: nextChecked,
-          actorUserId: currentUser?.id,
-        }),
+        body: JSON.stringify({ checklistItemId: itemId, sessionId, userName, status: next }),
       });
       const json = await res.json();
-      if (!json.success) {
-        throw new Error(json.error);
-      }
-      // 서버 결과로 보정 (Realtime도 곧 동일 이벤트를 전달)
-      setChecklist((prev) =>
-        prev.map((c) => (c.id === item.id ? json.item : c))
-      );
+      if (!json.success) throw new Error(json.error);
+      // 서버 응답으로 확정 (id 포함)
+      setUserStatuses((prev) => prev.map((s) =>
+        s.checklistItemId === itemId && s.userName === userName ? json.userStatus : s
+      ));
     } catch (error) {
+      toast.error(`상태 변경 실패: ${error instanceof Error ? error.message : String(error)}`);
       // 롤백
-      setChecklist((prev) => prev.map((c) => (c.id === item.id ? item : c)));
-      toast.error(
-        `체크 실패: ${error instanceof Error ? error.message : String(error)}`
-      );
-    } finally {
-      setTogglingId(null);
+      setUserStatuses((prev) => prev.map((s) =>
+        s.checklistItemId === itemId && s.userName === userName ? { ...s, status: current } : s
+      ));
+    }
+  };
+
+  // 참여자 ON/OFF 토글
+  const handleToggleParticipant = async (name: string) => {
+    if (!session) return;
+    const current = session.inactiveParticipants;
+    const next = current.includes(name)
+      ? current.filter((n) => n !== name)
+      : [...current, name];
+
+    setSession((prev) => prev ? { ...prev, inactiveParticipants: next } : prev);
+
+    try {
+      const res = await fetch(`/api/deploy-room/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ inactiveParticipants: next }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+    } catch (error) {
+      setSession((prev) => prev ? { ...prev, inactiveParticipants: current } : prev);
+      toast.error(`참여자 설정 실패: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-background">
+      <main className="min-h-screen bg-slate-50">
         <PageHeader />
-        <div className="container mx-auto px-6 py-12 text-center text-sm text-muted-foreground">
-          불러오는 중…
-        </div>
+        <div className="container mx-auto px-6 py-12 text-center text-sm text-muted-foreground">불러오는 중…</div>
       </main>
     );
   }
 
   if (notFound || !session) {
     return (
-      <main className="min-h-screen bg-background">
+      <main className="min-h-screen bg-slate-50">
         <PageHeader />
         <div className="container mx-auto px-6 py-12 text-center">
-          <p className="text-sm text-muted-foreground">
-            해당 배포방을 찾을 수 없습니다.
-          </p>
-          <Link href="/deploy-room" className="inline-block mt-4">
-            <Button variant="outline">목록으로</Button>
-          </Link>
+          <p className="text-sm text-muted-foreground">해당 배포방을 찾을 수 없습니다.</p>
+          <Link href="/deploy-room" className="inline-block mt-4"><Button variant="outline">목록으로</Button></Link>
         </div>
       </main>
     );
   }
 
-  const checkedCount = checklist.filter((c) => c.checked).length;
+  // ---- 파생 값 계산 ----
   const includedMrs = mrs.filter((m) => m.included);
 
+  const mrsByAssignee = mrs.reduce<Record<string, DeployRoomMr[]>>((acc, mr) => {
+    const key = mr.assigneeName || mr.authorName || '담당자 미지정';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(mr);
+    return acc;
+  }, {});
+
+  const template = DEPLOY_ROOM_TEMPLATES.find((t) => t.id === session.templateId);
+  const allPresenceKeys: string[] = template?.teamMembers
+    ? [
+        ...template.teamMembers.filter((m) => !Object.keys(mrsByAssignee).some((k) => k.includes(m))),
+        ...Object.keys(mrsByAssignee),
+      ]
+    : Object.keys(mrsByAssignee);
+
+  const inactiveParticipants = session.inactiveParticipants;
+  const activeParticipants = allPresenceKeys.filter((k) => !inactiveParticipants.includes(k));
+
+  // 전체 현황 진행률 (aggregate 기반)
+  const doneCount = checklist.filter(
+    (item) => getAggregate(item, userStatuses, activeParticipants).status === 'done'
+  ).length;
+  const progress = checklist.length > 0 ? Math.round((doneCount / checklist.length) * 100) : 0;
+
+  // 현재 사용자 이름
+  const myName = currentUser?.name ?? '';
+
   return (
-    <main className="min-h-screen bg-background">
+    <main className="min-h-screen bg-slate-50">
       <PageHeader />
 
-      <div className="container mx-auto px-6 py-6 space-y-6">
-        {/* 세션 메타 */}
-        <div className="flex items-start justify-between gap-4 border-b pb-6">
-          <div className="space-y-1.5 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-2xl font-bold">{session.title}</h2>
-              <span
-                className={`text-xs px-2 py-0.5 rounded-full font-medium ${SESSION_STATUS_STYLES[session.status]}`}
-              >
-                {SESSION_STATUS_LABELS[session.status]}
-              </span>
+      {/* 세션 메타 헤더 */}
+      <div className="bg-white border-b">
+        <div className="container mx-auto px-6 py-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-2 min-w-0">
+              <div className="flex items-center gap-3 flex-wrap">
+                <h2 className="text-xl font-bold tracking-tight">{session.title}</h2>
+                <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${SESSION_STATUS_STYLES[session.status]}`}>
+                  {SESSION_STATUS_LABELS[session.status]}
+                </span>
+              </div>
+              <div className="flex items-center gap-4 text-sm text-slate-500 flex-wrap">
+                <span className="font-medium text-slate-700">{session.deployDate}</span>
+                {session.confluencePageUrl && (
+                  <a href={session.confluencePageUrl} target="_blank" rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 hover:underline transition-colors">
+                    <ExternalLink className="h-3.5 w-3.5" />배포대장
+                  </a>
+                )}
+              </div>
             </div>
-            <div className="text-sm text-muted-foreground flex items-center gap-3 flex-wrap">
-              <span>{session.deployDate}</span>
-              <span>·</span>
-              <span>템플릿 {session.templateId}</span>
-              {session.createdBy && (
-                <>
-                  <span>·</span>
-                  <span>담당 {session.createdBy}</span>
-                </>
-              )}
+            <div className="shrink-0 text-right space-y-1">
+              <div className="text-xs text-slate-500">전체 현황</div>
+              <div className="text-2xl font-bold tabular-nums text-slate-800">
+                {progress}<span className="text-sm font-normal text-slate-400">%</span>
+              </div>
+              <div className="text-xs text-slate-400">{doneCount} / {checklist.length}</div>
             </div>
-            {session.confluencePageUrl && (
-              <a
-                href={session.confluencePageUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline"
-              >
-                <ExternalLink className="h-3 w-3" /> 배포대장
-              </a>
-            )}
           </div>
         </div>
+      </div>
+
+      <div className="container mx-auto px-6 py-6 space-y-6">
+
+        {/* 담당자 현황 바 */}
+        {allPresenceKeys.length > 0 && (
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">담당자 현황</span>
+              <span className="flex h-2 w-2 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+              </span>
+              <span className="text-[11px] text-emerald-600 font-medium">실시간</span>
+            </div>
+            <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${allPresenceKeys.length}, minmax(0, 1fr))` }}>
+              {allPresenceKeys.map((assignee) => {
+                const assigneeMrs = mrsByAssignee[assignee] ?? [];
+                const color = getAssigneeColor(assignee);
+                const stage = calcMrStage(assigneeMrs);
+                const displayName = assignee.replace(/\/.*$/, '').trim();
+                const initials = getInitials(assignee);
+                const total = assigneeMrs.length;
+                const merged = assigneeMrs.filter((m) => m.status === 'merged').length;
+                const pct = total > 0 ? Math.round((merged / total) * 100) : 0;
+                const isOnline = onlineUsers.some((u) => assignee.includes(u.name) || u.name.includes(displayName));
+                const isActive = !inactiveParticipants.includes(assignee);
+
+                // 가장 최근 업데이트된 체크리스트 상태
+                const normName = (n: string) => n.replace(/\/.*$/, '').trim();
+                const myLatestStatus = userStatuses
+                  .filter((s) => s.userName === assignee || normName(s.userName) === normName(assignee))
+                  .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())[0];
+                const myLatestItem = myLatestStatus
+                  ? checklist.find((c) => c.id === myLatestStatus.checklistItemId)
+                  : null;
+
+                return (
+                  <div
+                    key={assignee}
+                    className={`rounded-xl border-2 ${isActive ? stage.card : 'border-slate-200 bg-slate-50'} p-3 flex flex-col gap-2 transition-all duration-300 ${!isActive ? 'opacity-50' : ''}`}
+                  >
+                    {/* 상단: 아바타 + 이름 + 최근 상태 (flex-1로 늘어남) */}
+                    <div className="flex items-start gap-2 flex-1">
+                      <div className="relative shrink-0">
+                        <div className={`h-8 w-8 rounded-full ${isActive ? color.avatarBg : 'bg-slate-300'} text-white text-sm font-bold flex items-center justify-center`}>
+                          {initials}
+                        </div>
+                        {isActive && (
+                          <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
+                            {isOnline && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />}
+                            <span className={`relative inline-flex rounded-full h-3 w-3 border-2 border-white ${isOnline ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                          </span>
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className={`text-sm font-semibold truncate ${isActive ? 'text-slate-800' : 'text-slate-400 line-through'}`}>{displayName}</div>
+                        {isActive && myLatestItem && (
+                          <div className="mt-1 space-y-0.5">
+                            <span className={`inline-block text-[10px] font-medium px-1 py-0 rounded ${
+                              myLatestStatus.status === 'done' ? 'bg-emerald-100 text-emerald-700' :
+                              myLatestStatus.status === 'in_progress' ? 'bg-amber-100 text-amber-700' :
+                              'bg-slate-100 text-slate-400'
+                            }`}>
+                              {USER_STATUS_LABELS[myLatestStatus.status]}
+                            </span>
+                            <p className="text-[11px] text-slate-500 leading-snug line-clamp-2">{myLatestItem.title}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* 머지 progress bar — MR 없으면 빈 영역으로 높이 확보 */}
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-baseline">
+                        <span className="text-[10px] text-slate-400">머지</span>
+                        <span className="text-[11px] font-semibold tabular-nums text-slate-600">
+                          {total > 0 ? `${merged}/${total}` : '-'}
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                        {total > 0 && (
+                          <div className={`h-full rounded-full transition-all duration-500 ${stage.bar}`} style={{ width: `${pct}%` }} />
+                        )}
+                      </div>
+                      {/* 머지/승인/충돌 태그 (대기 제외) — 항상 렌더하여 카드 간 높이 통일 */}
+                      <div className="flex gap-1 flex-wrap min-h-[4px]">
+                        {isActive && total > 0 && (['merged', 'approved', 'conflict'] as const).map((s) => {
+                          const cnt = assigneeMrs.filter((m) => m.status === s).length;
+                          if (cnt === 0) return null;
+                          return (
+                            <span key={s} className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                              s === 'merged' ? 'bg-emerald-100 text-emerald-700' :
+                              s === 'approved' ? 'bg-blue-100 text-blue-700' :
+                              'bg-rose-100 text-rose-700'
+                            }`}>
+                              {s === 'merged' ? '완료' : s === 'approved' ? '진행중' : '충돌'} {cnt}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* 제외/참여 버튼 — 항상 카드 최하단 */}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleParticipant(assignee)}
+                      className={`w-full text-[10px] font-medium py-0.5 rounded transition-colors ${
+                        isActive
+                          ? 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                          : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                      }`}
+                    >
+                      {isActive ? '제외' : '참여'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* 2-column: 체크리스트 + MR */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          {/* 체크리스트 */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle>체크리스트</CardTitle>
-                  <CardDescription>
-                    배포 시나리오 순서대로 체크하세요
-                  </CardDescription>
-                </div>
-                <span className="text-xs text-muted-foreground">
-                  {checkedCount} / {checklist.length}
-                </span>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {checklist.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  체크리스트가 비어 있습니다.
-                </p>
-              ) : (
-                <ul className="space-y-1">
-                  {checklist.map((item) => (
-                    <li key={item.id}>
-                      <button
-                        type="button"
-                        onClick={() => handleToggle(item)}
-                        disabled={togglingId === item.id}
-                        className="w-full text-left flex items-start gap-3 py-2 px-2 rounded-md hover:bg-muted/40 disabled:opacity-60"
-                      >
-                        {item.checked ? (
-                          <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0 mt-0.5" />
-                        ) : (
-                          <Circle className="h-5 w-5 text-muted-foreground/40 shrink-0 mt-0.5" />
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <div
-                            className={`text-sm ${
-                              item.checked
-                                ? 'line-through text-muted-foreground'
-                                : ''
-                            }`}
-                          >
-                            <span className="text-muted-foreground mr-1.5">
-                              {item.orderIndex}.
-                            </span>
-                            {item.title}
-                          </div>
-                          {item.checkedBy && (
-                            <div className="text-[11px] text-muted-foreground mt-0.5">
-                              {item.checkedBy}
-                            </div>
-                          )}
-                        </div>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
 
-          {/* MR */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle>담당 MR</CardTitle>
-                  <CardDescription>
-                    세션 생성 시 GitLab에서 import된 MR 목록
-                  </CardDescription>
+          {/* 왼쪽: 전체 현황 + 내 진행현황 — 각 패널 고정 높이 */}
+          <div className="flex flex-col gap-4">
+
+            {/* 전체 현황 — h-[400px] 고정 */}
+            <div className="h-[400px] flex flex-col bg-slate-50 rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-5 pt-5 pb-4 border-b border-slate-200 shrink-0">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-semibold text-slate-700">전체 현황</h3>
+                    <span className="text-[10px] text-slate-500 bg-slate-200 px-1.5 py-0.5 rounded font-medium">자동집계</span>
+                  </div>
+                  <span className="text-xs text-slate-400 tabular-nums">{doneCount} / {checklist.length}</span>
                 </div>
-                <span className="text-xs text-muted-foreground">
-                  포함 {includedMrs.length} / 전체 {mrs.length}
-                </span>
+                <div className="h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-emerald-500 rounded-full transition-all duration-500" style={{ width: `${progress}%` }} />
+                </div>
               </div>
-            </CardHeader>
-            <CardContent>
+              <ScrollArea className="flex-1">
+                <div className="px-3 py-3">
+                  {checklist.length === 0 ? (
+                    <p className="text-sm text-slate-400 text-center py-6">체크리스트가 비어 있습니다.</p>
+                  ) : (
+                    <ul className="space-y-0.5">
+                      {checklist.map((item) => {
+                        const agg = getAggregate(item, userStatuses, activeParticipants);
+                        return (
+                          <li key={item.id} className="py-2 px-2 rounded-lg">
+                            <div className="flex items-start gap-2.5">
+                              {agg.status === 'done' ? (
+                                <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500 shrink-0 mt-0.5" />
+                              ) : agg.status === 'in_progress' ? (
+                                <Loader2 className="h-[18px] w-[18px] text-amber-500 shrink-0 mt-0.5 animate-spin" />
+                              ) : (
+                                <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0 mt-0.5" />
+                              )}
+                              <div className="flex-1 min-w-0">
+                                <div className={`text-sm leading-snug ${agg.status === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
+                                  <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
+                                  {item.title}
+                                </div>
+                                {(agg.doneUsers.length > 0 || agg.inProgressUsers.length > 0) && (
+                                  <div className="flex gap-1 mt-1 flex-wrap">
+                                    {agg.doneUsers.map((u) => (
+                                      <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium">
+                                        <CheckCircle2 className="h-2.5 w-2.5" />{u.replace(/\/.*$/, '').trim()}
+                                      </span>
+                                    ))}
+                                    {agg.inProgressUsers.map((u) => (
+                                      <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded-full font-medium">
+                                        <Loader2 className="h-2.5 w-2.5 animate-spin" />{u.replace(/\/.*$/, '').trim()}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              </ScrollArea>
+            </div>
+
+            {/* 내 진행현황 — h-[400px] 고정 */}
+            {myName && (
+              <div className="h-[400px] flex flex-col bg-white rounded-xl border-2 border-blue-200 shadow-sm overflow-hidden">
+                <div className="px-5 pt-4 pb-3 border-b border-blue-100 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-2">
+                    <div className={`h-5 w-5 rounded-full ${getAssigneeColor(myName).avatarBg} text-white text-[10px] font-bold flex items-center justify-center`}>
+                      {getInitials(myName)}
+                    </div>
+                    <h3 className="font-semibold text-slate-800">내 진행현황</h3>
+                  </div>
+                  <span className="text-xs text-slate-400">{myName}</span>
+                </div>
+                <div className="bg-blue-50 border-b border-blue-100 px-4 py-1.5 flex items-center gap-2 shrink-0">
+                  <MousePointer2 className="h-3 w-3 text-blue-400 shrink-0" />
+                  <span className="text-[11px] text-blue-500 font-medium">항목을 클릭하여 내 진행 상태를 변경하세요</span>
+                </div>
+                <ScrollArea className="flex-1">
+                  <div className="px-3 py-2">
+                    {checklist.length === 0 ? (
+                      <p className="text-sm text-slate-400 text-center py-6">체크리스트가 비어 있습니다.</p>
+                    ) : (
+                      <ul className="space-y-0.5">
+                        {checklist.map((item) => {
+                          const myStatus = userStatuses.find(
+                            (s) => s.checklistItemId === item.id && s.userName === myName
+                          )?.status ?? 'pending';
+                          return (
+                            <li key={item.id}>
+                              <button
+                                type="button"
+                                onClick={() => handleUserStatus(item.id)}
+                                className={`w-full text-left flex items-center gap-3 py-2 px-2 rounded-lg transition-colors ${
+                                  myStatus === 'done' ? 'hover:bg-emerald-50/60' :
+                                  myStatus === 'in_progress' ? 'hover:bg-amber-50/60' :
+                                  'hover:bg-slate-50'
+                                }`}
+                              >
+                                {myStatus === 'done' ? (
+                                  <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500 shrink-0" />
+                                ) : myStatus === 'in_progress' ? (
+                                  <Loader2 className="h-[18px] w-[18px] text-amber-500 shrink-0 animate-spin" />
+                                ) : (
+                                  <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0" />
+                                )}
+                                <span className={`text-sm flex-1 leading-snug ${myStatus === 'done' ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                                  <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
+                                  {item.title}
+                                </span>
+                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
+                                  myStatus === 'done' ? 'bg-emerald-100 text-emerald-700' :
+                                  myStatus === 'in_progress' ? 'bg-amber-100 text-amber-700' :
+                                  'bg-slate-100 text-slate-500'
+                                }`}>
+                                  {USER_STATUS_LABELS[myStatus]}
+                                </span>
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                </ScrollArea>
+              </div>
+            )}
+          </div>
+
+          {/* 오른쪽: 담당 MR — 두 패널 합친 높이(400+16gap+400=816px) 고정 */}
+          <div className="h-[816px] flex flex-col bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-5 pt-5 pb-4 border-b border-slate-100 flex items-center justify-between shrink-0">
+              <h3 className="font-semibold text-slate-800">담당 MR</h3>
+              <span className="text-xs text-slate-500">
+                포함 <span className="font-semibold text-slate-700">{includedMrs.length}</span> / {mrs.length}
+              </span>
+            </div>
+            <div className="px-4 py-4 flex-1 overflow-hidden">
               {mrs.length === 0 ? (
-                <div className="py-8 text-center text-sm text-muted-foreground space-y-1">
-                  <GitMerge className="h-8 w-8 text-muted-foreground/30 mx-auto mb-2" />
+                <div className="py-10 text-center text-sm text-slate-400 space-y-2">
+                  <GitMerge className="h-8 w-8 text-slate-300 mx-auto" />
                   <p>import된 MR이 없습니다.</p>
                 </div>
               ) : (
-                <ScrollArea className="max-h-[520px] pr-3">
-                  <ul className="space-y-2">
-                    {mrs.map((mr) => (
-                      <MrCard
-                        key={mr.id}
-                        mr={mr}
-                        actorUserId={currentUser?.id}
-                        onUpdated={(updated) =>
-                          setMrs((prev) =>
-                            prev.map((m) => (m.id === updated.id ? updated : m))
-                          )
-                        }
-                      />
-                    ))}
-                  </ul>
+                <ScrollArea className="h-full pr-2">
+                  <div className="space-y-5">
+                    {Object.entries(mrsByAssignee).map(([assignee, assigneeMrs]) => {
+                      const color = getAssigneeColor(assignee);
+                      const initials = getInitials(assignee);
+                      return (
+                        <div key={assignee} className={`rounded-lg border-l-4 ${color.border} bg-slate-50/60 overflow-hidden`}>
+                          <div className={`px-3 py-2.5 ${color.headerBg} flex items-center gap-2.5`}>
+                            <div className={`h-6 w-6 rounded-full ${color.avatarBg} text-white text-[11px] font-bold flex items-center justify-center shrink-0`}>
+                              {initials}
+                            </div>
+                            <span className={`text-sm font-semibold ${color.nameFg}`}>
+                              {assignee.replace(/\/.*$/, '').trim()}
+                            </span>
+                            <span className={`ml-auto text-xs font-medium px-1.5 py-0.5 rounded-full ${color.badge}`}>
+                              {assigneeMrs.length}
+                            </span>
+                          </div>
+                          <ul className="divide-y divide-slate-100">
+                            {assigneeMrs.map((mr) => (
+                              <MrCard
+                                key={mr.id}
+                                mr={mr}
+                                actorUserId={currentUser?.id}
+                                onUpdated={(updated) => setMrs((prev) => prev.map((m) => (m.id === updated.id ? updated : m)))}
+                              />
+                            ))}
+                          </ul>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </ScrollArea>
               )}
-            </CardContent>
-          </Card>
+            </div>
+          </div>
         </div>
 
-        {/* 타임라인 */}
-        <Card>
-          <CardHeader>
-            <CardTitle>타임라인</CardTitle>
-            <CardDescription>
-              최근 활동이 가장 위에 표시됩니다
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {timeline.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                기록된 이벤트가 없습니다.
-              </p>
-            ) : (
-              <ScrollArea className="h-[320px] pr-3">
-                <ul className="space-y-2">
-                  {timeline.map((event) => (
-                    <li
-                      key={event.id}
-                      className="flex items-start gap-3 text-sm border-l-2 border-muted pl-3 py-1"
-                    >
-                      <span className="text-[11px] text-muted-foreground shrink-0 w-16">
-                        {formatTime(event.createdAt)}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <span className="font-medium">
-                          {TIMELINE_ACTION_LABELS[event.action] ?? event.action}
+        {/* Confluence 배포 전/후 할일 */}
+        {session.confluenceTasks && (
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-5 pt-5 pb-4 border-b border-slate-100 flex items-center justify-between">
+                <h3 className="font-semibold text-slate-800">2.1. 배포 전 할일</h3>
+                <span className="text-xs text-slate-500 tabular-nums">
+                  {session.confluenceTasks.before.filter((t) => t.status === 'complete').length} / {session.confluenceTasks.before.length}
+                </span>
+              </div>
+              <div className="px-3 py-3">
+                {session.confluenceTasks.before.length === 0 ? (
+                  <p className="text-sm text-slate-400 text-center py-6">없음</p>
+                ) : (
+                  <ul className="space-y-0.5">
+                    {session.confluenceTasks.before.map((task) => (
+                      <li key={task.id} className="flex items-start gap-3 py-2 px-2 rounded-lg">
+                        {task.status === 'complete' ? (
+                          <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500 shrink-0 mt-0.5" />
+                        ) : (
+                          <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0 mt-0.5" />
+                        )}
+                        <span className={`text-sm leading-snug ${task.status === 'complete' ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                          {task.body}
                         </span>
-                        {event.target && (
-                          <span className="text-muted-foreground ml-1.5">
-                            — {event.target}
-                          </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-5 pt-5 pb-4 border-b border-slate-100 flex items-center justify-between">
+                <h3 className="font-semibold text-slate-800">2.2. 배포 후 할일</h3>
+                <span className="text-xs text-slate-500 tabular-nums">
+                  {session.confluenceTasks.after.filter((t) => t.status === 'complete').length} / {session.confluenceTasks.after.length}
+                </span>
+              </div>
+              <div className="px-3 py-3">
+                {session.confluenceTasks.after.length === 0 ? (
+                  <p className="text-sm text-slate-400 text-center py-6">없음</p>
+                ) : (
+                  <ul className="space-y-0.5">
+                    {session.confluenceTasks.after.map((task) => (
+                      <li key={task.id} className="flex items-start gap-3 py-2 px-2 rounded-lg">
+                        {task.status === 'complete' ? (
+                          <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500 shrink-0 mt-0.5" />
+                        ) : (
+                          <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0 mt-0.5" />
                         )}
-                        {event.actorUserId && (
-                          <span className="text-[11px] text-muted-foreground ml-2">
-                            by {event.actorUserId}
+                        <span className={`text-sm leading-snug ${task.status === 'complete' ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                          {task.body}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 타임라인 */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 pt-5 pb-4 border-b border-slate-100">
+            <h3 className="font-semibold text-slate-800">타임라인</h3>
+          </div>
+          <div className="px-5 py-4">
+            {timeline.length === 0 ? (
+              <p className="text-sm text-slate-400 text-center py-4">기록된 이벤트가 없습니다.</p>
+            ) : (
+              <ScrollArea className="h-[280px] pr-3">
+                <ul className="space-y-0">
+                  {timeline.map((event, i) => (
+                    <li key={event.id} className="flex items-start gap-3 py-2.5 relative">
+                      {i < timeline.length - 1 && (
+                        <div className="absolute left-[19px] top-8 bottom-0 w-px bg-slate-100" />
+                      )}
+                      <div className="h-5 w-5 rounded-full bg-slate-100 border-2 border-white ring-1 ring-slate-200 shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-baseline gap-2 flex-wrap">
+                          <span className="text-sm font-medium text-slate-700">
+                            {TIMELINE_ACTION_LABELS[event.action] ?? event.action}
                           </span>
-                        )}
+                          {event.target && (
+                            <span className="text-xs text-slate-500 truncate max-w-[200px]">{event.target}</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-[11px] text-slate-400">{formatTime(event.createdAt)}</span>
+                          {event.actorUserId && (
+                            <span className="text-[11px] text-slate-400">· {event.actorUserId}</span>
+                          )}
+                        </div>
                       </div>
                     </li>
                   ))}
                 </ul>
               </ScrollArea>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       </div>
     </main>
   );
 }
+
+// ---- 서브 컴포넌트 ----
 
 interface MrCardProps {
   mr: DeployRoomMr;
@@ -482,127 +854,51 @@ function MrCard({ mr, actorUserId, onUpdated }: MrCardProps) {
       if (!json.success) throw new Error(json.error);
       onUpdated(json.mr);
     } catch (error) {
-      toast.error(
-        `업데이트 실패: ${error instanceof Error ? error.message : String(error)}`
-      );
+      onUpdated(mr); // 롤백
+      toast.error(`업데이트 실패: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <li
-      className={`rounded-md border p-3 space-y-2 ${
-        mr.included ? 'bg-muted/30' : 'opacity-70'
-      }`}
-    >
-      <div className="flex items-start gap-2">
-        <input
-          type="checkbox"
-          className="mt-1 h-4 w-4 accent-primary"
-          checked={mr.included}
-          disabled={saving}
-          onChange={(e) => patch({ included: e.target.checked })}
-          title="이번 배포에 포함"
-        />
-        <a
-          href={mr.url}
-          target="_blank"
-          rel="noreferrer"
-          className="text-sm font-medium hover:underline flex-1 min-w-0 break-words"
-        >
+    <li className={`px-3 py-2.5 transition-colors ${mr.included ? 'bg-white' : 'bg-slate-50/40 opacity-75'}`}>
+      <div className="flex items-center gap-2 min-w-0">
+        <GitPullRequest className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+        <a href={mr.url} target="_blank" rel="noreferrer"
+          className="text-sm font-medium text-slate-800 hover:text-blue-600 transition-colors truncate flex-1 min-w-0">
           {mr.title}
         </a>
-      </div>
-      <div className="text-[11px] text-muted-foreground flex items-center gap-2 flex-wrap pl-6">
-        <span>
-          {mr.gitlabProjectPath} !{mr.mrIid}
-        </span>
-        {mr.authorName && (
-          <>
-            <span>·</span>
-            <span>{mr.authorName}</span>
-          </>
-        )}
-      </div>
-      <div className="flex items-center gap-2 pl-6">
-        <Select
-          value={mr.status}
-          disabled={saving}
-          onValueChange={(value) =>
-            patch({ status: value as DeployRoomMrStatus })
-          }
-        >
-          <SelectTrigger className="h-7 w-[110px] text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="pending">대기</SelectItem>
-            <SelectItem value="approved">승인</SelectItem>
-            <SelectItem value="merged">머지</SelectItem>
-            <SelectItem value="conflict">충돌</SelectItem>
-          </SelectContent>
-        </Select>
-        <span
-          className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${MR_STATUS_STYLES[mr.status] ?? ''}`}
-        >
-          {MR_STATUS_LABELS[mr.status] ?? mr.status}
-        </span>
-      </div>
-      <div className="pl-6">
-        <NotesField
-          value={mr.notes ?? ''}
-          disabled={saving}
-          onCommit={(value) => patch({ notes: value || null })}
-        />
+        <label className="flex items-center gap-1 shrink-0 cursor-pointer">
+          <input
+            type="checkbox"
+            className="h-3.5 w-3.5 accent-emerald-500 cursor-pointer"
+            checked={mr.status === 'merged'}
+            disabled={saving}
+            onChange={(e) => {
+              const next = e.target.checked ? 'merged' : 'pending';
+              onUpdated({ ...mr, status: next });
+              patch({ status: next });
+            }}
+          />
+          <span className="text-[11px] text-slate-400 select-none">머지완료</span>
+        </label>
       </div>
     </li>
   );
 }
 
-function NotesField({
-  value,
-  disabled,
-  onCommit,
-}: {
-  value: string;
-  disabled?: boolean;
-  onCommit: (value: string) => void;
-}) {
-  // key 변경으로 외부 value 변화를 반영 (uncontrolled input)
-  return (
-    <input
-      key={value}
-      type="text"
-      defaultValue={value}
-      disabled={disabled}
-      onBlur={(e) => {
-        const next = e.currentTarget.value;
-        if (next !== value) onCommit(next);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          e.currentTarget.blur();
-        }
-      }}
-      placeholder="메모 (예: BE 선배포 필요)"
-      className="w-full text-xs px-2 py-1 rounded border bg-background placeholder:text-muted-foreground/50 disabled:opacity-60"
-    />
-  );
-}
 
 function PageHeader() {
   return (
-    <header className="border-b">
-      <div className="container mx-auto px-6 py-4 flex items-center gap-3">
+    <header className="bg-white border-b border-slate-200">
+      <div className="container mx-auto px-6 py-3 flex items-center gap-2">
         <Link href="/deploy-room">
-          <Button variant="ghost" size="icon">
+          <Button variant="ghost" size="icon" className="h-8 w-8">
             <ChevronLeft className="h-4 w-4" />
           </Button>
         </Link>
-        <div>
-          <h1 className="text-lg font-semibold">배포방</h1>
-        </div>
+        <span className="text-sm font-medium text-slate-600">배포방</span>
       </div>
     </header>
   );
@@ -610,8 +906,5 @@ function PageHeader() {
 
 function formatTime(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleTimeString('ko-KR', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
 }

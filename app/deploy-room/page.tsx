@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ChevronLeft, Plus, Rocket } from 'lucide-react';
+import { ChevronLeft, Plus, Rocket, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
@@ -29,7 +29,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { DEPLOY_ROOM_TEMPLATES } from '@/lib/constants/deploy-room';
+import {
+  DEPLOY_PROJECTS,
+  DEPLOY_TYPES,
+  deployDateToYYMMDD,
+  getTemplateByProjectAndType,
+  type DeployType,
+  type ProjectKey,
+} from '@/lib/constants/deploy-room';
 import { useCurrentUser } from '@/contexts/user-context';
 import type {
   DeployRoomSession,
@@ -58,15 +65,14 @@ export default function DeployRoomListPage() {
   const [createOpen, setCreateOpen] = useState(false);
 
   // create form state
-  const [title, setTitle] = useState('');
-  const [templateId, setTemplateId] = useState<string>(
-    DEPLOY_ROOM_TEMPLATES[0]?.id ?? ''
-  );
+  const [project, setProject] = useState<ProjectKey>('groupware');
+  const [deployType, setDeployType] = useState<DeployType>('adhoc');
   const [deployDate, setDeployDate] = useState<string>(() =>
     new Date().toISOString().slice(0, 10)
   );
   const [confluencePageUrl, setConfluencePageUrl] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadSessions = async () => {
     setLoading(true);
@@ -91,26 +97,50 @@ export default function DeployRoomListPage() {
     loadSessions();
   }, []);
 
+  const handleDelete = async (e: React.MouseEvent, sessionId: string) => {
+    e.preventDefault();
+    if (!confirm('배포방을 삭제하시겠습니까?')) return;
+    setDeletingId(sessionId);
+    try {
+      const res = await fetch(`/api/deploy-room/sessions/${sessionId}`, {
+        method: 'DELETE',
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      toast.success('삭제되었습니다');
+    } catch (error) {
+      toast.error(`삭제 실패: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const resetForm = () => {
-    setTitle('');
-    setTemplateId(DEPLOY_ROOM_TEMPLATES[0]?.id ?? '');
+    setProject('groupware');
+    setDeployType('adhoc');
     setDeployDate(new Date().toISOString().slice(0, 10));
     setConfluencePageUrl('');
   };
 
   const handleCreate = async () => {
-    if (!title.trim() || !templateId || !deployDate) {
-      toast.error('제목, 템플릿, 배포일은 필수입니다');
+    if (!deployDate) {
+      toast.error('배포일은 필수입니다');
       return;
     }
+    const template = getTemplateByProjectAndType(project, deployType);
+    const projectInfo = DEPLOY_PROJECTS.find((p) => p.id === project);
+    const typeInfo = DEPLOY_TYPES.find((t) => t.id === deployType);
+    const title = `${projectInfo?.shortName ?? project} ${deployDateToYYMMDD(deployDate)} ${typeInfo?.name ?? deployType}`;
+
     setSubmitting(true);
     try {
       const res = await fetch('/api/deploy-room/sessions', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          title: title.trim(),
-          templateId,
+          title,
+          templateId: template.id,
           deployDate,
           confluencePageUrl: confluencePageUrl.trim() || undefined,
           createdBy: currentUser?.id,
@@ -172,35 +202,42 @@ export default function DeployRoomListPage() {
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {sessions.map((session) => (
-              <Link
-                key={session.id}
-                href={`/deploy-room/${session.id}`}
-                className="block"
-              >
-                <Card className="hover:border-primary transition-colors h-full">
-                  <CardHeader>
-                    <div className="flex items-start justify-between gap-2">
-                      <CardTitle className="text-base leading-snug">
-                        {session.title}
-                      </CardTitle>
-                      <span
-                        className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[session.status]}`}
-                      >
-                        {STATUS_LABELS[session.status]}
-                      </span>
-                    </div>
-                    <CardDescription>{session.deployDate}</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-xs text-muted-foreground space-y-1">
-                      <div>템플릿: {session.templateId}</div>
-                      {session.createdBy && (
-                        <div>담당: {session.createdBy}</div>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
+              <div key={session.id} className="relative group">
+                <Link href={`/deploy-room/${session.id}`} className="block">
+                  <Card className="hover:border-primary transition-colors h-full">
+                    <CardHeader>
+                      <div className="flex items-start justify-between gap-2">
+                        <CardTitle className="text-base leading-snug">
+                          {session.title}
+                        </CardTitle>
+                        <span
+                          className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[session.status]}`}
+                        >
+                          {STATUS_LABELS[session.status]}
+                        </span>
+                      </div>
+                      <CardDescription>{session.deployDate}</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-xs text-muted-foreground space-y-1">
+                        <div>템플릿: {session.templateId}</div>
+                        {session.createdBy && (
+                          <div>담당: {session.createdBy}</div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </Link>
+                <button
+                  type="button"
+                  onClick={(e) => handleDelete(e, session.id)}
+                  disabled={deletingId === session.id}
+                  className="absolute bottom-3 right-3 p-1.5 rounded-md opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all disabled:opacity-50"
+                  title="배포방 삭제"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
             ))}
           </div>
         )}
@@ -216,21 +253,43 @@ export default function DeployRoomListPage() {
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-1.5">
-              <label className="text-sm font-medium">제목</label>
-              <Input
-                placeholder="예: CPO 0409 정기배포"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">템플릿</label>
-              <Select value={templateId} onValueChange={setTemplateId}>
+              <label className="text-sm font-medium">프로젝트</label>
+              <Select
+                value={project}
+                onValueChange={(v) => setProject(v as ProjectKey)}
+              >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {DEPLOY_ROOM_TEMPLATES.map((t) => (
+                  {DEPLOY_PROJECTS.map((p) => (
+                    <SelectItem
+                      key={p.id}
+                      value={p.id}
+                      disabled={!p.enabled}
+                    >
+                      {p.name}
+                      {!p.enabled && (
+                        <span className="ml-1.5 text-xs text-muted-foreground">
+                          (준비 중)
+                        </span>
+                      )}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">배포 유형</label>
+              <Select
+                value={deployType}
+                onValueChange={(v) => setDeployType(v as DeployType)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {DEPLOY_TYPES.map((t) => (
                     <SelectItem key={t.id} value={t.id}>
                       {t.name}
                     </SelectItem>

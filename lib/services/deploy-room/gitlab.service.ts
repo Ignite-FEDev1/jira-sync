@@ -12,6 +12,7 @@ interface GitlabMergeRequest {
   title: string;
   web_url: string;
   author: { name: string } | null;
+  assignees: Array<{ name: string }>;
   source_branch: string;
   target_branch: string;
   state: string;
@@ -27,10 +28,12 @@ function getGitlabConfig(): { baseUrl: string; token: string } {
 }
 
 /**
- * 특정 GitLab 프로젝트의 open MR 목록 조회
+ * 특정 GitLab 프로젝트의 open MR 목록 조회.
+ * labelFilter를 넘기면 해당 라벨이 달린 MR만 반환한다.
  */
 export async function fetchOpenMergeRequests(
-  projectUrlOrPath: string
+  projectUrlOrPath: string,
+  labelFilter?: string
 ): Promise<GitlabMergeRequest[]> {
   const { baseUrl, token } = getGitlabConfig();
   const projectPath = extractGitlabProjectPath(projectUrlOrPath);
@@ -39,7 +42,11 @@ export async function fetchOpenMergeRequests(
   const { data } = await axios.get<GitlabMergeRequest[]>(
     `${baseUrl}/api/v4/projects/${encoded}/merge_requests`,
     {
-      params: { state: 'opened', per_page: 100 },
+      params: {
+        state: 'opened',
+        per_page: 100,
+        ...(labelFilter ? { labels: labelFilter } : {}),
+      },
       headers: { 'PRIVATE-TOKEN': token },
       httpsAgent,
       timeout: 15000,
@@ -55,13 +62,15 @@ interface ImportResult {
 }
 
 /**
- * 세션의 템플릿 프로젝트들로부터 Open MR을 모두 가져와 deploy_room_mrs에 저장.
+ * 세션의 템플릿 프로젝트들로부터 Open MR을 가져와 deploy_room_mrs에 저장.
+ * labelFilter를 넘기면 해당 라벨이 달린 MR만 가져온다.
  * 일부 프로젝트 실패해도 전체 실패하지 않고 타임라인에 기록한다.
  */
 export async function importMrsForSession(
   sessionId: string,
   projectUrls: readonly string[],
-  actorUserId?: string
+  actorUserId?: string,
+  labelFilter?: string
 ): Promise<ImportResult> {
   const allRows: Array<{
     session_id: string;
@@ -70,6 +79,7 @@ export async function importMrsForSession(
     title: string;
     url: string;
     author_name: string | null;
+    assignee_name: string | null;
     source_branch: string | null;
     target_branch: string | null;
     included: boolean;
@@ -79,7 +89,7 @@ export async function importMrsForSession(
 
   for (const projectUrl of projectUrls) {
     try {
-      const mrs = await fetchOpenMergeRequests(projectUrl);
+      const mrs = await fetchOpenMergeRequests(projectUrl, labelFilter);
       const projectPath = extractGitlabProjectPath(projectUrl);
       for (const mr of mrs) {
         allRows.push({
@@ -89,6 +99,7 @@ export async function importMrsForSession(
           title: mr.title,
           url: mr.web_url,
           author_name: mr.author?.name ?? null,
+          assignee_name: mr.assignees?.[0]?.name ?? null,
           source_branch: mr.source_branch,
           target_branch: mr.target_branch,
           included: false,
