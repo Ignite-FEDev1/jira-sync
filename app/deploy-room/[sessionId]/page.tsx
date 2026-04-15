@@ -664,22 +664,6 @@ export default function DeployRoomDetailPage() {
                           <div className={`h-full rounded-full transition-all duration-500 ${stage.bar}`} style={{ width: `${pct}%` }} />
                         )}
                       </div>
-                      {/* 머지/승인/충돌 태그 (대기 제외) — 항상 렌더하여 카드 간 높이 통일 */}
-                      <div className="flex gap-1 flex-wrap min-h-[4px]">
-                        {isActive && total > 0 && (['merged', 'approved', 'conflict'] as const).map((s) => {
-                          const cnt = assigneeMrs.filter((m) => m.status === s).length;
-                          if (cnt === 0) return null;
-                          return (
-                            <span key={s} className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                              s === 'merged' ? 'bg-emerald-100 text-emerald-700' :
-                              s === 'approved' ? 'bg-blue-100 text-blue-700' :
-                              'bg-rose-100 text-rose-700'
-                            }`}>
-                              {s === 'merged' ? '완료' : s === 'approved' ? '진행중' : '충돌'} {cnt}
-                            </span>
-                          );
-                        })}
-                      </div>
                     </div>
 
                     {/* 제외/참여 버튼 — 항상 카드 최하단 */}
