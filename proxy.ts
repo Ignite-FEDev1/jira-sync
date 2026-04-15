@@ -41,8 +41,8 @@ export function proxy(request: NextRequest) {
     request.headers.get('x-real-ip') ||
     '';
 
-  // API 배치 호출은 허용 (GitHub Actions 등)
-  if (request.nextUrl.pathname.startsWith('/api/batch')) {
+  // API 호출은 IP 제한 대신 별도 인증으로 보호
+  if (request.nextUrl.pathname.startsWith('/api/')) {
     return NextResponse.next();
   }
 
