@@ -68,13 +68,42 @@ const SYSTEM_PROMPT = [
   '- FE 할일이 없으면 빈 배열로 응답하세요.',
 ].join('\n');
 
+/**
+ * 문서에서 FE 섹션만 추출. 못 찾으면 전체 텍스트 앞부분 반환.
+ */
+function extractFESection(text: string): string {
+  const lines = text.split('\n');
+  let feStart = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    // "FE - release/..." 또는 "FE" 단독 헤딩
+    if (/^(\d+\.\s*)?FE(\s|$)/i.test(t)) {
+      feStart = i;
+      // 가장 마지막 매칭을 사용 (BE, APP 뒤에 FE가 올 수 있음)
+    }
+  }
+  if (feStart >= 0) {
+    // FE 시작부터 최대 200줄 또는 다음 대분류 헤딩(APP, 잔여, 승인, 검증 등)까지
+    const section: string[] = [];
+    for (let i = feStart; i < Math.min(lines.length, feStart + 200); i++) {
+      const t = lines[i].trim();
+      if (i > feStart && /^(APP|잔여|배포\s*의존|승인|검증계|운영계)\b/i.test(t)) break;
+      section.push(lines[i]);
+    }
+    return section.join('\n');
+  }
+  // FE 섹션 못 찾으면 전체 앞부분
+  return text.slice(0, 8000);
+}
+
 function buildUserPrompt(pageText: string): string {
+  const feSection = extractFESection(pageText);
   return `아래 배포 체크리스트 문서에서 FE 섹션의 배포 전/후 할일을 추출하세요.
 반드시 JSON 형식으로만 응답하세요:
 {"before": [{"text": "할일 내용", "status": "complete" | "incomplete"}], "after": [...]}
 
 문서:
-${pageText.slice(0, 6000)}`;
+${feSection.slice(0, 8000)}`;
 }
 
 /** H-Chat Claude API (사내망 전용) */
