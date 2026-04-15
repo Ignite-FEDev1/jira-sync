@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
       source_branch: mr.source_branch,
       target_branch: mr.target_branch,
       included: false,
-      status: 'pending',
+      status: mr.status ?? 'pending',
     }));
 
     const { data, error } = await dbServer

@@ -426,7 +426,7 @@ export default function DeployRoomDetailPage() {
         const encoded = encodeURIComponent(projectPath);
         const baseUrl = projectUrl.match(/^https?:\/\/[^/]+/)?.[0] ?? 'https://gitlab.hmc.co.kr';
 
-        const params = new URLSearchParams({ per_page: '100' });
+        const params = new URLSearchParams({ per_page: '100', state: 'all' });
         if (labelFilter) params.set('labels', labelFilter);
 
         const res = await fetch(
@@ -451,6 +451,7 @@ export default function DeployRoomDetailPage() {
             assignee_name: mr.assignees?.[0]?.name ?? mr.assignee?.name ?? null,
             source_branch: mr.source_branch ?? null,
             target_branch: mr.target_branch ?? null,
+            status: mr.state === 'merged' ? 'merged' : 'pending',
           });
         }
       }
