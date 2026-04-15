@@ -77,13 +77,19 @@ export async function mapFieldsFromDb(
   for (const mapping of mappings) {
     const { source_field, target_field, transform_type } = mapping;
 
+    // 안전장치: 스프린트 필드가 copy로 되어 있으면 sprint_map으로 보정
+    // (프로젝트마다 스프린트 ID가 다르므로 단순 복사 불가)
+    const isSprintField = source_field === 'customfield_10020';
+
     // 안전장치: cross-instance에서 사람 필드가 copy로 되어 있으면 account_map으로 보정
     const effectiveTransformType =
-      transform_type === 'copy' &&
-      isCrossInstance &&
-      ACCOUNT_FIELDS.includes(source_field)
-        ? 'account_map'
-        : transform_type;
+      transform_type === 'copy' && isSprintField
+        ? 'sprint_map'
+        : transform_type === 'copy' &&
+            isCrossInstance &&
+            ACCOUNT_FIELDS.includes(source_field)
+          ? 'account_map'
+          : transform_type;
 
     switch (effectiveTransformType) {
       case 'copy': {
