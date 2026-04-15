@@ -281,23 +281,25 @@ export default function DeployRoomListPage() {
                       <CardDescription>{session.deployDate}</CardDescription>
                     </CardHeader>
                     <CardContent>
-                      <div className="text-xs text-muted-foreground space-y-1">
-                        {session.createdBy && (
-                          <div>담당: {session.createdBy}</div>
-                        )}
+                      <div className="flex items-end justify-between">
+                        <div className="text-xs text-muted-foreground space-y-1">
+                          {session.createdBy && (
+                            <div>담당: {session.createdBy}</div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => handleDelete(e, session.id)}
+                          disabled={deletingId === session.id}
+                          className="p-1.5 rounded-md opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all disabled:opacity-50"
+                          title="배포방 삭제"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     </CardContent>
                   </Card>
                 </Link>
-                <button
-                  type="button"
-                  onClick={(e) => handleDelete(e, session.id)}
-                  disabled={deletingId === session.id}
-                  className="absolute bottom-3 right-3 p-1.5 rounded-md opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all disabled:opacity-50"
-                  title="배포방 삭제"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
               </div>
             ))}
           </div>
