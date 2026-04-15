@@ -55,54 +55,79 @@ function fetchJson(hostname: string, path: string): Promise<unknown> {
   });
 }
 
-/** H-Chat Claude API 호출 */
-function callHChat(system: string, user: string): Promise<string> {
-  const apiKey = process.env.H_CHAT_API_KEY;
-  if (!apiKey) throw new Error('H_CHAT_API_KEY 환경변수 없음');
+/** Groq LLM으로 FE 배포 전/후 할일 파싱 */
+async function parseWithGroq(pageText: string): Promise<ConfluenceDeployTasks> {
+  const groqKey = process.env.GROQ_API_KEY;
+  if (!groqKey) throw new Error('GROQ_API_KEY 환경변수 없음');
 
-  const body = JSON.stringify({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 2048,
-    stream: false,
-    system,
-    messages: [{ role: 'user', content: user }],
-  });
-
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      {
-        hostname: 'internal-apigw-kr.hmg-corp.io',
-        path: '/hchat-in/api/v3/claude/messages',
-        method: 'POST',
-        agent: httpsAgent,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: apiKey,
-          'Content-Length': Buffer.byteLength(body),
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${groqKey}`,
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: [
+            '당신은 배포 체크리스트 문서 파서입니다.',
+            'Confluence 배포 문서에서 FE(프론트엔드) 섹션의 할일만 정확히 추출합니다.',
+            '규칙:',
+            '- FE 섹션은 보통 "FE" 헤딩 하위에 위치합니다.',
+            '- BE(백엔드), DB, 배치, APP 등 다른 섹션의 항목은 절대 포함하지 마세요.',
+            '- "배포 전 할일" 하위 항목 → before 배열',
+            '- "배포 후 할일" 하위 항목 → after 배열',
+            '- 체크된 항목은 status: "complete", 미체크는 status: "incomplete"',
+            '- 빈 항목이나 의미없는 메타 텍스트("배포 전 할일", "배포전 할일을 끝마쳤는가?" 등)는 제외하세요.',
+            '- FE 할일이 없으면 빈 배열로 응답하세요.',
+          ].join('\n'),
         },
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (c) => (data += c));
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(data) as { content: Array<{ text: string }> };
-            resolve(json.content[0]?.text ?? '');
-          } catch {
-            reject(new Error(`H-Chat 응답 파싱 실패: ${data.slice(0, 200)}`));
-          }
-        });
-      }
-    );
-    req.on('error', reject);
-    req.write(body);
-    req.end();
+        {
+          role: 'user',
+          content: `아래 배포 체크리스트 문서에서 FE 섹션의 배포 전/후 할일을 추출하세요.
+반드시 JSON 형식으로만 응답하세요:
+{"before": [{"text": "할일 내용", "status": "complete" | "incomplete"}], "after": [...]}
+
+문서:
+${pageText}`,
+        },
+      ],
+    }),
   });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Groq API 오류 ${res.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const json = await res.json() as { choices: Array<{ message: { content: string } }> };
+  const content = json.choices[0]?.message?.content ?? '{}';
+  const parsed = JSON.parse(content) as {
+    before?: Array<{ text: string; status: string }>;
+    after?: Array<{ text: string; status: string }>;
+  };
+
+  return {
+    before: (parsed.before ?? []).map((t, i) => ({
+      id: i + 1,
+      body: t.text,
+      status: (t.status === 'complete' ? 'complete' : 'incomplete') as 'complete' | 'incomplete',
+    })),
+    after: (parsed.after ?? []).map((t, i) => ({
+      id: 1000 + i + 1,
+      body: t.text,
+      status: (t.status === 'complete' ? 'complete' : 'incomplete') as 'complete' | 'incomplete',
+    })),
+  };
 }
 
 /**
  * Confluence 배포 문서에서 FE 섹션의 배포 전/후 할일 파싱.
- * view HTML을 LLM에 전달하여 문서 형식에 관계없이 파싱.
+ * view HTML → plaintext → Groq LLM 파싱.
  */
 export async function parseConfluenceTasks(
   confluencePageUrl: string
@@ -124,38 +149,7 @@ export async function parseConfluenceTasks(
       .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
       .replace(/\n{3,}/g, '\n\n').trim();
 
-    const systemPrompt = [
-      '당신은 배포 체크리스트 문서 파서입니다.',
-      'FE 섹션("FE" 헤딩 하위)의 할일만 추출합니다.',
-      'BE, DB, 배치, APP 등 다른 섹션은 절대 포함하지 마세요.',
-      '"배포 전 할일" → before 배열, "배포 후 할일" → after 배열',
-      '체크된 항목: status "complete", 미체크: status "incomplete"',
-      '빈 항목·의미없는 줄("배포 전 할일", "배포전 할일을 끝마쳤는가?" 등 메타 텍스트)은 제외.',
-      'FE 할일이 없으면 빈 배열로 응답.',
-      '반드시 JSON만 출력: {"before":[{"text":"...","status":"complete"|"incomplete"}],"after":[...]}',
-    ].join('\n');
-
-    const raw = await callHChat(systemPrompt, `문서:\n${plainText}`);
-
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-    const result = JSON.parse(jsonMatch[0]) as {
-      before?: Array<{ text: string; status: string }>;
-      after?: Array<{ text: string; status: string }>;
-    };
-
-    const beforeTasks = (result.before ?? []).map((t, i) => ({
-      id: i + 1,
-      body: t.text,
-      status: (t.status === 'complete' ? 'complete' : 'incomplete') as 'complete' | 'incomplete',
-    }));
-    const afterTasks = (result.after ?? []).map((t, i) => ({
-      id: 1000 + i + 1,
-      body: t.text,
-      status: (t.status === 'complete' ? 'complete' : 'incomplete') as 'complete' | 'incomplete',
-    }));
-
-    return { before: beforeTasks, after: afterTasks };
+    return await parseWithGroq(plainText);
   } catch (err) {
     console.error('[confluence] 파싱 실패:', err);
     return null;
