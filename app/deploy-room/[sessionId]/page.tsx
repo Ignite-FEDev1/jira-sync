@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   Circle,
+  Download,
   ExternalLink,
   GitMerge,
   GitPullRequest,
@@ -167,6 +168,8 @@ export default function DeployRoomDetailPage() {
   const [templateTeamMembers, setTemplateTeamMembers] = useState<string[]>([]);
   const [isLeader, setIsLeader] = useState(false);
   const [leaderName, setLeaderName] = useState<string | null>(null);
+  const [templateGitlabProjects, setTemplateGitlabProjects] = useState<string[]>([]);
+  const [importingMrs, setImportingMrs] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState<PresenceUser[]>([]);
@@ -212,14 +215,29 @@ export default function DeployRoomDetailPage() {
             if (leader) setLeaderName(leader.name);
           }
         } catch {}
+        // 템플릿에서 gitlabProjects 가져오기
+        if (sessionJson.session?.templateId) {
+          try {
+            const tmplRes2 = await fetch(`/api/admin/deploy-room/templates/${sessionJson.session.templateId}`);
+            const tmplJson2 = await tmplRes2.json();
+            if (tmplJson2.success && tmplJson2.template?.gitlabProjects?.length) {
+              setTemplateGitlabProjects(tmplJson2.template.gitlabProjects);
+            }
+          } catch {}
+        }
       } else {
         // 구형 세션(teamId 없음): 템플릿에서 팀원 조회 시도
         if (sessionJson.session?.templateId) {
           try {
             const tmplRes = await fetch(`/api/admin/deploy-room/templates/${sessionJson.session.templateId}`);
             const tmplJson = await tmplRes.json();
-            if (tmplJson.success && tmplJson.template?.teamMembers?.length) {
-              setTemplateTeamMembers(tmplJson.template.teamMembers);
+            if (tmplJson.success && tmplJson.template) {
+              if (tmplJson.template.teamMembers?.length) {
+                setTemplateTeamMembers(tmplJson.template.teamMembers);
+              }
+              if (tmplJson.template.gitlabProjects?.length) {
+                setTemplateGitlabProjects(tmplJson.template.gitlabProjects);
+              }
             }
           } catch {}
         }
@@ -364,6 +382,90 @@ export default function DeployRoomDetailPage() {
     } catch (error) {
       setSession((prev) => prev ? { ...prev, inactiveParticipants: current } : prev);
       toast.error(`참여자 설정 실패: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  // 브라우저에서 GitLab MR 가져오기
+  const handleImportMrs = async () => {
+    if (!session || templateGitlabProjects.length === 0) {
+      toast.error('GitLab 프로젝트 정보가 없습니다');
+      return;
+    }
+
+    const gitlabToken = prompt('GitLab Private Token을 입력하세요:');
+    if (!gitlabToken) return;
+
+    // deployType에 맞는 라벨 필터 생성
+    const deployType = session.deployType ?? 'regular';
+    const [year, month, day] = session.deployDate.split('-');
+    const yyMMdd = year.slice(2) + month + day;
+    let labelFilter = '';
+    if (deployType === 'regular') labelFilter = `정기배포(${yyMMdd})`;
+    else if (deployType === 'adhoc') labelFilter = `비정기배포(${yyMMdd})`;
+
+    setImportingMrs(true);
+    try {
+      const allMrs: Array<Record<string, unknown>> = [];
+
+      for (const projectUrl of templateGitlabProjects) {
+        const projectPath = projectUrl.replace(/\/$/, '').replace(/^https?:\/\/[^/]+\//, '');
+        const encoded = encodeURIComponent(projectPath);
+        const baseUrl = projectUrl.match(/^https?:\/\/[^/]+/)?.[0] ?? 'https://gitlab.hmc.co.kr';
+
+        const params = new URLSearchParams({ per_page: '100' });
+        if (labelFilter) params.set('labels', labelFilter);
+
+        const res = await fetch(
+          `${baseUrl}/api/v4/projects/${encoded}/merge_requests?${params}`,
+          { headers: { 'PRIVATE-TOKEN': gitlabToken } }
+        );
+
+        if (!res.ok) {
+          const errText = await res.text();
+          toast.error(`GitLab API 오류 (${res.status}): ${errText.slice(0, 100)}`);
+          continue;
+        }
+
+        const gitlabMrs = await res.json();
+        for (const mr of gitlabMrs) {
+          allMrs.push({
+            gitlab_project_path: projectPath,
+            mr_iid: mr.iid,
+            title: mr.title,
+            url: mr.web_url,
+            author_name: mr.author?.name ?? null,
+            assignee_name: mr.assignees?.[0]?.name ?? mr.assignee?.name ?? null,
+            source_branch: mr.source_branch ?? null,
+            target_branch: mr.target_branch ?? null,
+          });
+        }
+      }
+
+      if (allMrs.length === 0) {
+        toast.error('가져올 MR이 없습니다');
+        setImportingMrs(false);
+        return;
+      }
+
+      // 서버에 bulk insert
+      const saveRes = await fetch('/api/deploy-room/mrs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          mrs: allMrs,
+          actorUserId: currentUser?.id,
+        }),
+      });
+      const saveJson = await saveRes.json();
+      if (!saveJson.success) throw new Error(saveJson.error);
+
+      toast.success(`${saveJson.inserted}개 MR을 가져왔습니다`);
+      load(); // 새로고침
+    } catch (error) {
+      toast.error(`MR 가져오기 실패: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setImportingMrs(false);
     }
   };
 
@@ -765,9 +867,27 @@ export default function DeployRoomDetailPage() {
           <div className="h-[816px] flex flex-col bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="px-5 pt-5 pb-4 border-b border-slate-100 flex items-center justify-between shrink-0">
               <h3 className="font-semibold text-slate-800">담당 MR</h3>
-              <span className="text-xs text-slate-500">
-                포함 <span className="font-semibold text-slate-700">{includedMrs.length}</span> / {mrs.length}
-              </span>
+              <div className="flex items-center gap-3">
+                {templateGitlabProjects.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={handleImportMrs}
+                    disabled={importingMrs}
+                  >
+                    {importingMrs ? (
+                      <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    ) : (
+                      <Download className="h-3 w-3 mr-1" />
+                    )}
+                    MR 가져오기
+                  </Button>
+                )}
+                <span className="text-xs text-slate-500">
+                  포함 <span className="font-semibold text-slate-700">{includedMrs.length}</span> / {mrs.length}
+                </span>
+              </div>
             </div>
             <div className="px-4 py-4 flex-1 overflow-hidden">
               {mrs.length === 0 ? (
