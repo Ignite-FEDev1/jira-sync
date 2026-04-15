@@ -76,10 +76,11 @@ function extractFESection(text: string): string {
   let feStart = -1;
   for (let i = 0; i < lines.length; i++) {
     const t = lines[i].trim();
-    // "FE - release/..." 또는 "FE" 단독 헤딩
-    if (/^(\d+\.\s*)?FE(\s|$)/i.test(t)) {
+    // "FE - release/..." 또는 "2. FE" 등 대분류 헤딩만 매칭
+    // "FE BO", "FE FO" 같은 하위 항목은 제외
+    if (/^(\d+\.\s*)?FE\s*[-–—]/i.test(t) || /^(\d+\.\s*)?FE\s*$/i.test(t)) {
       feStart = i;
-      // 가장 마지막 매칭을 사용 (BE, APP 뒤에 FE가 올 수 있음)
+      break; // 첫 번째 FE 대분류 헤딩 사용
     }
   }
   if (feStart >= 0) {
