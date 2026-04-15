@@ -130,6 +130,7 @@ type SessionRow = {
   title: string;
   template_id: string;
   team_id: string | null;
+  deploy_type: string;
   deploy_date: string;
   confluence_page_url: string | null;
   inactive_participants: string[] | null;
@@ -145,6 +146,7 @@ function mapSession(row: SessionRow): DeployRoomSession {
     title: row.title,
     templateId: row.template_id,
     teamId: row.team_id ?? null,
+    deployType: row.deploy_type ?? 'regular',
     deployDate: row.deploy_date,
     confluencePageUrl: row.confluence_page_url,
     confluenceTasks: null, // realtime payload에는 미포함 — page에서 기존 값 보존

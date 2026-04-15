@@ -34,6 +34,7 @@ export interface DeployRoomSession {
   title: string;
   templateId: string;
   teamId: string | null;
+  deployType: string;
   deployDate: string; // YYYY-MM-DD
   confluencePageUrl: string | null;
   confluenceTasks: ConfluenceDeployTasks | null;

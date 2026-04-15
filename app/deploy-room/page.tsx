@@ -34,6 +34,12 @@ import {
   deployDateToYYMMDD,
   type DeployType,
 } from '@/lib/constants/deploy-room';
+
+const DEPLOY_TYPE_CHIP: Record<string, { label: string; style: string }> = {
+  regular: { label: '정기', style: 'bg-blue-100 text-blue-700' },
+  adhoc: { label: '비정기', style: 'bg-violet-100 text-violet-700' },
+  hotfix: { label: '핫픽스', style: 'bg-rose-100 text-rose-700' },
+};
 import { useCurrentUser } from '@/contexts/user-context';
 import type {
   DeployRoomSession,
@@ -178,8 +184,7 @@ export default function DeployRoomListPage() {
       return;
     }
 
-    const typeInfo = DEPLOY_TYPES.find((t) => t.id === deployType);
-    const title = `${selectedTemplate.name} ${deployDateToYYMMDD(deployDate)} ${typeInfo?.name ?? deployType}`;
+    const title = `${selectedTemplate.name} ${deployDateToYYMMDD(deployDate)}`;
 
     setSubmitting(true);
     try {
@@ -257,9 +262,16 @@ export default function DeployRoomListPage() {
                   <Card className="hover:border-primary transition-colors h-full">
                     <CardHeader>
                       <div className="flex items-start justify-between gap-2">
-                        <CardTitle className="text-base leading-snug">
-                          {session.title}
-                        </CardTitle>
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                          <CardTitle className="text-base leading-snug">
+                            {session.title}
+                          </CardTitle>
+                          {session.deployType && DEPLOY_TYPE_CHIP[session.deployType] && (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0 ${DEPLOY_TYPE_CHIP[session.deployType].style}`}>
+                              {DEPLOY_TYPE_CHIP[session.deployType].label}
+                            </span>
+                          )}
+                        </div>
                         <span
                           className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[session.status]}`}
                         >

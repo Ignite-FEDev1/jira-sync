@@ -19,6 +19,7 @@ type SessionRow = {
   title: string;
   template_id: string;
   team_id: string | null;
+  deploy_type: string;
   deploy_date: string;
   confluence_page_url: string | null;
   confluence_tasks: ConfluenceDeployTasks | null;
@@ -48,6 +49,7 @@ function toSession(row: SessionRow): DeployRoomSession {
     title: row.title,
     templateId: row.template_id,
     teamId: row.team_id ?? null,
+    deployType: row.deploy_type ?? 'regular',
     deployDate: row.deploy_date,
     confluencePageUrl: row.confluence_page_url,
     confluenceTasks: row.confluence_tasks ?? null,
@@ -136,6 +138,7 @@ export async function createSession(
       title: req.title,
       template_id: req.templateId,
       team_id: req.teamId ?? null,
+      deploy_type: req.deployType ?? 'regular',
       deploy_date: req.deployDate,
       confluence_page_url: req.confluencePageUrl ?? null,
       confluence_tasks: confluenceTasks,
