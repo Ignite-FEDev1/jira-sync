@@ -713,7 +713,7 @@ export default function DeployRoomDetailPage() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <h3 className="font-semibold text-slate-700">전체 현황</h3>
-                    <span className="text-[10px] text-slate-500 bg-slate-200 px-1.5 py-0.5 rounded font-medium">자동집계</span>
+                    <span className="text-[11px] text-blue-700 bg-blue-100 px-2 py-0.5 rounded font-semibold">자동집계</span>
                   </div>
                   <span className="text-xs text-slate-400 tabular-nums">{doneCount} / {checklist.length}</span>
                 </div>
