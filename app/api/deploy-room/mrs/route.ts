@@ -23,6 +23,7 @@ export async function POST(request: NextRequest) {
       assignee_name: string | null;
       source_branch: string | null;
       target_branch: string | null;
+      status?: string;
     }) => ({
       session_id: sessionId,
       gitlab_project_path: mr.gitlab_project_path,
