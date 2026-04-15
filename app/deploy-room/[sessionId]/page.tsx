@@ -476,7 +476,10 @@ export default function DeployRoomDetailPage() {
       if (!saveJson.success) throw new Error(saveJson.error);
 
       toast.success(`${saveJson.inserted}개 MR을 가져왔습니다`);
-      load(); // 새로고침
+      // MR만 다시 조회
+      const mrsRefresh = await fetch(`/api/deploy-room/mrs?sessionId=${sessionId}`);
+      const mrsJson = await mrsRefresh.json();
+      if (mrsJson.success) setMrs(mrsJson.mrs);
     } catch (error) {
       toast.error(`MR 가져오기 실패: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
