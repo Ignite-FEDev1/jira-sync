@@ -39,6 +39,7 @@ interface User {
   hmgJiraApiToken: string;
   hmgUserId: string;
   hChatApiKey: string;
+  gitlabToken: string;
   teamId: string;
 }
 
@@ -57,6 +58,7 @@ interface FormState {
   hmgJiraApiToken: string;
   hmgUserId: string;
   hChatApiKey: string;
+  gitlabToken: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -68,6 +70,7 @@ const EMPTY_FORM: FormState = {
   hmgJiraApiToken: '',
   hmgUserId: '',
   hChatApiKey: '',
+  gitlabToken: '',
 };
 
 export default function UsersPage() {
@@ -114,6 +117,7 @@ export default function UsersPage() {
           hmgJiraApiToken: u.hmg_jira_api_token || '',
           hmgUserId: u.hmg_user_id || '',
           hChatApiKey: u.h_chat_api_key || '',
+          gitlabToken: u.gitlab_token || '',
           teamId: u.team_id || '',
         }))
       );
@@ -250,6 +254,7 @@ export default function UsersPage() {
     hmg_jira_api_token: form.hmgJiraApiToken.trim(),
     hmg_user_id: form.hmgUserId.trim(),
     h_chat_api_key: form.hChatApiKey.trim(),
+    gitlab_token: form.gitlabToken.trim(),
   });
 
   const handleAdd = async () => {
@@ -292,6 +297,7 @@ export default function UsersPage() {
       hmgJiraApiToken: user.hmgJiraApiToken,
       hmgUserId: user.hmgUserId,
       hChatApiKey: user.hChatApiKey,
+      gitlabToken: user.gitlabToken,
     });
     // 기존 사용자는 이미 검증된 것으로 간주
     if (user.igniteJiraEmail && user.igniteJiraApiToken) {
@@ -346,6 +352,7 @@ export default function UsersPage() {
         hmgJiraApiToken: form.hmgJiraApiToken.trim(),
         hmgUserId: form.hmgUserId.trim(),
         hChatApiKey: form.hChatApiKey.trim(),
+        gitlabToken: form.gitlabToken.trim(),
       });
     }
 
@@ -571,6 +578,25 @@ export default function UsersPage() {
           <ExternalLink className="h-3 w-3" />
           H Chat API Key 발급 가이드
         </a>
+      </div>
+
+      {/* GitLab Token */}
+      <div className="space-y-2 pt-1">
+        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+          GitLab Private Token
+        </p>
+        <div className="space-y-1">
+          <label className="text-xs font-medium">Token</label>
+          <Input
+            type="password"
+            placeholder="glpat-xxxx..."
+            value={form.gitlabToken}
+            onChange={(e) => updateForm('gitlabToken', e.target.value)}
+          />
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          배포방에서 MR 가져오기에 사용됩니다. 관리자 토큰 1개만 등록하면 됩니다.
+        </p>
       </div>
 
       {/* 저장 버튼 */}

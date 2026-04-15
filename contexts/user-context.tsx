@@ -23,6 +23,7 @@ export interface AppUser {
   hmgJiraApiToken: string;
   hmgUserId: string;
   hChatApiKey: string;
+  gitlabToken: string;
 }
 
 interface UserContextValue {

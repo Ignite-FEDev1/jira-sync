@@ -27,6 +27,7 @@ export async function GET() {
       hmgJiraApiToken: u.hmg_jira_api_token,
       hmgUserId: u.hmg_user_id,
       hChatApiKey: u.h_chat_api_key,
+      gitlabToken: u.gitlab_token ?? '',
     };
   });
 

@@ -392,8 +392,22 @@ export default function DeployRoomDetailPage() {
       return;
     }
 
-    const gitlabToken = prompt('GitLab Private Token을 입력하세요:');
-    if (!gitlabToken) return;
+    // DB에서 gitlab_token이 있는 사용자 조회 (관리자 토큰)
+    let gitlabToken = '';
+    try {
+      const { db: dbClient } = await import('@/lib/db');
+      const { data: tokenUsers } = await dbClient
+        .from('users')
+        .select('gitlab_token')
+        .neq('gitlab_token', '')
+        .limit(1);
+      gitlabToken = tokenUsers?.[0]?.gitlab_token ?? '';
+    } catch {}
+
+    if (!gitlabToken) {
+      toast.error('GitLab Token이 등록되지 않았습니다. 설정 > 사용자 관리에서 등록해주세요.');
+      return;
+    }
 
     // deployType에 맞는 라벨 필터 생성
     const deployType = session.deployType ?? 'regular';
