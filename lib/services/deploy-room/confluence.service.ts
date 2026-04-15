@@ -3,21 +3,39 @@ import type { ConfluenceDeployTasks, ConfluenceTask } from '@/lib/types/deploy-r
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
-/** Confluence 페이지 ID 추출 */
-function getPageId(pageUrl: string): string | null {
-  return pageUrl.match(/\/pages\/(\d+)/)?.[1] ?? null;
+/** Confluence 페이지 URL에서 ID와 hostname 추출 */
+function parseConfluenceUrl(pageUrl: string): { pageId: string; hostname: string } | null {
+  const idMatch = pageUrl.match(/\/pages\/(\d+)/);
+  if (!idMatch) return null;
+  try {
+    const url = new URL(pageUrl);
+    return { pageId: idMatch[1], hostname: url.hostname };
+  } catch {
+    return null;
+  }
 }
 
-function fetchJson(path: string): Promise<unknown> {
+/** hostname에 맞는 Confluence 인증 정보 반환 */
+function getCredentials(hostname: string): { email: string; token: string } {
+  if (hostname.includes('ignitecorp')) {
+    const email = process.env.IGNITE_JIRA_EMAIL;
+    const token = process.env.IGNITE_JIRA_API_TOKEN;
+    if (!email || !token) throw new Error('IGNITE_JIRA_EMAIL / IGNITE_JIRA_API_TOKEN 환경변수 없음');
+    return { email, token };
+  }
   const email = process.env.HMG_JIRA_EMAIL;
   const token = process.env.HMG_JIRA_API_TOKEN;
   if (!email || !token) throw new Error('HMG_JIRA_EMAIL / HMG_JIRA_API_TOKEN 환경변수 없음');
+  return { email, token };
+}
 
+function fetchJson(hostname: string, path: string): Promise<unknown> {
+  const { email, token } = getCredentials(hostname);
   const auth = Buffer.from(`${email}:${token}`).toString('base64');
   return new Promise((resolve, reject) => {
     const req = https.request(
       {
-        hostname: 'hmg.atlassian.net',
+        hostname,
         path,
         method: 'GET',
         agent: httpsAgent,
@@ -128,12 +146,14 @@ function callHChat(system: string, user: string): Promise<string> {
 export async function parseConfluenceTasks(
   confluencePageUrl: string
 ): Promise<ConfluenceDeployTasks | null> {
-  const pageId = getPageId(confluencePageUrl);
-  if (!pageId) return null;
+  const parsed = parseConfluenceUrl(confluencePageUrl);
+  if (!parsed) return null;
+  const { pageId, hostname } = parsed;
 
   try {
     // 1) storage 포맷으로 FE 섹션 task ID 추출
     const storageData = await fetchJson(
+      hostname,
       `/wiki/rest/api/content/${pageId}?expand=body.storage`
     ) as { body: { storage: { value: string } } };
 
@@ -145,6 +165,7 @@ export async function parseConfluenceTasks(
 
     // 2) inlinetasks API로 body + status 조회
     const inlineData = await fetchJson(
+      hostname,
       `/wiki/rest/api/inlinetasks/search?pageId=${pageId}&limit=200`
     ) as { results: Array<{ id: number; body: string; status: string }> };
 
@@ -166,7 +187,7 @@ export async function parseConfluenceTasks(
     // 3) task body가 모두 비어있으면 H-Chat으로 view HTML 파싱 시도
     const hasContent = [...before, ...after].some((t) => t.body.length > 0);
     if (!hasContent) {
-      const hchatResult = await parseWithHChat(pageId);
+      const hchatResult = await parseWithHChat(hostname, pageId);
       // H-Chat이 null 반환(오류)이면 빈 배열로 — 섹션은 표시하되 "없음" 안내
       return hchatResult ?? { before: [], after: [] };
     }
@@ -179,9 +200,10 @@ export async function parseConfluenceTasks(
 }
 
 /** task body가 없는 경우 H-Chat으로 view HTML에서 직접 추출 */
-async function parseWithHChat(pageId: string): Promise<ConfluenceDeployTasks | null> {
+async function parseWithHChat(hostname: string, pageId: string): Promise<ConfluenceDeployTasks | null> {
   try {
     const viewData = await fetchJson(
+      hostname,
       `/wiki/rest/api/content/${pageId}?expand=body.view`
     ) as { body: { view: { value: string } } };
 
