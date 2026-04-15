@@ -1,6 +1,7 @@
 // 배포방 (Deploy Room) 도메인 타입
 
 export type ChecklistItemStatus = 'pending' | 'in_progress' | 'done';
+export type ChecklistItemAssignee = 'all' | 'leader' | 'member';
 
 export interface ChecklistUserStatus {
   id: string;
@@ -32,6 +33,7 @@ export interface DeployRoomSession {
   id: string;
   title: string;
   templateId: string;
+  teamId: string | null;
   deployDate: string; // YYYY-MM-DD
   confluencePageUrl: string | null;
   confluenceTasks: ConfluenceDeployTasks | null;
@@ -48,10 +50,30 @@ export interface DeployRoomChecklistItem {
   orderIndex: number;
   title: string;
   description: string | null;
+  assignee: ChecklistItemAssignee;
   checked: boolean;
   checkedBy: string | null;
   checkedAt: string | null;
   createdAt: string;
+}
+
+// 배포 시나리오 템플릿 (DB)
+export interface DeployRoomTemplateChecklist {
+  title: string;
+  assignee: ChecklistItemAssignee;
+}
+
+export interface DeployRoomTemplate {
+  id: string;
+  name: string;
+  project: string;
+  deployType: string;
+  gitlabProjects: string[];
+  teamMembers: string[];
+  checklist: DeployRoomTemplateChecklist[];
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type DeployRoomMrStatus = 'pending' | 'approved' | 'merged' | 'conflict';
@@ -102,6 +124,8 @@ export interface DeployRoomTimelineEvent {
 export interface CreateDeployRoomSessionRequest {
   title: string;
   templateId: string;
+  teamId?: string;
+  deployType?: string; // GitLab 라벨 필터용 (regular/adhoc/hotfix)
   deployDate: string;
   confluencePageUrl?: string;
   createdBy?: string;

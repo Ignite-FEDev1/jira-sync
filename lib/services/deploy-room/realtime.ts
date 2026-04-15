@@ -21,6 +21,7 @@ type ChecklistRow = {
   order_index: number;
   title: string;
   description: string | null;
+  assignee: string;
   checked: boolean;
   checked_by: string | null;
   checked_at: string | null;
@@ -34,6 +35,7 @@ function mapChecklist(row: ChecklistRow): DeployRoomChecklistItem {
     orderIndex: row.order_index,
     title: row.title,
     description: row.description,
+    assignee: (row.assignee as DeployRoomChecklistItem['assignee']) ?? 'all',
     checked: row.checked,
     checkedBy: row.checked_by,
     checkedAt: row.checked_at,
@@ -127,6 +129,7 @@ type SessionRow = {
   id: string;
   title: string;
   template_id: string;
+  team_id: string | null;
   deploy_date: string;
   confluence_page_url: string | null;
   inactive_participants: string[] | null;
@@ -141,6 +144,7 @@ function mapSession(row: SessionRow): DeployRoomSession {
     id: row.id,
     title: row.title,
     templateId: row.template_id,
+    teamId: row.team_id ?? null,
     deployDate: row.deploy_date,
     confluencePageUrl: row.confluence_page_url,
     confluenceTasks: null, // realtime payload에는 미포함 — page에서 기존 값 보존

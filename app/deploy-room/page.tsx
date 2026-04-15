@@ -30,18 +30,21 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  DEPLOY_PROJECTS,
   DEPLOY_TYPES,
   deployDateToYYMMDD,
-  getTemplateByProjectAndType,
   type DeployType,
-  type ProjectKey,
 } from '@/lib/constants/deploy-room';
 import { useCurrentUser } from '@/contexts/user-context';
 import type {
   DeployRoomSession,
   DeployRoomSessionStatus,
+  DeployRoomTemplate,
 } from '@/lib/types/deploy-room';
+
+interface TeamOption {
+  id: string;
+  name: string;
+}
 
 const STATUS_LABELS: Record<DeployRoomSessionStatus, string> = {
   preparing: '준비 중',
@@ -64,8 +67,13 @@ export default function DeployRoomListPage() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
 
+  // 시나리오 + 팀 목록
+  const [templates, setTemplates] = useState<DeployRoomTemplate[]>([]);
+  const [teams, setTeams] = useState<TeamOption[]>([]);
+
   // create form state
-  const [project, setProject] = useState<ProjectKey>('groupware');
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [selectedTeamId, setSelectedTeamId] = useState('');
   const [deployType, setDeployType] = useState<DeployType>('adhoc');
   const [deployDate, setDeployDate] = useState<string>(() =>
     new Date().toISOString().slice(0, 10)
@@ -93,8 +101,36 @@ export default function DeployRoomListPage() {
     }
   };
 
+  // 시나리오 + 팀 목록 로드
+  const loadOptions = async () => {
+    try {
+      const [templatesRes, teamsRes] = await Promise.all([
+        fetch('/api/deploy-room/templates').then((r) => r.json()),
+        (async () => {
+          const { db } = await import('@/lib/db');
+          const { data } = await db.from('teams').select('id, name').order('name');
+          return data ?? [];
+        })(),
+      ]);
+      if (templatesRes.success) {
+        setTemplates(templatesRes.templates);
+        if (templatesRes.templates.length > 0 && !selectedTemplateId) {
+          setSelectedTemplateId(templatesRes.templates[0].id);
+        }
+      }
+      const teamList = teamsRes.map((t: { id: string; name: string }) => ({ id: t.id, name: t.name }));
+      setTeams(teamList);
+      if (teamList.length > 0 && !selectedTeamId) {
+        const fe1 = teamList.find((t: TeamOption) => t.name === 'FE1');
+        setSelectedTeamId(fe1?.id ?? teamList[0].id);
+      }
+    } catch {}
+  };
+
   useEffect(() => {
     loadSessions();
+    loadOptions();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleDelete = async (e: React.MouseEvent, sessionId: string) => {
@@ -117,7 +153,6 @@ export default function DeployRoomListPage() {
   };
 
   const resetForm = () => {
-    setProject('groupware');
     setDeployType('adhoc');
     setDeployDate(new Date().toISOString().slice(0, 10));
     setConfluencePageUrl('');
@@ -128,10 +163,23 @@ export default function DeployRoomListPage() {
       toast.error('배포일은 필수입니다');
       return;
     }
-    const template = getTemplateByProjectAndType(project, deployType);
-    const projectInfo = DEPLOY_PROJECTS.find((p) => p.id === project);
+    if (!selectedTemplateId) {
+      toast.error('배포 시나리오를 선택해주세요');
+      return;
+    }
+    if (!selectedTeamId) {
+      toast.error('팀을 선택해주세요');
+      return;
+    }
+
+    const selectedTemplate = templates.find((t) => t.id === selectedTemplateId);
+    if (!selectedTemplate) {
+      toast.error('선택한 시나리오를 찾을 수 없습니다');
+      return;
+    }
+
     const typeInfo = DEPLOY_TYPES.find((t) => t.id === deployType);
-    const title = `${projectInfo?.shortName ?? project} ${deployDateToYYMMDD(deployDate)} ${typeInfo?.name ?? deployType}`;
+    const title = `${selectedTemplate.name} ${deployDateToYYMMDD(deployDate)} ${typeInfo?.name ?? deployType}`;
 
     setSubmitting(true);
     try {
@@ -140,7 +188,9 @@ export default function DeployRoomListPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           title,
-          templateId: template.id,
+          templateId: selectedTemplateId,
+          teamId: selectedTeamId,
+          deployType,
           deployDate,
           confluencePageUrl: confluencePageUrl.trim() || undefined,
           createdBy: currentUser?.id,
@@ -220,7 +270,6 @@ export default function DeployRoomListPage() {
                     </CardHeader>
                     <CardContent>
                       <div className="text-xs text-muted-foreground space-y-1">
-                        <div>템플릿: {session.templateId}</div>
                         {session.createdBy && (
                           <div>담당: {session.createdBy}</div>
                         )}
@@ -248,32 +297,56 @@ export default function DeployRoomListPage() {
           <DialogHeader>
             <DialogTitle>새 배포방 만들기</DialogTitle>
             <DialogDescription>
-              템플릿을 선택하면 기본 체크리스트가 자동 생성됩니다.
+              배포 시나리오를 선택하면 기본 체크리스트가 자동 생성됩니다.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-1.5">
-              <label className="text-sm font-medium">프로젝트</label>
+              <label className="text-sm font-medium">배포 시나리오</label>
               <Select
-                value={project}
-                onValueChange={(v) => setProject(v as ProjectKey)}
+                value={selectedTemplateId}
+                onValueChange={setSelectedTemplateId}
               >
                 <SelectTrigger>
-                  <SelectValue />
+                  <SelectValue placeholder="시나리오 선택" />
                 </SelectTrigger>
                 <SelectContent>
-                  {DEPLOY_PROJECTS.map((p) => (
-                    <SelectItem
-                      key={p.id}
-                      value={p.id}
-                      disabled={!p.enabled}
-                    >
-                      {p.name}
-                      {!p.enabled && (
-                        <span className="ml-1.5 text-xs text-muted-foreground">
-                          (준비 중)
-                        </span>
-                      )}
+                  {templates.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.name}
+                      <span className="ml-1.5 text-xs text-muted-foreground">
+                        ({t.checklist.length}단계)
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {templates.length === 0 && (
+                <p className="text-xs text-amber-600">
+                  등록된 시나리오가 없습니다.{' '}
+                  <Link
+                    href="/admin/deploy-room/templates/new"
+                    className="underline"
+                  >
+                    먼저 시나리오를 등록
+                  </Link>
+                  해주세요.
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">팀</label>
+              <Select
+                value={selectedTeamId}
+                onValueChange={setSelectedTeamId}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="팀 선택" />
+                </SelectTrigger>
+                <SelectContent>
+                  {teams.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.name}
                     </SelectItem>
                   ))}
                 </SelectContent>

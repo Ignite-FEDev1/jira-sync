@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
-import { AlertTriangle, UserRoundCog } from 'lucide-react';
+import { AlertTriangle, Settings, UserRoundCog } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/contexts/user-context';
 import { db } from '@/lib/db';
@@ -83,7 +83,18 @@ export function GlobalHeaderStrip() {
           )}
         </div>
 
-        {/* 오른쪽: 사용자 정보 + 변경 */}
+        {/* 오른쪽: 설정 + 사용자 정보 */}
+        <div className="flex items-center gap-1 shrink-0">
+          <Link href="/settings/teams">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0"
+              title="설정"
+            >
+              <Settings className="h-3.5 w-3.5 text-muted-foreground" />
+            </Button>
+          </Link>
         <Button
           variant="ghost"
           size="sm"
@@ -99,6 +110,7 @@ export function GlobalHeaderStrip() {
           )}
           <span className="ml-1 text-[11px] text-muted-foreground/40">변경</span>
         </Button>
+        </div>
       </div>
     </div>
   );

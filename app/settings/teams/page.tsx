@@ -4,13 +4,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -22,14 +15,14 @@ import {
   Pencil,
   Trash2,
   Check,
-  ChevronDown,
-  ChevronUp,
+  ChevronRight,
   Users,
   FolderKanban,
   Star,
   Loader2,
   GitCompareArrows,
   AlertCircle,
+  Crown,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { db } from '@/lib/db';
@@ -64,6 +57,7 @@ interface Team {
   name: string;
   createdAt: string;
   sourceProjectId: string | null;
+  leaderId: string | null;
   targets: TargetProjectConfig[];
   memberIds: string[];
 }
@@ -87,7 +81,7 @@ export default function TeamsPage() {
       await Promise.all([
         db.from('projects').select('id, name, jira_instance').order('name'),
         db.from('users').select('id, name, team_id').order('name'),
-        db.from('teams').select('id, name, source_project_id, created_at').order('name'),
+        db.from('teams').select('id, name, source_project_id, leader_id, created_at').order('name'),
         db.from('team_target_projects').select('team_id, project_id, sync_profile_id'),
         db
           .from('sync_profiles')
@@ -120,7 +114,6 @@ export default function TeamsPage() {
       );
     }
 
-    // 팀 데이터 조합
     if (teamsRes.data) {
       const targetMap: Record<string, TargetProjectConfig[]> = {};
       targetsRes.data?.forEach((t) => {
@@ -145,6 +138,7 @@ export default function TeamsPage() {
           name: t.name,
           createdAt: t.created_at,
           sourceProjectId: t.source_project_id,
+          leaderId: t.leader_id || null,
           targets: targetMap[t.id] || [],
           memberIds: memberMap[t.id] || [],
         }))
@@ -170,7 +164,7 @@ export default function TeamsPage() {
     const { data, error } = await db
       .from('teams')
       .insert({ name })
-      .select('id, name, source_project_id, created_at')
+      .select('id, name, source_project_id, leader_id, created_at')
       .single();
 
     if (error) {
@@ -192,6 +186,7 @@ export default function TeamsPage() {
   // --- 팀 삭제 ---
 
   const handleDelete = async (team: Team) => {
+    if (!confirm(`"${team.name}" 팀을 삭제하시겠습니까?`)) return;
     const { error } = await db.from('teams').delete().eq('id', team.id);
     if (error) {
       toast.error(`삭제 실패: ${error.message}`);
@@ -208,13 +203,14 @@ export default function TeamsPage() {
   const handleSaveEdit = async (team: Team) => {
     setSaving(true);
     try {
-      // 1. 팀 기본 정보 업데이트
       await db
         .from('teams')
-        .update({ source_project_id: team.sourceProjectId })
+        .update({
+          source_project_id: team.sourceProjectId,
+          leader_id: team.leaderId,
+        })
         .eq('id', team.id);
 
-      // 2. team_target_projects 전체 삭제 후 재삽입
       await db
         .from('team_target_projects')
         .delete()
@@ -230,15 +226,12 @@ export default function TeamsPage() {
         );
       }
 
-      // 3. 사용자 team_id 업데이트
-      // 먼저 이 팀에서 빠진 사용자 해제
       await db
         .from('users')
         .update({ team_id: null })
         .eq('team_id', team.id)
         .not('id', 'in', `(${team.memberIds.join(',')})`);
 
-      // 새로 추가된 사용자 연결
       if (team.memberIds.length > 0) {
         for (const userId of team.memberIds) {
           await db
@@ -272,10 +265,10 @@ export default function TeamsPage() {
 
   const cancelEdit = () => {
     setEditingId(null);
-    fetchData(); // 변경사항 롤백
+    fetchData();
   };
 
-  // --- 로컬 상태 업데이트 (편집 중) ---
+  // --- 로컬 상태 업데이트 ---
 
   const updateTeamLocal = (teamId: string, updates: Partial<Team>) => {
     setTeams(teams.map((t) => (t.id === teamId ? { ...t, ...updates } : t)));
@@ -284,7 +277,6 @@ export default function TeamsPage() {
   const handleSourceProjectChange = (teamId: string, projectId: string) => {
     const team = teams.find((t) => t.id === teamId);
     if (!team) return;
-
     const newTargets = team.targets.filter((t) => t.projectId !== projectId);
     updateTeamLocal(teamId, {
       sourceProjectId: projectId,
@@ -295,12 +287,10 @@ export default function TeamsPage() {
   const toggleTargetProject = (teamId: string, projectId: string) => {
     const team = teams.find((t) => t.id === teamId);
     if (!team) return;
-
     if (team.sourceProjectId === projectId) {
       toast.error('기준 프로젝트는 동기화 대상으로 선택할 수 없습니다.');
       return;
     }
-
     const existing = team.targets.find((t) => t.projectId === projectId);
     const newTargets = existing
       ? team.targets.filter((t) => t.projectId !== projectId)
@@ -315,11 +305,8 @@ export default function TeamsPage() {
   ) => {
     const team = teams.find((t) => t.id === teamId);
     if (!team) return;
-
     const newTargets = team.targets.map((t) =>
-      t.projectId === projectId
-        ? { ...t, syncProfileId: profileId }
-        : t
+      t.projectId === projectId ? { ...t, syncProfileId: profileId } : t
     );
     updateTeamLocal(teamId, { targets: newTargets });
   };
@@ -327,11 +314,19 @@ export default function TeamsPage() {
   const toggleMember = (teamId: string, userId: string) => {
     const team = teams.find((t) => t.id === teamId);
     if (!team) return;
-
     const newMembers = team.memberIds.includes(userId)
       ? team.memberIds.filter((id) => id !== userId)
       : [...team.memberIds, userId];
-    updateTeamLocal(teamId, { memberIds: newMembers });
+    // 팀장이 멤버에서 제거되면 팀장도 해제
+    const newLeaderId =
+      team.leaderId && !newMembers.includes(team.leaderId)
+        ? null
+        : team.leaderId;
+    updateTeamLocal(teamId, { memberIds: newMembers, leaderId: newLeaderId });
+  };
+
+  const setLeader = (teamId: string, userId: string | null) => {
+    updateTeamLocal(teamId, { leaderId: userId });
   };
 
   // --- 헬퍼 ---
@@ -345,95 +340,140 @@ export default function TeamsPage() {
   const getProfileName = (id: string) =>
     syncProfiles.find((p) => p.id === id)?.name || '-';
 
-  // 특정 (source, target) 조합에 맞는 프로필 목록
-  const getAvailableProfiles = (sourceProjectId: string | null, targetProjectId: string) => {
+  const getAvailableProfiles = (
+    sourceProjectId: string | null,
+    targetProjectId: string
+  ) => {
     if (!sourceProjectId) return [];
     return syncProfiles.filter(
-      (p) => p.sourceProjectId === sourceProjectId && p.targetProjectId === targetProjectId
+      (p) =>
+        p.sourceProjectId === sourceProjectId &&
+        p.targetProjectId === targetProjectId
     );
   };
+
+  // --- 섹션 헤더 ---
+
+  const SectionHeader = ({
+    icon: Icon,
+    iconBg,
+    iconColor,
+    label,
+    count,
+  }: {
+    icon: React.ElementType;
+    iconBg: string;
+    iconColor: string;
+    label: string;
+    count?: number;
+  }) => (
+    <div className="flex items-center gap-2 text-sm font-semibold text-foreground/80">
+      <div
+        className={`h-6 w-6 rounded-md ${iconBg} flex items-center justify-center`}
+      >
+        <Icon className={`h-3.5 w-3.5 ${iconColor}`} />
+      </div>
+      {label}
+      {count !== undefined && (
+        <span className="text-xs font-normal text-muted-foreground">
+          ({count})
+        </span>
+      )}
+    </div>
+  );
 
   // --- 팀 상세 뷰 (읽기 모드) ---
 
   const renderDetail = (team: Team) => (
-    <div className="px-5 py-5 space-y-5">
+    <div className="p-5 space-y-5">
       {/* 기준 프로젝트 */}
       <div className="space-y-2">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          <Star className="h-3.5 w-3.5" />
-          기준 프로젝트
-        </div>
-        <div className="text-sm font-medium">
+        <SectionHeader
+          icon={Star}
+          iconBg="bg-blue-50"
+          iconColor="text-blue-500"
+          label="기준 프로젝트"
+        />
+        <div className="ml-8">
           {team.sourceProjectId ? (
-            <span className="inline-flex items-center rounded-full bg-blue-50 border border-blue-200 text-blue-700 px-2.5 py-0.5 text-xs font-semibold">
+            <span className="inline-flex items-center rounded-md bg-blue-50 ring-1 ring-blue-200 text-blue-700 px-2.5 py-1 text-xs font-medium">
               {getProjectName(team.sourceProjectId)}
             </span>
           ) : (
-            <span className="text-muted-foreground">미설정</span>
+            <span className="text-sm text-muted-foreground">미설정</span>
           )}
         </div>
       </div>
 
-      <div className="border-t" />
-
       {/* 동기화 대상 */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          <FolderKanban className="h-3.5 w-3.5" />
-          동기화 대상 프로젝트
-        </div>
-        {team.targets.length === 0 ? (
-          <span className="text-sm text-muted-foreground">미설정</span>
-        ) : (
-          <div className="space-y-1.5">
-            {team.targets.map((target) => {
-              const hasProfile = !!target.syncProfileId;
-              return (
+      <div className="space-y-2">
+        <SectionHeader
+          icon={FolderKanban}
+          iconBg="bg-orange-50"
+          iconColor="text-orange-500"
+          label="동기화 대상"
+          count={team.targets.length}
+        />
+        <div className="ml-8">
+          {team.targets.length === 0 ? (
+            <span className="text-sm text-muted-foreground">미설정</span>
+          ) : (
+            <div className="space-y-1.5">
+              {team.targets.map((target) => (
                 <div
                   key={target.projectId}
                   className="flex items-center gap-2 text-sm"
                 >
-                  <span className="inline-flex items-center rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium min-w-[60px] justify-center">
+                  <span className="inline-flex items-center rounded-md bg-slate-50 ring-1 ring-slate-200 px-2 py-0.5 text-xs font-medium">
                     {getProjectName(target.projectId)}
                   </span>
-                  {hasProfile ? (
+                  {target.syncProfileId ? (
                     <span className="flex items-center gap-1 text-xs text-muted-foreground">
                       <GitCompareArrows className="h-3 w-3" />
-                      {getProfileName(target.syncProfileId!)}
+                      {getProfileName(target.syncProfileId)}
                     </span>
                   ) : (
                     <span className="flex items-center gap-1 text-xs text-amber-600">
                       <AlertCircle className="h-3 w-3" />
-                      매핑 미설정 (동기화 불가)
+                      매핑 미설정
                     </span>
                   )}
                 </div>
-              );
-            })}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      <div className="border-t" />
-
-      {/* 소속 사용자 */}
+      {/* 소속 사용자 + 팀장 */}
       <div className="space-y-2">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          <Users className="h-3.5 w-3.5" />
-          소속 사용자 ({team.memberIds.length}명)
-        </div>
-        <div className="flex flex-wrap gap-1.5">
+        <SectionHeader
+          icon={Users}
+          iconBg="bg-violet-50"
+          iconColor="text-violet-500"
+          label="소속 사용자"
+          count={team.memberIds.length}
+        />
+        <div className="ml-8 flex flex-wrap gap-1.5">
           {team.memberIds.length === 0 ? (
             <span className="text-sm text-muted-foreground">미설정</span>
           ) : (
-            team.memberIds.map((id) => (
-              <span
-                key={id}
-                className="inline-flex items-center rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium"
-              >
-                {getUserName(id)}
-              </span>
-            ))
+            team.memberIds.map((id) => {
+              const isLeader = team.leaderId === id;
+              return (
+                <span
+                  key={id}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${
+                    isLeader
+                      ? 'bg-amber-50 ring-1 ring-amber-300 text-amber-800'
+                      : 'bg-slate-50 ring-1 ring-slate-200 text-slate-700'
+                  }`}
+                >
+                  {isLeader && <Crown className="h-3 w-3 text-amber-500" />}
+                  {getUserName(id)}
+                </span>
+              );
+            })
           )}
         </div>
       </div>
@@ -446,70 +486,77 @@ export default function TeamsPage() {
     const availableTargetProjects = projects.filter(
       (p) => p.id !== team.sourceProjectId
     );
+    const memberUsers = team.memberIds
+      .map((id) => users.find((u) => u.id === id))
+      .filter(Boolean) as UserInfo[];
 
     return (
-      <div className="px-5 py-5 space-y-5">
+      <div className="p-5 space-y-5">
         {/* 기준 프로젝트 */}
         <div className="space-y-2">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            <Star className="h-3.5 w-3.5" />
-            기준 프로젝트
+          <SectionHeader
+            icon={Star}
+            iconBg="bg-blue-50"
+            iconColor="text-blue-500"
+            label="기준 프로젝트"
+          />
+          <div className="ml-8">
+            <Select
+              value={team.sourceProjectId || ''}
+              onValueChange={(v) => handleSourceProjectChange(team.id, v)}
+            >
+              <SelectTrigger className="w-56 rounded-lg">
+                <SelectValue placeholder="프로젝트 선택" />
+              </SelectTrigger>
+              <SelectContent>
+                {projects.map((project) => (
+                  <SelectItem key={project.id} value={project.id}>
+                    {project.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          <Select
-            value={team.sourceProjectId || ''}
-            onValueChange={(v) => handleSourceProjectChange(team.id, v)}
-          >
-            <SelectTrigger className="w-48">
-              <SelectValue placeholder="프로젝트 선택" />
-            </SelectTrigger>
-            <SelectContent>
-              {projects.map((project) => (
-                <SelectItem key={project.id} value={project.id}>
-                  {project.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
         </div>
-
-        <div className="border-t" />
 
         {/* 동기화 대상 */}
         <div className="space-y-3">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            <FolderKanban className="h-3.5 w-3.5" />
-            동기화 대상 프로젝트
-          </div>
+          <SectionHeader
+            icon={FolderKanban}
+            iconBg="bg-orange-50"
+            iconColor="text-orange-500"
+            label="동기화 대상"
+          />
+          <div className="ml-8 space-y-3">
+            <div className="flex flex-wrap gap-1.5">
+              {availableTargetProjects.map((project) => {
+                const isSelected = team.targets.some(
+                  (t) => t.projectId === project.id
+                );
+                return (
+                  <button
+                    key={project.id}
+                    type="button"
+                    onClick={() => toggleTargetProject(team.id, project.id)}
+                    className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                      isSelected
+                        ? 'bg-foreground text-background'
+                        : 'bg-slate-50 ring-1 ring-slate-200 text-slate-600 hover:ring-slate-300'
+                    }`}
+                  >
+                    {isSelected && <Check className="h-3 w-3" />}
+                    {project.name}
+                  </button>
+                );
+              })}
+            </div>
 
-          {/* 프로젝트 선택 버튼 */}
-          <div className="flex flex-wrap gap-2">
-            {availableTargetProjects.map((project) => {
-              const isSelected = team.targets.some(
-                (t) => t.projectId === project.id
-              );
-              return (
-                <Button
-                  key={project.id}
-                  type="button"
-                  size="sm"
-                  variant={isSelected ? 'default' : 'outline'}
-                  onClick={() => toggleTargetProject(team.id, project.id)}
-                >
-                  {isSelected && <Check className="mr-1 h-3 w-3" />}
-                  {project.name}
-                </Button>
-              );
-            })}
-          </div>
-
-          {/* 선택된 대상별 필드 매핑 선택 */}
-          {team.targets.length > 0 && (
-            <div className="space-y-2 pl-1">
-              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                <GitCompareArrows className="h-3.5 w-3.5" />
-                대상별 필드 매핑 설정
-              </div>
-              <div className="space-y-2">
+            {team.targets.length > 0 && (
+              <div className="space-y-2 pt-1">
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <GitCompareArrows className="h-3 w-3" />
+                  대상별 필드 매핑
+                </div>
                 {team.targets.map((target) => {
                   const available = getAvailableProfiles(
                     team.sourceProjectId,
@@ -520,14 +567,16 @@ export default function TeamsPage() {
                       key={target.projectId}
                       className="flex items-center gap-3"
                     >
-                      <span className="inline-flex items-center rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium min-w-[60px] justify-center shrink-0">
+                      <span className="inline-flex items-center rounded-md bg-slate-50 ring-1 ring-slate-200 px-2 py-0.5 text-xs font-medium min-w-[60px] justify-center shrink-0">
                         {getProjectName(target.projectId)}
                       </span>
-                      <span className="text-muted-foreground text-xs shrink-0">→</span>
+                      <span className="text-muted-foreground text-xs shrink-0">
+                        →
+                      </span>
                       {available.length === 0 ? (
                         <span className="text-xs text-amber-600 flex items-center gap-1">
                           <AlertCircle className="h-3 w-3" />
-                          사용 가능한 필드 매핑이 없습니다
+                          매핑 없음
                         </span>
                       ) : (
                         <Select
@@ -540,8 +589,8 @@ export default function TeamsPage() {
                             )
                           }
                         >
-                          <SelectTrigger className="w-64 h-8 text-xs">
-                            <SelectValue placeholder="필드 매핑 선택..." />
+                          <SelectTrigger className="w-56 h-8 text-xs rounded-lg">
+                            <SelectValue placeholder="필드 매핑 선택" />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="none">
@@ -561,45 +610,90 @@ export default function TeamsPage() {
                   );
                 })}
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
-        <div className="border-t" />
-
         {/* 소속 사용자 */}
-        <div className="space-y-2">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            <Users className="h-3.5 w-3.5" />
-            소속 사용자
-          </div>
-          <div className="flex flex-wrap gap-2">
+        <div className="space-y-3">
+          <SectionHeader
+            icon={Users}
+            iconBg="bg-violet-50"
+            iconColor="text-violet-500"
+            label="소속 사용자"
+            count={team.memberIds.length}
+          />
+          <div className="ml-8 flex flex-wrap gap-1.5">
             {users.map((user) => {
               const isSelected = team.memberIds.includes(user.id);
               return (
-                <Button
+                <button
                   key={user.id}
                   type="button"
-                  size="sm"
-                  variant={isSelected ? 'default' : 'outline'}
                   onClick={() => toggleMember(team.id, user.id)}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                    isSelected
+                      ? 'bg-foreground text-background'
+                      : 'bg-slate-50 ring-1 ring-slate-200 text-slate-600 hover:ring-slate-300'
+                  }`}
                 >
-                  {isSelected && <Check className="mr-1 h-3 w-3" />}
+                  {isSelected && <Check className="h-3 w-3" />}
                   {user.name}
-                </Button>
+                </button>
               );
             })}
           </div>
         </div>
 
+        {/* 팀장 선택 */}
+        {memberUsers.length > 0 && (
+          <div className="space-y-2">
+            <SectionHeader
+              icon={Crown}
+              iconBg="bg-amber-50"
+              iconColor="text-amber-500"
+              label="팀장"
+            />
+            <div className="ml-8">
+              <Select
+                value={team.leaderId || 'none'}
+                onValueChange={(v) =>
+                  setLeader(team.id, v === 'none' ? null : v)
+                }
+              >
+                <SelectTrigger className="w-56 rounded-lg">
+                  <SelectValue placeholder="팀장 선택" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">
+                    <span className="text-muted-foreground">미지정</span>
+                  </SelectItem>
+                  {memberUsers.map((user) => (
+                    <SelectItem key={user.id} value={user.id}>
+                      {user.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        )}
+
         <div className="flex justify-end gap-2 pt-3 border-t">
-          <Button size="sm" variant="outline" onClick={cancelEdit} disabled={saving}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={cancelEdit}
+            disabled={saving}
+            className="rounded-lg"
+          >
             취소
           </Button>
           <Button
             size="sm"
             onClick={() => handleSaveEdit(team)}
             disabled={saving}
+            className="rounded-lg"
           >
             {saving && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
             저장
@@ -612,114 +706,132 @@ export default function TeamsPage() {
   // --- 렌더링 ---
 
   return (
-    <div className="max-w-3xl">
-      <Card>
-        <CardHeader>
-          <CardTitle>팀 관리</CardTitle>
-          <CardDescription>
-            팀을 추가하고, 기준 프로젝트 / 동기화 대상 / 필드 매핑 / 소속 사용자를
-            설정합니다.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {/* 추가 폼 */}
-          <div className="flex gap-2">
-            <Input
-              placeholder="팀 이름 입력"
-              value={newTeamName}
-              onChange={(e) => setNewTeamName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-            />
-            <Button onClick={handleAdd} className="shrink-0">
-              <Plus className="mr-2 h-4 w-4" />
-              추가
-            </Button>
+    <div className="max-w-3xl space-y-6">
+      <div>
+        <h2 className="text-lg font-semibold tracking-tight">팀 관리</h2>
+        <p className="text-[13px] text-muted-foreground mt-0.5">
+          팀을 추가하고, 기준 프로젝트 / 동기화 대상 / 소속 사용자 / 팀장을
+          설정합니다.
+        </p>
+      </div>
+
+      {/* 추가 폼 */}
+      <div className="flex gap-2">
+        <Input
+          placeholder="새 팀 이름"
+          value={newTeamName}
+          onChange={(e) => setNewTeamName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+          className="rounded-lg"
+        />
+        <Button onClick={handleAdd} className="shrink-0 rounded-lg">
+          <Plus className="mr-1.5 h-4 w-4" />
+          추가
+        </Button>
+      </div>
+
+      {/* 팀 목록 */}
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <div className="flex flex-col items-center gap-3 text-muted-foreground">
+            <div className="h-8 w-8 rounded-full border-2 border-current border-t-transparent animate-spin" />
+            <span className="text-sm">불러오는 중</span>
           </div>
+        </div>
+      ) : teams.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 gap-3">
+          <div className="h-14 w-14 rounded-2xl bg-slate-100 flex items-center justify-center">
+            <Users className="h-7 w-7 text-slate-300" />
+          </div>
+          <p className="text-sm text-muted-foreground">
+            등록된 팀이 없습니다
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {teams.map((team) => {
+            const isExpanded = expandedId === team.id;
+            const isEditing = editingId === team.id;
+            const leaderName = team.leaderId
+              ? getUserName(team.leaderId)
+              : null;
 
-          {/* 팀 목록 */}
-          {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : (
-            <div className="border rounded-lg divide-y">
-              {teams.length === 0 ? (
-                <div className="p-8 text-center text-sm text-muted-foreground">
-                  등록된 팀이 없습니다.
-                </div>
-              ) : (
-                teams.map((team) => {
-                  const isExpanded = expandedId === team.id;
-                  const isEditing = editingId === team.id;
-                  const activeTargets = team.targets.filter(
-                    (t) => t.syncProfileId
-                  ).length;
-
-                  return (
-                    <div key={team.id}>
-                      {/* 팀 헤더 */}
-                      <div className="flex items-center justify-between px-4 py-3">
-                        <button
-                          className="flex items-center gap-2 flex-1 text-left"
-                          onClick={() => toggleExpand(team.id)}
-                        >
-                          {isExpanded ? (
-                            <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" />
-                          ) : (
-                            <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
-                          )}
-                          <span className="font-medium">{team.name}</span>
-                          <span className="text-xs text-muted-foreground">
-                            {team.sourceProjectId
-                              ? getProjectName(team.sourceProjectId)
-                              : '기준 미설정'}
-                            {' · '}
-                            대상 {team.targets.length}개
-                            {team.targets.length > 0 && activeTargets < team.targets.length && (
-                              <span className="text-amber-600">
-                                {' '}(매핑 {activeTargets}/{team.targets.length})
-                              </span>
-                            )}
-                            {' · '}
-                            {team.memberIds.length}명
+            return (
+              <div
+                key={team.id}
+                className={`bg-white rounded-xl border transition-all ${
+                  isExpanded ? 'shadow-sm' : 'hover:border-slate-300'
+                }`}
+              >
+                {/* 팀 헤더 */}
+                <div className="flex items-center justify-between px-4 py-3.5">
+                  <button
+                    className="flex items-center gap-3 flex-1 text-left min-w-0"
+                    onClick={() => toggleExpand(team.id)}
+                  >
+                    <ChevronRight
+                      className={`h-4 w-4 text-muted-foreground shrink-0 transition-transform ${
+                        isExpanded ? 'rotate-90' : ''
+                      }`}
+                    />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-[15px]">
+                          {team.name}
+                        </span>
+                        {leaderName && (
+                          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 ring-1 ring-amber-200">
+                            <Crown className="h-2.5 w-2.5" />
+                            {leaderName}
                           </span>
-                        </button>
-                        <div className="flex gap-1">
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            onClick={() => startEdit(team.id)}
-                            disabled={!!editingId}
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            onClick={() => handleDelete(team)}
-                            disabled={!!editingId}
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        </div>
+                        )}
                       </div>
-
-                      {/* 상세 영역 */}
-                      {isExpanded && (
-                        <div className="border-t bg-muted/20">
-                          {isEditing
-                            ? renderEditDetail(team)
-                            : renderDetail(team)}
-                        </div>
-                      )}
+                      <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground">
+                        {team.sourceProjectId && (
+                          <span>{getProjectName(team.sourceProjectId)}</span>
+                        )}
+                        {team.sourceProjectId && (
+                          <span className="text-slate-200">|</span>
+                        )}
+                        <span>대상 {team.targets.length}개</span>
+                        <span className="text-slate-200">|</span>
+                        <span>{team.memberIds.length}명</span>
+                      </div>
                     </div>
-                  );
-                })
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                  </button>
+                  <div className="flex gap-1 shrink-0">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => startEdit(team.id)}
+                      disabled={!!editingId && editingId !== team.id}
+                      className="h-8 w-8 rounded-lg"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => handleDelete(team)}
+                      disabled={!!editingId}
+                      className="h-8 w-8 rounded-lg text-muted-foreground hover:text-destructive"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                {/* 상세 영역 */}
+                {isExpanded && (
+                  <div className="border-t">
+                    {isEditing ? renderEditDetail(team) : renderDetail(team)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

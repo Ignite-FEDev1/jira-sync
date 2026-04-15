@@ -6,10 +6,8 @@ import type {
   DeployRoomSession,
   DeployRoomSessionStatus,
 } from '@/lib/types/deploy-room';
-import {
-  getDeployRoomTemplate,
-  getGitlabLabelFilter,
-} from '@/lib/constants/deploy-room';
+import { getGitlabLabelFilter } from '@/lib/constants/deploy-room';
+import { getTemplateById } from './template.service';
 import { recordTimeline } from './timeline.service';
 import { importMrsForSession } from './gitlab.service';
 import { parseConfluenceTasks } from './confluence.service';
@@ -20,6 +18,7 @@ type SessionRow = {
   id: string;
   title: string;
   template_id: string;
+  team_id: string | null;
   deploy_date: string;
   confluence_page_url: string | null;
   confluence_tasks: ConfluenceDeployTasks | null;
@@ -36,6 +35,7 @@ type ChecklistRow = {
   order_index: number;
   title: string;
   description: string | null;
+  assignee: string;
   checked: boolean;
   checked_by: string | null;
   checked_at: string | null;
@@ -47,6 +47,7 @@ function toSession(row: SessionRow): DeployRoomSession {
     id: row.id,
     title: row.title,
     templateId: row.template_id,
+    teamId: row.team_id ?? null,
     deployDate: row.deploy_date,
     confluencePageUrl: row.confluence_page_url,
     confluenceTasks: row.confluence_tasks ?? null,
@@ -65,6 +66,7 @@ export function toChecklistItem(row: ChecklistRow): DeployRoomChecklistItem {
     orderIndex: row.order_index,
     title: row.title,
     description: row.description,
+    assignee: (row.assignee as DeployRoomChecklistItem['assignee']) ?? 'all',
     checked: row.checked,
     checkedBy: row.checked_by,
     checkedAt: row.checked_at,
@@ -116,7 +118,7 @@ export async function getChecklistItems(
 export async function createSession(
   req: CreateDeployRoomSessionRequest
 ): Promise<DeployRoomSession> {
-  const template = getDeployRoomTemplate(req.templateId);
+  const template = await getTemplateById(req.templateId);
   if (!template) {
     throw new Error(`알 수 없는 템플릿: ${req.templateId}`);
   }
@@ -133,6 +135,7 @@ export async function createSession(
     .insert({
       title: req.title,
       template_id: req.templateId,
+      team_id: req.teamId ?? null,
       deploy_date: req.deployDate,
       confluence_page_url: req.confluencePageUrl ?? null,
       confluence_tasks: confluenceTasks,
@@ -149,10 +152,11 @@ export async function createSession(
   const session = toSession(inserted as SessionRow);
 
   // 3) 체크리스트 bulk insert (템플릿 복제)
-  const checklistRows = template.checklist.map((title, index) => ({
+  const checklistRows = template.checklist.map((item, index) => ({
     session_id: session.id,
     order_index: index + 1,
-    title,
+    title: item.title,
+    assignee: item.assignee,
   }));
 
   const { error: checklistError } = await dbServer
@@ -173,7 +177,8 @@ export async function createSession(
   });
 
   // 5) GitLab MR import — 이번 배포 라벨에 해당하는 MR만 가져옴
-  const labelFilter = getGitlabLabelFilter(template.deployType, req.deployDate);
+  const deployType = (req.deployType ?? 'regular') as import('@/lib/constants/deploy-room').DeployType;
+  const labelFilter = getGitlabLabelFilter(deployType, req.deployDate);
   try {
     await importMrsForSession(
       session.id,

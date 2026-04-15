@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { Home, Users, FolderKanban, Layers, GitCompareArrows } from 'lucide-react';
+import { Home, Users, FolderKanban, Layers, GitCompareArrows, Settings2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -11,6 +11,7 @@ const navItems = [
   { href: '/settings/users', label: '사용자 관리', icon: Users },
   { href: '/settings/projects', label: '프로젝트 관리', icon: FolderKanban },
   { href: '/settings/field-mappings', label: '동기화 방식 관리', icon: GitCompareArrows },
+  { href: '/admin/deploy-room/templates', label: '배포 시나리오 관리', icon: Settings2 },
 ];
 
 export default function SettingsLayout({

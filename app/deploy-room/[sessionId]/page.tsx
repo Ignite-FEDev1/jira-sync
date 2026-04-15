@@ -22,7 +22,6 @@ import {
   type PresenceUser,
 } from '@/lib/services/deploy-room/realtime';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { DEPLOY_ROOM_TEMPLATES } from '@/lib/constants/deploy-room';
 import type {
   ChecklistItemStatus,
   ChecklistUserStatus,
@@ -110,8 +109,9 @@ function getInitials(name: string): string {
 
 interface AggregateResult {
   status: 'pending' | 'in_progress' | 'done';
-  doneUsers: string[];
+  pendingUsers: string[];
   inProgressUsers: string[];
+  doneUsers: string[];
 }
 
 function getAggregate(
@@ -119,25 +119,25 @@ function getAggregate(
   userStatuses: ChecklistUserStatus[],
   activeParticipants: string[]
 ): AggregateResult {
-  if (activeParticipants.length === 0) return { status: 'pending', doneUsers: [], inProgressUsers: [] };
+  if (activeParticipants.length === 0) return { status: 'pending', pendingUsers: [], inProgressUsers: [], doneUsers: [] };
 
   const itemStatuses = userStatuses.filter((s) => s.checklistItemId === item.id);
-  const doneUsers: string[] = [];
+  const pendingUsers: string[] = [];
   const inProgressUsers: string[] = [];
-  let pendingCount = 0;
+  const doneUsers: string[] = [];
 
   const norm = (n: string) => n.replace(/\/.*$/, '').trim();
 
   for (const p of activeParticipants) {
     const s = itemStatuses.find((st) => st.userName === p || norm(st.userName) === norm(p));
-    if (!s || s.status === 'pending') pendingCount++;
+    if (!s || s.status === 'pending') pendingUsers.push(p);
     else if (s.status === 'in_progress') inProgressUsers.push(p);
     else if (s.status === 'done') doneUsers.push(p);
   }
 
-  if (doneUsers.length === activeParticipants.length) return { status: 'done', doneUsers, inProgressUsers };
-  if (pendingCount === activeParticipants.length) return { status: 'pending', doneUsers, inProgressUsers };
-  return { status: 'in_progress', doneUsers, inProgressUsers };
+  if (doneUsers.length === activeParticipants.length) return { status: 'done', pendingUsers, inProgressUsers, doneUsers };
+  if (pendingUsers.length === activeParticipants.length) return { status: 'pending', pendingUsers, inProgressUsers, doneUsers };
+  return { status: 'in_progress', pendingUsers, inProgressUsers, doneUsers };
 }
 
 const USER_STATUS_LABELS: Record<ChecklistItemStatus, string> = {
@@ -164,6 +164,9 @@ export default function DeployRoomDetailPage() {
   const [mrs, setMrs] = useState<DeployRoomMr[]>([]);
   const [timeline, setTimeline] = useState<DeployRoomTimelineEvent[]>([]);
   const [userStatuses, setUserStatuses] = useState<ChecklistUserStatus[]>([]);
+  const [templateTeamMembers, setTemplateTeamMembers] = useState<string[]>([]);
+  const [isLeader, setIsLeader] = useState(false);
+  const [leaderName, setLeaderName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState<PresenceUser[]>([]);
@@ -186,6 +189,41 @@ export default function DeployRoomDetailPage() {
       }
       setSession(sessionJson.session);
       setChecklist(sessionJson.checklist);
+
+      // 팀원 목록 + 팀장 여부 조회
+      const teamId = sessionJson.session?.teamId;
+      if (teamId) {
+        try {
+          const { db } = await import('@/lib/db');
+          const [usersResult, teamResult] = await Promise.all([
+            db.from('users').select('id, name').eq('team_id', teamId).order('name'),
+            db.from('teams').select('leader_id').eq('id', teamId).single(),
+          ]);
+          if (usersResult.data?.length) {
+            setTemplateTeamMembers(usersResult.data.map((u: { name: string }) => u.name));
+          }
+          if (teamResult.data?.leader_id) {
+            if (currentUser) {
+              setIsLeader(teamResult.data.leader_id === currentUser.id);
+            }
+            const leader = usersResult.data?.find(
+              (u: { id: string; name: string }) => u.id === teamResult.data.leader_id
+            );
+            if (leader) setLeaderName(leader.name);
+          }
+        } catch {}
+      } else {
+        // 구형 세션(teamId 없음): 템플릿에서 팀원 조회 시도
+        if (sessionJson.session?.templateId) {
+          try {
+            const tmplRes = await fetch(`/api/admin/deploy-room/templates/${sessionJson.session.templateId}`);
+            const tmplJson = await tmplRes.json();
+            if (tmplJson.success && tmplJson.template?.teamMembers?.length) {
+              setTemplateTeamMembers(tmplJson.template.teamMembers);
+            }
+          } catch {}
+        }
+      }
 
       const mrsJson = await mrsRes.json();
       if (mrsJson.success) setMrs(mrsJson.mrs);
@@ -360,10 +398,9 @@ export default function DeployRoomDetailPage() {
     return acc;
   }, {});
 
-  const template = DEPLOY_ROOM_TEMPLATES.find((t) => t.id === session.templateId);
-  const allPresenceKeys: string[] = template?.teamMembers
+  const allPresenceKeys: string[] = templateTeamMembers.length > 0
     ? [
-        ...template.teamMembers.filter((m) => !Object.keys(mrsByAssignee).some((k) => k.includes(m))),
+        ...templateTeamMembers.filter((m) => !Object.keys(mrsByAssignee).some((k) => k.includes(m))),
         ...Object.keys(mrsByAssignee),
       ]
     : Object.keys(mrsByAssignee);
@@ -371,9 +408,17 @@ export default function DeployRoomDetailPage() {
   const inactiveParticipants = session.inactiveParticipants;
   const activeParticipants = allPresenceKeys.filter((k) => !inactiveParticipants.includes(k));
 
-  // 전체 현황 진행률 (aggregate 기반)
+  // assignee에 따라 집계 대상자 필터링
+  const getParticipantsForItem = (assignee: string) => {
+    if (!leaderName || assignee === 'all') return activeParticipants;
+    if (assignee === 'leader') return activeParticipants.filter((p) => p === leaderName || p.includes(leaderName));
+    // member
+    return activeParticipants.filter((p) => p !== leaderName && !p.includes(leaderName));
+  };
+
+  // 전체 현황 진행률 (aggregate 기반, assignee별 대상자 적용)
   const doneCount = checklist.filter(
-    (item) => getAggregate(item, userStatuses, activeParticipants).status === 'done'
+    (item) => getAggregate(item, userStatuses, getParticipantsForItem(item.assignee)).status === 'done'
   ).length;
   const progress = checklist.length > 0 ? Math.round((doneCount / checklist.length) * 100) : 0;
 
@@ -563,7 +608,14 @@ export default function DeployRoomDetailPage() {
                   ) : (
                     <ul className="space-y-0.5">
                       {checklist.map((item) => {
-                        const agg = getAggregate(item, userStatuses, activeParticipants);
+                        const targetParticipants = getParticipantsForItem(item.assignee);
+                        const agg = getAggregate(item, userStatuses, targetParticipants);
+                        const assigneeLabel = item.assignee === 'leader' ? '팀장' : item.assignee === 'member' ? '팀원' : null;
+                        const assigneeStyle = item.assignee === 'leader'
+                          ? 'bg-blue-100 text-blue-700'
+                          : item.assignee === 'member'
+                          ? 'bg-amber-100 text-amber-700'
+                          : '';
                         return (
                           <li key={item.id} className="py-2 px-2 rounded-lg">
                             <div className="flex items-start gap-2.5">
@@ -575,24 +627,34 @@ export default function DeployRoomDetailPage() {
                                 <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0 mt-0.5" />
                               )}
                               <div className="flex-1 min-w-0">
-                                <div className={`text-sm leading-snug ${agg.status === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
-                                  <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
-                                  {item.title}
+                                <div className={`text-sm leading-snug flex items-center gap-1.5 ${agg.status === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
+                                  <span>
+                                    <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
+                                    {item.title}
+                                  </span>
+                                  {assigneeLabel && (
+                                    <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-medium shrink-0 ${assigneeStyle}`}>
+                                      {assigneeLabel}
+                                    </span>
+                                  )}
                                 </div>
-                                {(agg.doneUsers.length > 0 || agg.inProgressUsers.length > 0) && (
-                                  <div className="flex gap-1 mt-1 flex-wrap">
-                                    {agg.doneUsers.map((u) => (
-                                      <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium">
-                                        <CheckCircle2 className="h-2.5 w-2.5" />{u.replace(/\/.*$/, '').trim()}
-                                      </span>
-                                    ))}
-                                    {agg.inProgressUsers.map((u) => (
-                                      <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded-full font-medium">
-                                        <Loader2 className="h-2.5 w-2.5 animate-spin" />{u.replace(/\/.*$/, '').trim()}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
+                                <div className="flex gap-1 mt-1 flex-wrap">
+                                  {agg.doneUsers.map((u) => (
+                                    <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium">
+                                      <CheckCircle2 className="h-2.5 w-2.5" />{u.replace(/\/.*$/, '').trim()}
+                                    </span>
+                                  ))}
+                                  {agg.inProgressUsers.map((u) => (
+                                    <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full font-medium">
+                                      <Loader2 className="h-2.5 w-2.5 animate-spin" />{u.replace(/\/.*$/, '').trim()}
+                                    </span>
+                                  ))}
+                                  {agg.pendingUsers.map((u) => (
+                                    <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-slate-100 text-slate-400 px-1.5 py-0.5 rounded-full font-medium">
+                                      {u.replace(/\/.*$/, '').trim()}
+                                    </span>
+                                  ))}
+                                </div>
                               </div>
                             </div>
                           </li>
@@ -630,6 +692,34 @@ export default function DeployRoomDetailPage() {
                           const myStatus = userStatuses.find(
                             (s) => s.checklistItemId === item.id && s.userName === myName
                           )?.status ?? 'pending';
+
+                          // 내 역할에 해당하지 않는 항목 판별
+                          const myRole = isLeader ? 'leader' : 'member';
+                          const isMyTask = item.assignee === 'all' || item.assignee === myRole;
+
+                          if (!isMyTask) {
+                            // 내 역할이 아닌 항목 → 비활성 표시
+                            const roleLabel = item.assignee === 'leader' ? '팀장' : '팀원';
+                            return (
+                              <li key={item.id}>
+                                <div className="w-full flex items-center gap-3 py-2 px-2 rounded-lg bg-slate-50 cursor-default">
+                                  <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0" />
+                                  <span className="text-sm flex-1 leading-snug text-slate-500">
+                                    <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
+                                    {item.title}
+                                  </span>
+                                  <span className={`text-[11px] px-2 py-0.5 rounded-full font-semibold shrink-0 ${
+                                    item.assignee === 'leader'
+                                      ? 'bg-blue-100 text-blue-700'
+                                      : 'bg-amber-100 text-amber-700'
+                                  }`}>
+                                    {roleLabel} 담당
+                                  </span>
+                                </div>
+                              </li>
+                            );
+                          }
+
                           return (
                             <li key={item.id}>
                               <button
