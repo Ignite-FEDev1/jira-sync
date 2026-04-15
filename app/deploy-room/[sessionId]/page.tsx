@@ -953,21 +953,21 @@ export default function DeployRoomDetailPage() {
         </div>
 
         {/* Confluence 배포 전/후 할일 */}
-        {session.confluenceTasks && (
+        {(
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
               <div className="px-5 pt-5 pb-4 border-b border-slate-100 flex items-center justify-between">
                 <h3 className="font-semibold text-slate-800">2.1. 배포 전 할일</h3>
                 <span className="text-xs text-slate-500 tabular-nums">
-                  {session.confluenceTasks.before.filter((t) => t.status === 'complete').length} / {session.confluenceTasks.before.length}
+                  {(session.confluenceTasks?.before ?? []).filter((t) => t.status === 'complete').length} / {(session.confluenceTasks?.before ?? []).length}
                 </span>
               </div>
               <div className="px-3 py-3">
-                {session.confluenceTasks.before.length === 0 ? (
+                {(session.confluenceTasks?.before ?? []).length === 0 ? (
                   <p className="text-sm text-slate-400 text-center py-6">없음</p>
                 ) : (
                   <ul className="space-y-0.5">
-                    {session.confluenceTasks.before.map((task) => (
+                    {(session.confluenceTasks?.before ?? []).map((task) => (
                       <li key={task.id} className="flex items-start gap-3 py-2 px-2 rounded-lg">
                         {task.status === 'complete' ? (
                           <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500 shrink-0 mt-0.5" />
@@ -987,15 +987,15 @@ export default function DeployRoomDetailPage() {
               <div className="px-5 pt-5 pb-4 border-b border-slate-100 flex items-center justify-between">
                 <h3 className="font-semibold text-slate-800">2.2. 배포 후 할일</h3>
                 <span className="text-xs text-slate-500 tabular-nums">
-                  {session.confluenceTasks.after.filter((t) => t.status === 'complete').length} / {session.confluenceTasks.after.length}
+                  {(session.confluenceTasks?.after ?? []).filter((t) => t.status === 'complete').length} / {(session.confluenceTasks?.after ?? []).length}
                 </span>
               </div>
               <div className="px-3 py-3">
-                {session.confluenceTasks.after.length === 0 ? (
+                {(session.confluenceTasks?.after ?? []).length === 0 ? (
                   <p className="text-sm text-slate-400 text-center py-6">없음</p>
                 ) : (
                   <ul className="space-y-0.5">
-                    {session.confluenceTasks.after.map((task) => (
+                    {(session.confluenceTasks?.after ?? []).map((task) => (
                       <li key={task.id} className="flex items-start gap-3 py-2 px-2 rounded-lg">
                         {task.status === 'complete' ? (
                           <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500 shrink-0 mt-0.5" />
