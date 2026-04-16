@@ -264,6 +264,18 @@ export class SyncOrchestrator {
       }
     }
 
+    // Ignite 타겟 프로젝트(KQ/HDD/HB) 프로필의 소스 필드도 포함
+    // syncToProject에서 auto-discover되는 프로필의 필드를 미리 fetch해야
+    // 스프린트 등 커스텀 필드가 Jira 조회에 포함됨
+    const igniteTargets: Array<'KQ' | 'HDD' | 'HB'> = ['KQ', 'HDD', 'HB'];
+    for (const target of igniteTargets) {
+      const profileId = await this.findProfileForTarget(target);
+      if (profileId && profileId !== syncProfileId) {
+        const dbFields = await getSourceFieldsFromDb(profileId);
+        dbFields.forEach((f) => allSourceFields.add(f));
+      }
+    }
+
     // AUTOWAY 프로필이 있으면 해당 매핑 필드도 추가
     const autowayProf = await this.findAutowayProfile();
     if (autowayProf) {
