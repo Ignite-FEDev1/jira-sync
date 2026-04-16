@@ -9,6 +9,7 @@ import {
   Plus,
   Pencil,
   Trash2,
+  Copy,
   Layers,
   Users,
   GitBranch,
@@ -79,6 +80,16 @@ export default function DeployScenarioListPage() {
   useEffect(() => {
     load();
   }, []);
+
+  const handleCopy = (e: React.MouseEvent, template: DeployRoomTemplate) => {
+    e.stopPropagation();
+    const lines = [
+      `🚀 ${template.name}`,
+      ...template.checklist.map((item, i) => `${i + 1}. ${item.title}`),
+    ];
+    navigator.clipboard.writeText(lines.join('\n'));
+    toast.success('복사되었습니다');
+  };
 
   const handleDelete = async (e: React.MouseEvent, id: string, name: string) => {
     e.stopPropagation();
@@ -245,6 +256,14 @@ export default function DeployScenarioListPage() {
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={(e) => handleCopy(e, template)}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon"
