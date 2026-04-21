@@ -17,6 +17,7 @@ import { JiraClient } from '@/lib/services/jira/client';
 import { FEHG_TRANSITIONS, IGNITE_CUSTOM_FIELDS } from '@/lib/constants/jira';
 import { getAllUsers } from '@/lib/services/user-lookup';
 import { sendSprintCloseEmail } from '@/lib/services/email/resend-client';
+import { buildSprintCloseEmailHtml, SprintCloseResult } from '@/lib/services/email/sprint-close-email';
 import {
   getFehgActiveSprintInfo,
   buildNextFehgSprintName,
@@ -40,24 +41,13 @@ interface JiraIssue {
     // 배열로 반환되며, 티켓에 스프린트가 복수 지정된 경우 2개 이상의 항목을 가짐
     customfield_10020: Array<{ id: number; name: string }> | null;
     description?: unknown;
-    assignee?: { accountId: string } | null;
+    assignee?: { accountId: string; displayName: string } | null;
     priority?: { name: string } | null;
     issuetype?: { name: string; id: string };
     parent?: { key: string; id: string };
     labels?: string[];
     customfield_10015?: string | null; // 시작일
   };
-}
-
-interface SprintCloseResult {
-  // 스프린트 2개 이상 지정된 티켓 (처리 안 함, 확인 요청)
-  overlaps: { key: string; summary: string; sprints: string[] }[];
-  // 할 일 상태 - 다음 달 스프린트로 이동
-  moved: { key: string; summary: string }[];
-  // 진행 중 - 완료 전환 + 다음 달 신규 티켓 발행
-  cloned: { originalKey: string; originalSummary: string; newKey: string }[];
-  // 처리 중 오류 발생한 티켓
-  errors: { key: string; summary: string; error: string }[];
 }
 
 // ─── 유틸 함수 ───────────────────────────────────────────────
@@ -220,87 +210,6 @@ async function changeTicketSprint(
   }
 }
 
-// ─── 이메일 HTML 생성 ────────────────────────────────────────
-
-function buildEmailHtml(
-  fromSprint: string,
-  toSprint: string,
-  result: SprintCloseResult
-): string {
-  const today = new Date().toISOString().slice(0, 10);
-  const JIRA_BASE = 'https://ignitecorp.atlassian.net/browse';
-
-  const link = (key: string) =>
-    `<a href="${JIRA_BASE}/${key}" target="_blank" style="color:#1d4ed8;text-decoration:none;font-weight:600;">${key} ↗</a>`;
-
-  const badge = (text: string, bg: string, color: string) =>
-    `<span style="display:inline-block;padding:2px 8px;border-radius:10px;background:${bg};color:${color};font-size:11px;font-weight:600;">${text}</span>`;
-
-  const section = (header: string, bg: string, border: string, rows: string) =>
-    `<div style="background:${bg};border:1px solid ${border};border-radius:8px;padding:16px 20px;margin-bottom:12px;">
-      <div style="font-weight:700;font-size:14px;margin-bottom:10px;">${header}</div>
-      ${rows}
-    </div>`;
-
-  const row = (content: string) =>
-    `<div style="padding:6px 0;border-bottom:1px solid rgba(0,0,0,0.06);font-size:13px;">${content}</div>`;
-
-  let sections = '';
-
-  if (result.overlaps.length > 0) {
-    const rows = result.overlaps.map((t) =>
-      row(`${link(t.key)} <span style="color:#6b7280;margin-left:8px;">${t.summary}</span>
-           <div style="margin-top:3px;font-size:11px;color:#92400e;">스프린트: ${t.sprints.join(', ')}</div>`)
-    ).join('');
-    sections += section(
-      `⚠ 스프린트 중복 감지 (${result.overlaps.length}개) — 수동 확인 필요`,
-      '#fef3c7', '#fcd34d', rows
-    );
-  }
-
-  if (result.moved.length > 0) {
-    const rows = result.moved.map((t) =>
-      row(`${link(t.key)} ${badge('할 일', '#f3f4f6', '#374151')} <span style="color:#6b7280;margin-left:8px;">${t.summary}</span>`)
-    ).join('');
-    sections += section(
-      `📋 이월 (${result.moved.length}개) — ${toSprint}으로 이동`,
-      '#eff6ff', '#bfdbfe', rows
-    );
-  }
-
-  if (result.cloned.length > 0) {
-    const rows = result.cloned.map((t) =>
-      row(`${link(t.originalKey)} ${badge('완료', '#dcfce7', '#166534')}
-           <span style="color:#9ca3af;margin:0 6px;">→</span>
-           ${t.newKey === '(신규발행예정)' ? badge('신규발행예정', '#fef9c3', '#92400e') : `${link(t.newKey)} ${badge('신규발행', '#dbeafe', '#1e40af')}`}
-           <div style="margin-top:3px;font-size:12px;color:#6b7280;">${t.originalSummary}</div>`)
-    ).join('');
-    sections += section(
-      `✅ 완료 후 신규 발행 (${result.cloned.length}개)`,
-      '#f0fdf4', '#86efac', rows
-    );
-  }
-
-  if (result.errors.length > 0) {
-    const rows = result.errors.map((t) =>
-      row(`${link(t.key)} <span style="color:#991b1b;margin-left:8px;">${t.error}</span>`)
-    ).join('');
-    sections += section(
-      `❌ 오류 (${result.errors.length}개)`,
-      '#fef2f2', '#fca5a5', rows
-    );
-  }
-
-  return `
-    <div style="font-family:-apple-system,Arial,sans-serif;max-width:620px;margin:0 auto;color:#111;">
-      <div style="background:#1d4ed8;border-radius:8px 8px 0 0;padding:20px 24px;margin-bottom:12px;">
-        <div style="color:#93c5fd;font-size:12px;margin-bottom:4px;">${today} · 스프린트 마감 결과</div>
-        <div style="color:#fff;font-size:18px;font-weight:700;">${fromSprint} → ${toSprint}</div>
-      </div>
-      ${sections || '<div style="padding:16px;color:#6b7280;font-size:13px;">처리된 티켓이 없습니다.</div>'}
-    </div>`;
-}
-
 // ─── 메인 ────────────────────────────────────────────────────
 
 async function main() {
@@ -330,6 +239,8 @@ async function main() {
 
   // DB 전체 사용자 중 Ignite Jira 인증정보가 있는 첫 번째 계정 사용
   const users = await getAllUsers();
+  // igniteAccountId -> DbUser 맵 (assignee 이름 해석 + 개인 이메일 발송용)
+  const userByAccountId = new Map(users.map((u) => [u.igniteAccountId, u]));
   const user = users.find((u) => u.igniteJiraEmail && u.igniteJiraApiToken);
   if (!user) {
     console.error('Ignite Jira 인증정보가 있는 사용자를 찾을 수 없습니다.');
@@ -373,28 +284,31 @@ async function main() {
 
   // 신규 발행 티켓 summary suffix에 사용할 "OO월" 문자열
   const nextPeriod = nextSprintName.split(' ')[1]; // "2605"
+  if (!nextPeriod) throw new Error(`스프린트 이름 형식 오류: "${nextSprintName}" (예: "FEHG 2605")`);
   const nextMonthLabel = `${parseInt(nextPeriod.slice(2, 4), 10)}월`;
 
   // ── 티켓별 상태 처리 ──────────────────────────────────────
   console.log('[4/4] 티켓 처리...');
-  const result: SprintCloseResult = { overlaps: [], moved: [], cloned: [], errors: [] };
+  const result: SprintCloseResult = { moved: [], cloned: [], errors: [] };
+  // 개인 이메일 발송 대상: accountId -> { name, email }
+  const personalEmailTargets = new Map<string, { name: string; email: string }>();
 
   for (const ticket of tickets) {
     const sprints = ticket.fields.customfield_10020 ?? [];
     const statusKey = ticket.fields.status.statusCategory.key;
+    const accountId = ticket.fields.assignee?.accountId ?? null;
 
-    // 스프린트 2개 이상: 처리하지 않고 이메일로 보고
-    if (sprints.length >= 2) {
-      result.overlaps.push({
-        key: ticket.key,
-        summary: ticket.fields.summary,
-        sprints: sprints.map((s) => s.name),
-      });
-      console.log(`  [SKIP] ${ticket.key}: 스프린트 중복 (${sprints.length}개)`);
-      continue;
+    // DB 사용자 이름 우선 사용 (currentUserName과 일치 보장), 없으면 Jira displayName
+    const dbUser = accountId ? userByAccountId.get(accountId) : undefined;
+    const assigneeName = dbUser?.name ?? ticket.fields.assignee?.displayName ?? null;
+
+    // 이메일 수신 대상 등록 (igniteJiraEmail이 있는 DB 사용자만)
+    const trimmedEmail = dbUser?.igniteJiraEmail?.trim();
+    if (accountId && trimmedEmail && !personalEmailTargets.has(accountId)) {
+      personalEmailTargets.set(accountId, { name: dbUser.name, email: trimmedEmail });
     }
 
-    // 완료 상태: 그대로 스킵
+    // 완료 상태: 그대로 스킵 (스프린트 중복 여부 관계없이)
     if (statusKey === 'done') {
       console.log(`  [SKIP] ${ticket.key}: 이미 완료`);
       continue;
@@ -402,21 +316,36 @@ async function main() {
 
     try {
       if (statusKey === 'indeterminate') {
+        // 진행 중: 완료 전환 -> 신규 발행 -> 링크
+        // 중복 스프린트인 경우 먼저 현재 스프린트만 남기도록 재설정 (다음 스프린트 제거)
         if (isDryRun) {
-          console.log(`  [DRY RUN 진행중] ${ticket.key}: 완료 전환 + 신규 발행 예정 (변경 없음)`);
+          if (sprints.length >= 2) {
+            console.log(`  [DRY RUN 중복+진행중] ${ticket.key}: 현재 스프린트 유지 → 완료 전환 + 신규 발행 예정 (변경 없음)`);
+          } else {
+            console.log(`  [DRY RUN 진행중] ${ticket.key}: 완료 전환 + 신규 발행 예정 (변경 없음)`);
+          }
           result.cloned.push({
             originalKey: ticket.key,
             originalSummary: ticket.fields.summary,
             newKey: '(신규발행예정)',
+            newSummary: `${ticket.fields.summary} - ${nextMonthLabel}`,
+            assigneeName,
           });
         } else {
-          // 진행 중: 완료 전환 -> 연결 티켓 완료 -> 신규 발행 -> 링크
-          console.log(`  [진행중] ${ticket.key}: 완료 전환 + 신규 발행`);
+          if (sprints.length >= 2) {
+            // 현재 스프린트만 남기도록 재설정 (다음 스프린트 참조 제거)
+            console.log(`  [중복+진행중] ${ticket.key}: 현재 스프린트(${activeSprint.name})만 남기도록 재설정`);
+            await client.put(`issue/${ticket.key}`, {
+              fields: { [IGNITE_CUSTOM_FIELDS.SPRINT]: activeSprint.id },
+            });
+          } else {
+            console.log(`  [진행중] ${ticket.key}: 완료 전환 + 신규 발행`);
+          }
 
           await transitionIssue(client, ticket.key, FEHG_TRANSITIONS.DONE);
 
           const newKey = await createCloneTicket(client, ticket, nextSprint.id, nextMonthLabel);
-          console.log(`    → 신규 발행: ${newKey}`);
+          console.log(`    -> 신규 발행: ${newKey}`);
 
           await linkCloners(client, ticket.key, newKey);
 
@@ -424,17 +353,21 @@ async function main() {
             originalKey: ticket.key,
             originalSummary: ticket.fields.summary,
             newKey,
+            newSummary: `${ticket.fields.summary} - ${nextMonthLabel}`,
+            assigneeName,
           });
         }
       } else {
         // 할 일 (그 외 상태): 다음 달 스프린트로 이동
         if (isDryRun) {
-          console.log(`  [DRY RUN 할일] ${ticket.key}: ${nextSprint.name}으로 이동 예정 (변경 없음)`);
+          const tag = sprints.length >= 2 ? '[DRY RUN 중복+할일]' : '[DRY RUN 할일]';
+          console.log(`  ${tag} ${ticket.key}: ${nextSprint.name}으로 이동 예정 (변경 없음)`);
         } else {
-          console.log(`  [할일] ${ticket.key}: 스프린트 → ${nextSprint.name}`);
+          const tag = sprints.length >= 2 ? '[중복+할일]' : '[할일]';
+          console.log(`  ${tag} ${ticket.key}: 스프린트 → ${nextSprint.name}`);
           await changeTicketSprint(client, ticket.key, nextSprint.id);
         }
-        result.moved.push({ key: ticket.key, summary: ticket.fields.summary });
+        result.moved.push({ key: ticket.key, summary: ticket.fields.summary, assigneeName });
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -447,19 +380,32 @@ async function main() {
   console.log('\n========================================');
   console.log('스프린트 마감 완료 요약');
   console.log('========================================');
-  console.log(`  중복 스프린트: ${result.overlaps.length}건 (미처리)`);
-  console.log(`  이월 (할 일):  ${result.moved.length}건`);
+  console.log(`  이동 (할 일):  ${result.moved.length}건`);
   console.log(`  완료+신규발행: ${result.cloned.length}건`);
   console.log(`  오류:          ${result.errors.length}건`);
 
   // ── 이메일 발송 ────────────────────────────────────────────
   if (process.env.RESEND_API_KEY) {
-    const dryRunBanner = isDryRun
-      ? `<div style="background:#fef3c7;border:2px solid #f59e0b;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-family:-apple-system,Arial,sans-serif;font-size:13px;color:#92400e;">🔍 <strong>DRY RUN</strong> — Jira 변경 없이 처리 대상만 조회한 결과입니다.</div>`
-      : '';
-    const html = dryRunBanner + buildEmailHtml(activeSprint.name, nextSprint.name, result);
-    const fromLabel = isDryRun ? `[DRY RUN] ${activeSprint.name}` : activeSprint.name;
-    await sendSprintCloseEmail(html, fromLabel, nextSprint.name);
+    // 담당자별 개인 이메일 — 내 티켓 상단 + 팀 전체 하단
+    for (const { name, email } of personalEmailTargets.values()) {
+      const personalHtml = buildSprintCloseEmailHtml(
+        activeSprint.name, nextSprint.name, result,
+        { isDryRun, currentUserName: name }
+      );
+      try {
+        await sendSprintCloseEmail(personalHtml, activeSprint.name, nextSprint.name, { to: email, isDryRun });
+      } catch (err) {
+        console.error(`[이메일] 개인 발송 실패 (${name} <${email}>):`, err);
+      }
+    }
+
+    // 팀 요약 이메일 — fedev1@ignite.co.kr (담당자별 그룹, 개인 강조 없음)
+    const summaryHtml = buildSprintCloseEmailHtml(activeSprint.name, nextSprint.name, result, { isDryRun });
+    try {
+      await sendSprintCloseEmail(summaryHtml, activeSprint.name, nextSprint.name, { isDryRun });
+    } catch (err) {
+      console.error('[이메일] 팀 요약 발송 실패:', err);
+    }
   } else {
     console.log('\nRESEND_API_KEY 미설정 — 이메일 발송 생략');
   }
