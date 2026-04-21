@@ -428,6 +428,13 @@ export const BOARD_IDS = {
   AUTOWAY: 521,
 } as const;
 
+// FEHG 스프린트 마감용 transition ID
+export const FEHG_TRANSITIONS = {
+  TODO: '11',
+  IN_PROGRESS: '21',
+  DONE: '31',
+} as const;
+
 // 헬퍼 함수
 export const JiraProjectHelpers = {
   /**

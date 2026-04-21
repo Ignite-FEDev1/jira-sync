@@ -101,3 +101,26 @@ export async function sendSyncReportEmail({
     console.log(`[이메일] ${NOTIFY_EMAIL}에 Daily Sync 결과 발송 완료`);
   }
 }
+
+/**
+ * Sprint Closing 결과 이메일 발송 (HTML)
+ * 티켓명 옆에 ↗ 인라인 링크 포함
+ */
+export async function sendSprintCloseEmail(
+  html: string,
+  fromSprint: string,
+  toSprint: string
+): Promise<void> {
+  const { error } = await getResend().emails.send({
+    from: 'FE1 Tool <onboarding@resend.dev>',
+    to: NOTIFY_EMAIL,
+    subject: `[FE1 Tool] Sprint Closing (${fromSprint} → ${toSprint}) 완료`,
+    html,
+  });
+
+  if (error) {
+    console.error('[이메일] 발송 실패:', error);
+  } else {
+    console.log(`[이메일] ${NOTIFY_EMAIL}에 Sprint Closing 결과 발송 완료`);
+  }
+}
