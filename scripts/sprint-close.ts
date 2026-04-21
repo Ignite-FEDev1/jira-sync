@@ -304,7 +304,7 @@ async function main() {
 
     // 이메일 수신 대상 등록 (igniteJiraEmail이 있는 DB 사용자만)
     const trimmedEmail = dbUser?.igniteJiraEmail?.trim();
-    if (accountId && trimmedEmail && !personalEmailTargets.has(accountId)) {
+    if (accountId && dbUser && trimmedEmail && !personalEmailTargets.has(accountId)) {
       personalEmailTargets.set(accountId, { name: dbUser.name, email: trimmedEmail });
     }
 
