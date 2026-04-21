@@ -1,10 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
-  ChevronLeft,
   ChevronRight,
   Plus,
   Pencil,
@@ -120,33 +118,24 @@ export default function DeployScenarioListPage() {
 
   return (
     <main className="min-h-screen bg-slate-50/50">
-      {/* Header */}
-      <header className="bg-white border-b">
-        <div className="container mx-auto px-6 py-5 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link href="/deploy-room">
-              <Button variant="ghost" size="icon" className="rounded-full">
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-            </Link>
-            <div>
-              <h1 className="text-lg font-semibold tracking-tight">
-                배포 시나리오 관리
-              </h1>
-              <p className="text-[13px] text-muted-foreground">
-                배포방 생성 시 적용할 체크리스트 시나리오
-              </p>
-            </div>
+      {/* Page Context Header */}
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-bold">배포 시나리오 관리</h1>
+            <p className="text-sm text-muted-foreground">
+              배포방 생성 시 적용할 체크리스트 시나리오
+            </p>
           </div>
           <Button
             onClick={() => router.push('/admin/deploy-room/templates/new')}
-            className="rounded-lg"
+            size="sm"
           >
-            <Plus className="mr-1.5 h-4 w-4" />
+            <Plus className="mr-1.5 h-3.5 w-3.5" />
             새 시나리오
           </Button>
         </div>
-      </header>
+      </div>
 
       {/* Legend */}
       <div className="container mx-auto px-6 pt-6 pb-2">

@@ -11,6 +11,7 @@ interface GitlabMergeRequest {
   iid: number;
   title: string;
   web_url: string;
+  labels: string[];
   author: { name: string } | null;
   assignees: Array<{ name: string }>;
   source_branch: string;
@@ -28,8 +29,25 @@ function getGitlabConfig(): { baseUrl: string; token: string } {
 }
 
 /**
+ * 라벨 정규화: 모든 공백 제거 후 소문자 변환
+ * "비정기 배포 ( 260416 )" → "비정기배포(260416)"
+ */
+function normalizeLabel(label: string): string {
+  return label.replace(/\s+/g, '').toLowerCase();
+}
+
+/**
+ * MR의 라벨 목록 중 하나라도 기대 라벨과 정규화 매칭되는지 확인
+ */
+function matchesLabel(mrLabels: string[], expected: string): boolean {
+  const norm = normalizeLabel(expected);
+  return mrLabels.some((l) => normalizeLabel(l) === norm);
+}
+
+/**
  * 특정 GitLab 프로젝트의 open MR 목록 조회.
- * labelFilter를 넘기면 해당 라벨이 달린 MR만 반환한다.
+ * labelFilter를 넘기면 로컬에서 정규화 비교로 필터링한다.
+ * (공백, 띄어쓰기 차이를 허용)
  */
 export async function fetchOpenMergeRequests(
   projectUrlOrPath: string,
@@ -45,7 +63,6 @@ export async function fetchOpenMergeRequests(
       params: {
         state: 'opened',
         per_page: 100,
-        ...(labelFilter ? { labels: labelFilter } : {}),
       },
       headers: { 'PRIVATE-TOKEN': token },
       httpsAgent,
@@ -53,7 +70,9 @@ export async function fetchOpenMergeRequests(
     }
   );
 
-  return data;
+  if (!labelFilter) return data;
+
+  return data.filter((mr) => matchesLabel(mr.labels ?? [], labelFilter));
 }
 
 interface ImportResult {
@@ -63,7 +82,7 @@ interface ImportResult {
 
 /**
  * 세션의 템플릿 프로젝트들로부터 Open MR을 가져와 deploy_room_mrs에 저장.
- * labelFilter를 넘기면 해당 라벨이 달린 MR만 가져온다.
+ * labelFilter를 넘기면 해당 라벨이 달린 MR만 가져온다 (정규화 매칭).
  * 일부 프로젝트 실패해도 전체 실패하지 않고 타임라인에 기록한다.
  */
 export async function importMrsForSession(

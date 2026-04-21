@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Copy, Check, Home, Plus, FileText } from 'lucide-react';
+import { Copy, Check, Plus, FileText } from 'lucide-react';
 import { toast } from 'sonner';
 
 import type { DeployFormData, ProjectType, DeployType } from './types';
@@ -151,31 +151,22 @@ export default function TemplatesPage() {
   return (
     <main className="min-h-screen bg-background">
       {/* Header */}
-      <header className="border-b">
-        <div className="container mx-auto px-6 py-6 flex items-center justify-between">
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">배포 템플릿</h1>
+            <h1 className="text-lg font-bold">배포 템플릿</h1>
             <p className="text-sm text-muted-foreground">
               배포 프로세스 체크리스트를 Slack에서 사용할 수 있습니다
             </p>
           </div>
-          <div className="flex gap-2">
-            <Link href="/">
-              <Button variant="outline">
-                <Home className="mr-2 h-4 w-4" />
-                홈으로
-              </Button>
-            </Link>
-            {/* @deprecated Flow Chart - 관리자 페이지로 이전 예정 */}
-            <Link href="/create-ticket">
-              <Button>
-                <Plus className="mr-2 h-4 w-4" />
-                티켓 생성
-              </Button>
-            </Link>
-          </div>
+          <Link href="/create-ticket">
+            <Button size="sm">
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              티켓 생성
+            </Button>
+          </Link>
         </div>
-      </header>
+      </div>
 
       {/* Main Content */}
       <div className="container mx-auto px-6 py-8 max-w-3xl">

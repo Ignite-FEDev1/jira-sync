@@ -13,6 +13,7 @@ import {
   GitPullRequest,
   Loader2,
   MousePointer2,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -64,6 +65,8 @@ function calcMrStage(mrs: DeployRoomMr[]): AssigneeStage {
   const anyMerged = base.some((m) => m.status === 'merged');
   const anyApproved = base.some((m) => m.status === 'approved');
 
+  // MR 0건이면 완료 처리
+  if (base.length === 0) return { key: 'done', label: '완료', dot: 'bg-emerald-500', bar: 'bg-emerald-400', card: 'border-emerald-300 bg-emerald-50/60' };
   if (conflict)    return { key: 'conflict', label: '충돌',      dot: 'bg-rose-500',    bar: 'bg-rose-400',    card: 'border-rose-300 bg-rose-50/60' };
   if (allMerged)   return { key: 'done',     label: '완료',      dot: 'bg-emerald-500', bar: 'bg-emerald-400', card: 'border-emerald-300 bg-emerald-50/60' };
   if (anyMerged)   return { key: 'merging',  label: '머지 중',   dot: 'bg-amber-500',   bar: 'bg-amber-400',   card: 'border-amber-300 bg-amber-50/40' };
@@ -355,6 +358,40 @@ export default function DeployRoomDetailPage() {
     } catch (error) {
       toast.error(`상태 변경 실패: ${error instanceof Error ? error.message : String(error)}`);
       // 롤백
+      setUserStatuses((prev) => prev.map((s) =>
+        s.checklistItemId === itemId && s.userName === userName ? { ...s, status: current } : s
+      ));
+    }
+  };
+
+  // 전체 현황에서 특정 사용자를 done으로 강제 변경
+  const handleForceUserDone = async (itemId: string, userName: string) => {
+    const current = userStatuses.find(
+      (s) => s.checklistItemId === itemId && s.userName === userName
+    )?.status ?? 'pending';
+
+    // 낙관적 업데이트
+    setUserStatuses((prev) => {
+      const exists = prev.some((s) => s.checklistItemId === itemId && s.userName === userName);
+      if (exists) return prev.map((s) =>
+        s.checklistItemId === itemId && s.userName === userName ? { ...s, status: 'done' as const } : s
+      );
+      return [...prev, { id: 'tmp', sessionId, checklistItemId: itemId, userName, status: 'done' as const, updatedAt: new Date().toISOString() }];
+    });
+
+    try {
+      const res = await fetch('/api/deploy-room/checklist-user-status', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ checklistItemId: itemId, sessionId, userName, status: 'done' }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+      setUserStatuses((prev) => prev.map((s) =>
+        s.checklistItemId === itemId && s.userName === userName ? json.userStatus : s
+      ));
+    } catch (error) {
+      toast.error(`상태 변경 실패: ${error instanceof Error ? error.message : String(error)}`);
       setUserStatuses((prev) => prev.map((s) =>
         s.checklistItemId === itemId && s.userName === userName ? { ...s, status: current } : s
       ));
@@ -742,6 +779,11 @@ export default function DeployRoomDetailPage() {
                                     </span>
                                   )}
                                 </div>
+                                {item.description && (
+                                  <p className={`text-[11px] leading-relaxed mt-0.5 ${agg.status === 'done' ? 'text-slate-400' : 'text-slate-500'}`}>
+                                    {item.description}
+                                  </p>
+                                )}
                                 <div className="flex gap-1 mt-1 flex-wrap">
                                   {agg.doneUsers.map((u) => (
                                     <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium">
@@ -749,13 +791,29 @@ export default function DeployRoomDetailPage() {
                                     </span>
                                   ))}
                                   {agg.inProgressUsers.map((u) => (
-                                    <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full font-medium">
+                                    <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-amber-100 text-amber-700 pl-1.5 pr-0.5 py-0.5 rounded-full font-medium group">
                                       <Loader2 className="h-2.5 w-2.5 animate-spin" />{u.replace(/\/.*$/, '').trim()}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleForceUserDone(item.id, u)}
+                                        className="ml-0.5 rounded-full p-0 hover:bg-amber-200 transition-colors"
+                                        title={`${u.replace(/\/.*$/, '').trim()} 완료 처리`}
+                                      >
+                                        <X className="h-2.5 w-2.5" />
+                                      </button>
                                     </span>
                                   ))}
                                   {agg.pendingUsers.map((u) => (
-                                    <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-slate-100 text-slate-400 px-1.5 py-0.5 rounded-full font-medium">
+                                    <span key={u} className="inline-flex items-center gap-0.5 text-[10px] bg-slate-100 text-slate-400 pl-1.5 pr-0.5 py-0.5 rounded-full font-medium group">
                                       {u.replace(/\/.*$/, '').trim()}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleForceUserDone(item.id, u)}
+                                        className="ml-0.5 rounded-full p-0 hover:bg-slate-200 transition-colors"
+                                        title={`${u.replace(/\/.*$/, '').trim()} 완료 처리`}
+                                      >
+                                        <X className="h-2.5 w-2.5" />
+                                      </button>
                                     </span>
                                   ))}
                                 </div>
@@ -806,19 +864,26 @@ export default function DeployRoomDetailPage() {
                             const roleLabel = item.assignee === 'leader' ? '팀장' : '팀원';
                             return (
                               <li key={item.id}>
-                                <div className="w-full flex items-center gap-3 py-2 px-2 rounded-lg bg-slate-50 cursor-default">
-                                  <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0" />
-                                  <span className="text-sm flex-1 leading-snug text-slate-500">
-                                    <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
-                                    {item.title}
-                                  </span>
-                                  <span className={`text-[11px] px-2 py-0.5 rounded-full font-semibold shrink-0 ${
-                                    item.assignee === 'leader'
-                                      ? 'bg-blue-100 text-blue-700'
-                                      : 'bg-amber-100 text-amber-700'
-                                  }`}>
-                                    {roleLabel} 담당
-                                  </span>
+                                <div className="w-full flex items-start gap-3 py-2 px-2 rounded-lg bg-slate-50 cursor-default">
+                                  <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0 mt-0.5" />
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-sm leading-snug text-slate-500">
+                                        <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
+                                        {item.title}
+                                      </span>
+                                      <span className={`text-[11px] px-2 py-0.5 rounded-full font-semibold shrink-0 ${
+                                        item.assignee === 'leader'
+                                          ? 'bg-blue-100 text-blue-700'
+                                          : 'bg-amber-100 text-amber-700'
+                                      }`}>
+                                        {roleLabel} 담당
+                                      </span>
+                                    </div>
+                                    {item.description && (
+                                      <p className="text-[11px] leading-relaxed mt-0.5 text-slate-400">{item.description}</p>
+                                    )}
+                                  </div>
                                 </div>
                               </li>
                             );
@@ -829,30 +894,41 @@ export default function DeployRoomDetailPage() {
                               <button
                                 type="button"
                                 onClick={() => handleUserStatus(item.id)}
-                                className={`w-full text-left flex items-center gap-3 py-2 px-2 rounded-lg transition-colors ${
+                                className={`w-full text-left flex items-start gap-3 py-2 px-2 rounded-lg transition-colors ${
                                   myStatus === 'done' ? 'hover:bg-emerald-50/60' :
                                   myStatus === 'in_progress' ? 'hover:bg-amber-50/60' :
                                   'hover:bg-slate-50'
                                 }`}
                               >
-                                {myStatus === 'done' ? (
-                                  <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500 shrink-0" />
-                                ) : myStatus === 'in_progress' ? (
-                                  <Loader2 className="h-[18px] w-[18px] text-amber-500 shrink-0 animate-spin" />
-                                ) : (
-                                  <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0" />
-                                )}
-                                <span className={`text-sm flex-1 leading-snug ${myStatus === 'done' ? 'line-through text-slate-400' : 'text-slate-700'}`}>
-                                  <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
-                                  {item.title}
-                                </span>
-                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
-                                  myStatus === 'done' ? 'bg-emerald-100 text-emerald-700' :
-                                  myStatus === 'in_progress' ? 'bg-amber-100 text-amber-700' :
-                                  'bg-slate-100 text-slate-500'
-                                }`}>
-                                  {USER_STATUS_LABELS[myStatus]}
-                                </span>
+                                <div className="mt-0.5 shrink-0">
+                                  {myStatus === 'done' ? (
+                                    <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500" />
+                                  ) : myStatus === 'in_progress' ? (
+                                    <Loader2 className="h-[18px] w-[18px] text-amber-500 animate-spin" />
+                                  ) : (
+                                    <Circle className="h-[18px] w-[18px] text-slate-300" />
+                                  )}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={`text-sm leading-snug ${myStatus === 'done' ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                                      <span className="mr-1.5 tabular-nums text-xs text-slate-400">{item.orderIndex}.</span>
+                                      {item.title}
+                                    </span>
+                                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
+                                      myStatus === 'done' ? 'bg-emerald-100 text-emerald-700' :
+                                      myStatus === 'in_progress' ? 'bg-amber-100 text-amber-700' :
+                                      'bg-slate-100 text-slate-500'
+                                    }`}>
+                                      {USER_STATUS_LABELS[myStatus]}
+                                    </span>
+                                  </div>
+                                  {item.description && (
+                                    <p className={`text-[11px] leading-relaxed mt-0.5 ${myStatus === 'done' ? 'text-slate-400' : 'text-slate-500'}`}>
+                                      {item.description}
+                                    </p>
+                                  )}
+                                </div>
                               </button>
                             </li>
                           );
@@ -1103,16 +1179,16 @@ function MrCard({ mr, actorUserId, onUpdated }: MrCardProps) {
 
 function PageHeader() {
   return (
-    <header className="bg-white border-b border-slate-200">
-      <div className="container mx-auto px-6 py-3 flex items-center gap-2">
+    <div className="border-b border-slate-200">
+      <div className="container mx-auto px-6 py-2 flex items-center gap-2">
         <Link href="/deploy-room">
-          <Button variant="ghost" size="icon" className="h-8 w-8">
-            <ChevronLeft className="h-4 w-4" />
+          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground">
+            <ChevronLeft className="mr-1 h-3.5 w-3.5" />
+            목록으로
           </Button>
         </Link>
-        <span className="text-sm font-medium text-slate-600">배포방</span>
       </div>
-    </header>
+    </div>
   );
 }
 

@@ -1,7 +1,5 @@
 'use client';
 
-import Link from 'next/link';
-import { Button } from '@/components/ui/button';
 import {
   Card,
   CardContent,
@@ -9,33 +7,24 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { ArrowLeft, Sparkles } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import { TicketContentForm } from '@/components/ticket-content-form';
 
 export default function GenerateTicketPage() {
   return (
     <div className="flex h-screen flex-col bg-background">
-      <header className="border-b bg-card">
-        <div className="container mx-auto px-6 py-6 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/">
-              <Button variant="outline" size="icon">
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-            </Link>
-            <div>
-              <h1 className="text-2xl font-bold flex items-center gap-2">
-                <Sparkles className="h-6 w-6 text-primary" />
-                AI 티켓 내용 생성
-                <span className="text-xs font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full">Beta</span>
-              </h1>
-              <p className="text-sm text-muted-foreground">
-                입력 내용을 기반으로 AI가 Jira 티켓 설명을 자동 생성합니다
-              </p>
-            </div>
-          </div>
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4">
+          <h1 className="text-lg font-bold flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-primary" />
+            AI 티켓 내용 생성
+            <span className="text-xs font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full">Beta</span>
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            입력 내용을 기반으로 AI가 Jira 티켓 설명을 자동 생성합니다
+          </p>
         </div>
-      </header>
+      </div>
 
       <div className="flex-1 container mx-auto px-6 py-6 overflow-auto">
         <Card className="max-w-3xl mx-auto">

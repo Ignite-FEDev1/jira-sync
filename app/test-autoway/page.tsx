@@ -284,9 +284,9 @@ export default function AutowayTestPage() {
 
   return (
     <main className="min-h-screen bg-background pb-12">
-      <header className="border-b">
-        <div className="container mx-auto px-6 py-6">
-          <h1 className="text-2xl font-bold">
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4">
+          <h1 className="text-lg font-bold">
             AUTOWAY 단일 티켓 동기화 테스트
           </h1>
           <p className="text-sm text-muted-foreground">
@@ -294,7 +294,7 @@ export default function AutowayTestPage() {
             안전하게 검증합니다.
           </p>
         </div>
-      </header>
+      </div>
 
       <div className="container mx-auto px-6 py-8">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:h-[calc(100vh-200px)]">

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ChevronLeft, Plus, Rocket, Trash2 } from 'lucide-react';
+import { Plus, Rocket, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
@@ -221,26 +221,19 @@ export default function DeployRoomListPage() {
 
   return (
     <main className="min-h-screen bg-background">
-      <header className="border-b">
-        <div className="container mx-auto px-6 py-6 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link href="/">
-              <Button variant="ghost" size="icon">
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-            </Link>
-            <div>
-              <h1 className="text-2xl font-bold">배포방</h1>
-              <p className="text-sm text-muted-foreground">
-                배포 당일 팀원들이 함께 진행 상황을 공유하는 실시간 대시보드
-              </p>
-            </div>
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-bold">배포방</h1>
+            <p className="text-sm text-muted-foreground">
+              배포 당일 팀원들이 함께 진행 상황을 공유하는 실시간 대시보드
+            </p>
           </div>
-          <Button onClick={() => setCreateOpen(true)}>
-            <Plus className="mr-2 h-4 w-4" />새 배포방 만들기
+          <Button onClick={() => setCreateOpen(true)} size="sm">
+            <Plus className="mr-1.5 h-3.5 w-3.5" />새 배포방 만들기
           </Button>
         </div>
-      </header>
+      </div>
 
       <div className="container mx-auto px-6 py-8">
         {loading ? (

@@ -3,7 +3,14 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
-import { AlertTriangle, Settings, UserRoundCog } from 'lucide-react';
+import {
+  AlertTriangle,
+  Home,
+  Rocket,
+  FileText,
+  Settings,
+  UserRoundCog,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/contexts/user-context';
 import { db } from '@/lib/db';
@@ -13,9 +20,42 @@ interface Warning {
   detail?: string;
   href: string;
   linkLabel: string;
-  /** 해당 설정 페이지에서는 워닝을 숨김 */
   hideOnPath?: string;
 }
+
+interface NavItem {
+  href: string;
+  label: string;
+  icon: React.ReactNode;
+  matchPaths: string[];
+}
+
+const NAV_ITEMS: NavItem[] = [
+  {
+    href: '/',
+    label: '동기화',
+    icon: <Home className="h-4 w-4" />,
+    matchPaths: ['/', '/create-ticket', '/generate-ticket', '/create-epic', '/flow-chart', '/templates'],
+  },
+  {
+    href: '/deploy-room',
+    label: '배포방',
+    icon: <Rocket className="h-4 w-4" />,
+    matchPaths: ['/deploy-room'],
+  },
+  {
+    href: '/deployment',
+    label: '배포 대장',
+    icon: <FileText className="h-4 w-4" />,
+    matchPaths: ['/deployment'],
+  },
+  {
+    href: '/settings',
+    label: '설정',
+    icon: <Settings className="h-4 w-4" />,
+    matchPaths: ['/settings', '/admin'],
+  },
+];
 
 export function GlobalHeaderStrip() {
   const { currentUser } = useCurrentUser();
@@ -23,15 +63,13 @@ export function GlobalHeaderStrip() {
   const pathname = usePathname();
   const [hasSyncTargets, setHasSyncTargets] = useState<boolean | null>(null);
 
-  // 동기화 대상 존재 여부 조회
   useEffect(() => {
     if (!currentUser?.teamId) {
       setHasSyncTargets(null);
       return;
     }
 
-    db
-      .from('team_target_projects')
+    db.from('team_target_projects')
       .select('sync_profile_id')
       .eq('team_id', currentUser.teamId)
       .not('sync_profile_id', 'is', null)
@@ -42,78 +80,117 @@ export function GlobalHeaderStrip() {
   }, [currentUser?.teamId]);
 
   if (pathname === '/select-user') return null;
-  if (!currentUser) return null;
+
+  // 사용자 미선택 시
+  if (!currentUser) {
+    return (
+      <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur-sm">
+        <div className="container mx-auto px-4 flex items-center justify-between h-12">
+          <nav className="flex items-center gap-1">
+            {NAV_ITEMS.map((item) => (
+              <Link key={item.href} href={item.href}>
+                <Button
+                  variant={isActive(pathname, item.matchPaths) ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8 px-3 text-xs"
+                >
+                  {item.icon}
+                  <span className="ml-1.5">{item.label}</span>
+                </Button>
+              </Link>
+            ))}
+          </nav>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-3 text-xs border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+            onClick={() => router.push('/select-user')}
+          >
+            <AlertTriangle className="mr-1 h-3 w-3" />
+            사용자 선택 필요
+          </Button>
+        </div>
+      </header>
+    );
+  }
 
   const handleSwitchUser = () => {
     router.push('/select-user?switch=true');
   };
 
-  // 우선순위별 워닝 판별 — 가장 높은 것 하나만 표시
   const warning = resolveWarning(currentUser, hasSyncTargets, pathname);
 
   return (
-    <div
-      className={`sticky top-0 z-50 border-b px-4 py-1.5 ${
-        warning
-          ? 'bg-amber-50 border-amber-200/60'
-          : 'bg-background/95 backdrop-blur-sm'
-      }`}
-    >
-      <div className="container mx-auto flex items-center justify-between gap-3">
-        {/* 왼쪽: 워닝 */}
-        <div className="flex items-center gap-2 min-w-0">
-          {warning && (
-            <>
-              <AlertTriangle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-              <span className="text-xs font-medium text-amber-800 truncate">
-                {warning.message}
-              </span>
-              {warning.detail && (
-                <span className="text-xs text-amber-600/80 hidden sm:inline truncate">
-                  {warning.detail}
-                </span>
-              )}
-              <Link
-                href={warning.href}
-                className="text-xs font-medium text-amber-900 hover:text-amber-700 underline underline-offset-2 shrink-0"
-              >
-                {warning.linkLabel}
+    <>
+      {/* 1단: 글로벌 네비게이션 (항상 동일) */}
+      <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur-sm">
+        <div className="container mx-auto px-4 flex items-center justify-between h-12">
+          {/* 왼쪽: 메뉴 */}
+          <nav className="flex items-center gap-1">
+            {NAV_ITEMS.map((item) => (
+              <Link key={item.href} href={item.href}>
+                <Button
+                  variant={isActive(pathname, item.matchPaths) ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8 px-3 text-xs"
+                >
+                  {item.icon}
+                  <span className="ml-1.5">{item.label}</span>
+                </Button>
               </Link>
-            </>
-          )}
-        </div>
+            ))}
+          </nav>
 
-        {/* 오른쪽: 설정 + 사용자 정보 */}
-        <div className="flex items-center gap-1 shrink-0">
-          <Link href="/settings/teams">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 p-0"
-              title="설정"
-            >
-              <Settings className="h-3.5 w-3.5 text-muted-foreground" />
-            </Button>
-          </Link>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 px-2 shrink-0"
-          onClick={handleSwitchUser}
-        >
-          <UserRoundCog className="mr-1 h-3.5 w-3.5 text-muted-foreground" />
-          <span className="text-xs text-muted-foreground">{currentUser.name}</span>
-          {currentUser.teamName && (
-            <span className="ml-0.5 text-[11px] text-muted-foreground/50">
-              ({currentUser.teamName})
-            </span>
-          )}
-          <span className="ml-1 text-[11px] text-muted-foreground/40">변경</span>
-        </Button>
+          {/* 오른쪽: 사용자 정보 */}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 px-2 shrink-0"
+            onClick={handleSwitchUser}
+          >
+            <UserRoundCog className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-xs">{currentUser.name}</span>
+            {currentUser.teamName && (
+              <span className="ml-1 text-[11px] text-muted-foreground/60">
+                ({currentUser.teamName})
+              </span>
+            )}
+          </Button>
         </div>
-      </div>
-    </div>
+      </header>
+
+      {/* 워닝 바 (필요시만 표시) */}
+      {warning && (
+        <div className="border-b bg-amber-50 border-amber-200/60 px-4 py-1.5">
+          <div className="container mx-auto flex items-center gap-2">
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+            <span className="text-xs font-medium text-amber-800 truncate">
+              {warning.message}
+            </span>
+            {warning.detail && (
+              <span className="text-xs text-amber-600/80 hidden sm:inline truncate">
+                {warning.detail}
+              </span>
+            )}
+            <Link
+              href={warning.href}
+              className="text-xs font-medium text-amber-900 hover:text-amber-700 underline underline-offset-2 shrink-0"
+            >
+              {warning.linkLabel}
+            </Link>
+          </div>
+        </div>
+      )}
+    </>
   );
+}
+
+function isActive(pathname: string | null, matchPaths: string[]): boolean {
+  if (!pathname) return false;
+  return matchPaths.some((path) => {
+    if (path === '/') return pathname === '/';
+    return pathname.startsWith(path);
+  });
 }
 
 function resolveWarning(
@@ -123,7 +200,6 @@ function resolveWarning(
 ): Warning | null {
   const warnings: Warning[] = [];
 
-  // 1. 소속 팀 없음
   if (!user.teamId) {
     warnings.push({
       message: '소속 팀 설정이 필요합니다',
@@ -133,7 +209,6 @@ function resolveWarning(
     });
   }
 
-  // 2. API Key 인증 없음
   const credentialMissing =
     !user.igniteJiraEmail ||
     !user.igniteJiraApiToken ||
@@ -150,7 +225,6 @@ function resolveWarning(
     });
   }
 
-  // 3. 기준 프로젝트 없음 (팀은 있지만 기준 프로젝트 미설정)
   if (user.teamId && !user.sourceProject) {
     warnings.push({
       message: '소속 팀의 기준 프로젝트 설정이 필요합니다',
@@ -160,7 +234,6 @@ function resolveWarning(
     });
   }
 
-  // 4. 동기화 방식 없음 (팀, 기준 프로젝트 있지만 동기화 대상 없음)
   if (user.teamId && user.sourceProject && hasSyncTargets === false) {
     warnings.push({
       message: '동기화 방식 추가가 필요합니다',
@@ -170,7 +243,6 @@ function resolveWarning(
     });
   }
 
-  // 가장 높은 우선순위 워닝 중 현재 페이지에서 숨기지 않는 첫 번째 반환
   for (const w of warnings) {
     if (w.hideOnPath && pathname?.startsWith(w.hideOnPath)) continue;
     return w;

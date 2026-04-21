@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { RefreshCw, User, Plus, ExternalLink, Settings, LogOut, Sparkles, Rocket } from 'lucide-react';
+import { RefreshCw, User, Plus, ExternalLink, LogOut, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   JIRA_ENDPOINTS,
@@ -74,12 +74,6 @@ export default function Home() {
   const { currentUser, setCurrentUser } = useCurrentUser();
   const router = useRouter();
 
-  // 사용자 미선택 시 선택 페이지로 이동
-  useEffect(() => {
-    if (!currentUser) {
-      router.replace('/select-user');
-    }
-  }, [currentUser, router]);
 
   const selectedUser = currentUser?.name ?? '';
   const sourceProject = currentUser?.sourceProject || 'FEHG';
@@ -641,58 +635,36 @@ export default function Home() {
 
   return (
     <main className="h-screen bg-background flex flex-col">
-      {/* Header */}
-      <header className="border-b">
-        <div className="container mx-auto px-6 py-6 flex items-center justify-between">
+      {/* Page Context Header */}
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">Jira 통합 관리</h1>
+            <h1 className="text-lg font-bold">Jira 통합 관리</h1>
             <p className="text-sm text-muted-foreground">
               여러 Jira 인스턴스를 자동화하고 관리합니다
             </p>
           </div>
           <div className="flex gap-2">
-            <Link href="/deploy-room">
-              <Button variant="outline" className="relative">
-                <Rocket className="mr-2 h-4 w-4" />
-                배포방
-                <span className="absolute -top-1 -right-1 inline-flex rounded-full h-5 w-5 bg-red-500 items-center justify-center">
-                  <span className="text-[9px] font-bold text-white">N</span>
-                </span>
-              </Button>
-            </Link>
-            <Link href="/deployment">
-              <Button variant="outline">
-                <ExternalLink className="mr-2 h-4 w-4" />
-                배포 대장
-              </Button>
-            </Link>
             <Link href="/templates">
-              <Button variant="outline">
-                <ExternalLink className="mr-2 h-4 w-4" />
+              <Button variant="outline" size="sm">
                 배포 템플릿
               </Button>
             </Link>
             <Link href="/generate-ticket">
-              <Button variant="outline">
-                <Sparkles className="mr-2 h-4 w-4" />
-                AI 티켓 내용 생성
+              <Button variant="outline" size="sm">
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                AI 티켓 생성
               </Button>
             </Link>
-            {/* @deprecated Flow Chart, 에픽 생성 - 관리자 페이지로 이전 예정 */}
             <Link href="/create-ticket">
-              <Button>
-                <Plus className="mr-2 h-4 w-4" />
+              <Button size="sm">
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
                 티켓 생성
-              </Button>
-            </Link>
-            <Link href="/settings">
-              <Button variant="outline" size="icon">
-                <Settings className="h-4 w-4" />
               </Button>
             </Link>
           </div>
         </div>
-      </header>
+      </div>
 
       {/* Main Content: 2-Column Layout */}
       <div className="flex-1 container mx-auto px-6 py-6 overflow-hidden">

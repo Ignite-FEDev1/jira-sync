@@ -61,6 +61,7 @@ export interface DeployRoomChecklistItem {
 // 배포 시나리오 템플릿 (DB)
 export interface DeployRoomTemplateChecklist {
   title: string;
+  description?: string;
   assignee: ChecklistItemAssignee;
 }
 

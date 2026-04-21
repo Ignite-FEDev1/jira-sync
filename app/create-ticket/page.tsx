@@ -21,7 +21,6 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  ArrowLeft,
   Plus,
   ExternalLink,
   Copy,
@@ -348,34 +347,23 @@ export default function CreateTicketPage() {
 
   return (
     <main className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b">
-        <div className="container mx-auto px-6 py-6 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="mr-2 h-4 w-4" />
-                돌아가기
-              </Button>
-            </Link>
-            <div>
-              <h1 className="text-2xl font-bold">{sourceProject} 티켓 생성</h1>
-              <p className="text-sm text-muted-foreground">
-                새로운 {sourceProject} 티켓을 생성합니다
-              </p>
-            </div>
+      {/* Page Context Header */}
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-bold">{sourceProject} 티켓 생성</h1>
+            <p className="text-sm text-muted-foreground">
+              새로운 {sourceProject} 티켓을 생성합니다
+            </p>
           </div>
-          <div className="flex gap-2">
-            <Link href="/templates">
-              <Button variant="outline" size="sm">
-                <FileText className="mr-2 h-4 w-4" />
-                배포 템플릿
-              </Button>
-            </Link>
-            {/* @deprecated 에픽 생성 - 관리자 페이지로 이전 예정 */}
-          </div>
+          <Link href="/templates">
+            <Button variant="outline" size="sm">
+              <FileText className="mr-1.5 h-3.5 w-3.5" />
+              배포 템플릿
+            </Button>
+          </Link>
         </div>
-      </header>
+      </div>
 
       {/* Main Content */}
       <div className="container mx-auto px-6 py-8 max-w-3xl">

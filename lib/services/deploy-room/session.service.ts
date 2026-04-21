@@ -131,13 +131,14 @@ export async function createSession(
     confluenceTasks = await parseConfluenceTasks(req.confluencePageUrl);
   }
 
-  // 2) 세션 insert
+  // 2) 세션 insert (teamId 미지정 시 FE1 팀으로 고정)
+  const FE1_TEAM_ID = 'b0000000-0000-0000-0000-000000000001';
   const { data: inserted, error: insertError } = await dbServer
     .from('deploy_room_sessions')
     .insert({
       title: req.title,
       template_id: req.templateId,
-      team_id: req.teamId ?? null,
+      team_id: req.teamId || FE1_TEAM_ID,
       deploy_type: req.deployType ?? 'regular',
       deploy_date: req.deployDate,
       confluence_page_url: req.confluencePageUrl ?? null,
@@ -159,6 +160,7 @@ export async function createSession(
     session_id: session.id,
     order_index: index + 1,
     title: item.title,
+    description: item.description || null,
     assignee: item.assignee,
   }));
 

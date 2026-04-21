@@ -13,11 +13,9 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import {
-  ArrowLeft,
   Plus,
   ExternalLink,
   Copy,
-  FileText,
   Network,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -241,45 +239,31 @@ export default function CreateEpicPage() {
 
   return (
     <main className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b">
-        <div className="container mx-auto px-6 py-6 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="mr-2 h-4 w-4" />
-                돌아가기
-              </Button>
-            </Link>
-            <div>
-              <h1 className="text-2xl font-bold">{sourceProject} 에픽 생성</h1>
-              <p className="text-sm text-muted-foreground">
-                새로운 {sourceProject} 에픽을 생성합니다 (팀장용)
-              </p>
-            </div>
+      {/* Page Context Header */}
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-bold">{sourceProject} 에픽 생성</h1>
+            <p className="text-sm text-muted-foreground">
+              새로운 {sourceProject} 에픽을 생성합니다 (팀장용)
+            </p>
           </div>
           <div className="flex gap-2">
-            <Link href="/templates">
-              <Button variant="outline" size="sm">
-                <FileText className="mr-2 h-4 w-4" />
-                배포 템플릿
-              </Button>
-            </Link>
             <Link href="/flow-chart">
               <Button variant="outline" size="sm">
-                <Network className="mr-2 h-4 w-4" />
+                <Network className="mr-1.5 h-3.5 w-3.5" />
                 Flow Chart
               </Button>
             </Link>
             <Link href="/create-ticket">
               <Button variant="outline" size="sm">
-                <Plus className="mr-2 h-4 w-4" />
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
                 티켓 생성
               </Button>
             </Link>
           </div>
         </div>
-      </header>
+      </div>
 
       {/* Main Content */}
       <div className="container mx-auto px-6 py-8 max-w-3xl">

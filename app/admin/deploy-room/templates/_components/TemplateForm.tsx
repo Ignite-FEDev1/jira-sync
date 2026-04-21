@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, Trash2, X, GitBranch, Users, ListChecks, Check, Crown } from 'lucide-react';
+import { Plus, Trash2, X, GitBranch, Users, ListChecks, Check, Crown, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -66,6 +66,14 @@ export default function TemplateForm({ initialData }: Props) {
   );
   const [isActive, setIsActive] = useState(initialData?.isActive ?? true);
   const [submitting, setSubmitting] = useState(false);
+  const [expandedDesc, setExpandedDesc] = useState<Set<number>>(() => {
+    // 이미 description이 있는 항목은 열어둠
+    const initial = new Set<number>();
+    (initialData?.checklist ?? []).forEach((item, i) => {
+      if (item.description) initial.add(i);
+    });
+    return initial;
+  });
 
   // 사용자 + 팀장 정보 로드
   useEffect(() => {
@@ -375,95 +383,118 @@ export default function TemplateForm({ initialData }: Props) {
             </Button>
           </div>
         ) : (
-          <div className="space-y-0">
-            {checklist.map((item, i) => (
-              <div key={i} className="group/row relative">
-                {/* Insert divider — visible on hover between rows */}
-                <div className="h-0 relative z-10">
-                  <button
-                    type="button"
-                    onClick={() => addChecklistItem(i - 1)}
-                    className="absolute -top-2.5 inset-x-0 h-5 flex items-center opacity-0 group-hover/row:opacity-100 transition-opacity"
-                  >
-                    <div className="w-full h-px bg-primary/25" />
-                    <span className="absolute left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-white ring-1 ring-primary/20 text-[10px] text-primary whitespace-nowrap shadow-sm">
-                      <Plus className="h-2.5 w-2.5" />
-                      추가
+          <div className="space-y-1.5">
+            {checklist.map((item, i) => {
+              const descOpen = expandedDesc.has(i) || !!item.description;
+              return (
+                <div
+                  key={i}
+                  className={`group/row rounded-lg border transition-colors ${
+                    descOpen ? 'border-slate-200 bg-slate-50/40' : 'border-transparent hover:border-slate-100'
+                  }`}
+                >
+                  <div className="flex gap-2 items-center px-2 py-1.5">
+                    {/* Dot + Number */}
+                    <div
+                      className={`w-2 h-2 rounded-full shrink-0 ${ASSIGNEE_DOT[item.assignee]}`}
+                    />
+                    <span className="w-5 shrink-0 text-right text-xs text-muted-foreground/60 tabular-nums font-medium">
+                      {i + 1}
                     </span>
-                  </button>
+
+                    {/* Title */}
+                    <Input
+                      placeholder="단계 명칭을 입력하세요"
+                      value={item.title}
+                      onChange={(e) =>
+                        updateChecklistItem(i, { title: e.target.value })
+                      }
+                      className="flex-1 rounded-lg h-9 text-[13px] border-slate-200"
+                    />
+
+                    {/* Description toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setExpandedDesc((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(i)) { next.delete(i); } else { next.add(i); }
+                        return next;
+                      })}
+                      className={`shrink-0 h-8 w-8 rounded-lg flex items-center justify-center transition-colors ${
+                        descOpen
+                          ? 'text-blue-500 bg-blue-50 hover:bg-blue-100'
+                          : 'text-muted-foreground/30 hover:text-muted-foreground hover:bg-slate-100'
+                      }`}
+                      title="설명 추가/편집"
+                    >
+                      <MessageSquare className="h-3.5 w-3.5" />
+                    </button>
+
+                    {/* Assignee */}
+                    <Select
+                      value={item.assignee}
+                      onValueChange={(v) =>
+                        updateChecklistItem(i, {
+                          assignee: v as ChecklistItemAssignee,
+                        })
+                      }
+                    >
+                      <SelectTrigger className="w-[100px] shrink-0 rounded-lg h-9 text-xs">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`w-2 h-2 rounded-full ${ASSIGNEE_DOT[item.assignee]}`}
+                          />
+                          <SelectValue />
+                        </div>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {ASSIGNEE_OPTIONS.map((opt) => (
+                          <SelectItem key={opt.value} value={opt.value}>
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`w-2 h-2 rounded-full ${opt.dot}`}
+                              />
+                              {opt.label}
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+
+                    {/* Delete */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => removeChecklistItem(i)}
+                      className="shrink-0 h-8 w-8 rounded-lg opacity-0 group-hover/row:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+
+                  {/* Description */}
+                  {descOpen && (
+                    <div className="px-2 pb-2 pl-11">
+                      <Input
+                        placeholder="이 단계에 대한 설명을 입력하세요"
+                        value={item.description ?? ''}
+                        onChange={(e) =>
+                          updateChecklistItem(i, { description: e.target.value || undefined })
+                        }
+                        autoFocus={expandedDesc.has(i) && !item.description}
+                        className="rounded-lg h-8 text-xs text-muted-foreground border-dashed border-slate-200"
+                      />
+                    </div>
+                  )}
                 </div>
-
-                {/* Step row */}
-                <div className="flex gap-2 items-center py-1.5">
-                  {/* Dot */}
-                  <div
-                    className={`w-2 h-2 rounded-full shrink-0 ${ASSIGNEE_DOT[item.assignee]}`}
-                  />
-
-                  {/* Number */}
-                  <span className="w-5 shrink-0 text-right text-xs text-muted-foreground/60 tabular-nums font-medium">
-                    {i + 1}
-                  </span>
-
-                  {/* Title input */}
-                  <Input
-                    placeholder="단계 명칭을 입력하세요"
-                    value={item.title}
-                    onChange={(e) =>
-                      updateChecklistItem(i, { title: e.target.value })
-                    }
-                    className="flex-1 rounded-lg h-9 text-[13px]"
-                  />
-
-                  {/* Assignee select */}
-                  <Select
-                    value={item.assignee}
-                    onValueChange={(v) =>
-                      updateChecklistItem(i, {
-                        assignee: v as ChecklistItemAssignee,
-                      })
-                    }
-                  >
-                    <SelectTrigger className="w-[100px] shrink-0 rounded-lg h-9 text-xs">
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className={`w-2 h-2 rounded-full ${ASSIGNEE_DOT[item.assignee]}`}
-                        />
-                        <SelectValue />
-                      </div>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {ASSIGNEE_OPTIONS.map((opt) => (
-                        <SelectItem key={opt.value} value={opt.value}>
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className={`w-2 h-2 rounded-full ${opt.dot}`}
-                            />
-                            {opt.label}
-                          </div>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-
-                  {/* Delete */}
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => removeChecklistItem(i)}
-                    className="shrink-0 h-8 w-8 rounded-lg opacity-0 group-hover/row:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
 
             {/* Add to end */}
             <button
               type="button"
               onClick={() => addChecklistItem()}
-              className="w-full mt-3 py-2.5 rounded-lg border border-dashed border-slate-200 hover:border-slate-300 hover:bg-slate-50/50 transition-colors flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/60"
+              className="w-full mt-2 py-2.5 rounded-lg border border-dashed border-slate-200 hover:border-slate-300 hover:bg-slate-50/50 transition-colors flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/60"
             >
               <Plus className="h-3.5 w-3.5" />
               단계 추가

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Home, Download, FileText, Plus } from 'lucide-react';
+import { Download, Plus } from 'lucide-react';
 
 // Mermaid 타입 정의
 declare global {
@@ -335,36 +335,22 @@ flowchart TD
   return (
     <main className="min-h-screen bg-background">
       {/* Header */}
-      <header className="border-b">
-        <div className="container mx-auto px-6 py-6 flex items-center justify-between">
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">티켓 동기화 Flow Chart</h1>
+            <h1 className="text-lg font-bold">티켓 동기화 Flow Chart</h1>
             <p className="text-sm text-muted-foreground">
               자동화 작업의 전체 흐름을 시각화합니다
             </p>
           </div>
-          <div className="flex gap-2">
-            <Link href="/templates">
-              <Button variant="outline">
-                <FileText className="mr-2 h-4 w-4" />
-                배포 템플릿
-              </Button>
-            </Link>
-            <Link href="/create-epic">
-              <Button variant="outline">
-                <Plus className="mr-2 h-4 w-4" />
-                에픽 생성
-              </Button>
-            </Link>
-            <Link href="/">
-              <Button variant="outline">
-                <Home className="mr-2 h-4 w-4" />
-                홈으로
-              </Button>
-            </Link>
-          </div>
+          <Link href="/create-epic">
+            <Button variant="outline" size="sm">
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              에픽 생성
+            </Button>
+          </Link>
         </div>
-      </header>
+      </div>
 
       {/* Main Content */}
       <div className="container mx-auto px-6 py-8">

@@ -27,25 +27,24 @@ export default function EditDeployScenarioPage() {
 
   return (
     <main className="min-h-screen bg-slate-50/50">
-      <header className="bg-white border-b">
-        <div className="container mx-auto px-6 py-5 flex items-center gap-3 max-w-3xl">
+      <div className="border-b">
+        <div className="container mx-auto px-6 py-4 flex items-center gap-3 max-w-3xl">
           <Link href="/admin/deploy-room/templates">
-            <Button variant="ghost" size="icon" className="rounded-full">
-              <ChevronLeft className="h-4 w-4" />
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground">
+              <ChevronLeft className="mr-1 h-3.5 w-3.5" />
+              목록
             </Button>
           </Link>
           <div>
-            <h1 className="text-lg font-semibold tracking-tight">
-              시나리오 수정
-            </h1>
+            <h1 className="text-lg font-bold">시나리오 수정</h1>
             {template && (
-              <p className="text-[13px] text-muted-foreground">
+              <p className="text-sm text-muted-foreground">
                 {template.name}
               </p>
             )}
           </div>
         </div>
-      </header>
+      </div>
 
       <div className="container mx-auto px-6 py-6 max-w-3xl">
         {loading ? (
