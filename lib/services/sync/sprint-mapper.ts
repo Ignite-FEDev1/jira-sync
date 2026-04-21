@@ -2,6 +2,7 @@
 
 import { SprintInfo } from './types';
 import { JiraClient } from '@/lib/services/jira/client';
+import { BOARD_IDS } from '@/lib/constants/jira';
 import { dbServer } from '@/lib/db';
 
 /**
@@ -159,4 +160,130 @@ export async function preloadSprintCache(
       .filter((id): id is number => id !== null)
       .map((boardId) => sprintCache.getSprintsForBoard(boardId))
   );
+}
+
+// ─────────────────────────────────────────────────────────────
+// FEHG 스프린트 마감 전용 함수 (sprint-close.ts 및 dev API에서 사용)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * FEHG 액티브 스프린트 정보 조회 (endDate 포함)
+ */
+export async function getFehgActiveSprintInfo(): Promise<SprintInfo> {
+  const client = new JiraClient('ignite');
+  const result = await client.get<{
+    values: Array<{
+      id: number;
+      name: string;
+      state: string;
+      startDate?: string;
+      endDate?: string;
+    }>;
+  }>(`agile/1.0/board/${BOARD_IDS.FEHG}/sprint`, { state: 'active' });
+
+  if (!result.success || !result.data?.values?.length) {
+    throw new Error(`FEHG 액티브 스프린트 조회 실패: ${result.error ?? '없음'}`);
+  }
+
+  const sprint = result.data.values[0];
+  return {
+    id: sprint.id,
+    name: sprint.name,
+    state: 'active',
+    boardId: BOARD_IDS.FEHG,
+    endDate: sprint.endDate,
+  };
+}
+
+/**
+ * 현재 FEHG 스프린트 이름에서 다음 달 스프린트 이름 생성
+ * "FEHG 2604" → "FEHG 2605", "FEHG 2612" → "FEHG 2701"
+ */
+export function buildNextFehgSprintName(currentSprintName: string): string {
+  const period = extractSprintPeriod(currentSprintName);
+  if (!period || period.length !== 4) {
+    throw new Error(`스프린트 이름 파싱 실패: ${currentSprintName}`);
+  }
+  const year = parseInt(period.slice(0, 2), 10);
+  const month = parseInt(period.slice(2, 4), 10);
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const next = `${String(nextYear).padStart(2, '0')}${String(nextMonth).padStart(2, '0')}`;
+  return `FEHG ${next}`;
+}
+
+/**
+ * FEHG 보드에서 이름으로 스프린트 조회 (active + future 범위)
+ */
+export async function findFehgSprintByName(sprintName: string): Promise<SprintInfo | null> {
+  const client = new JiraClient('ignite');
+  const result = await client.get<{
+    values: Array<{ id: number; name: string; state: string; endDate?: string }>;
+  }>(`agile/1.0/board/${BOARD_IDS.FEHG}/sprint`, {
+    state: 'active,future',
+    maxResults: 50,
+  });
+
+  if (!result.success || !result.data?.values) return null;
+
+  const sprint = result.data.values.find((s) => s.name === sprintName);
+  if (!sprint) return null;
+
+  return {
+    id: sprint.id,
+    name: sprint.name,
+    state: sprint.state as 'active' | 'future' | 'closed',
+    boardId: BOARD_IDS.FEHG,
+    endDate: sprint.endDate,
+  };
+}
+
+/**
+ * FEHG 스프린트 생성 (POST /rest/agile/1.0/sprint)
+ * 403 응답 시 스프린트 생성 권한 없음
+ */
+export async function createFehgSprint(
+  name: string,
+  startDate: string,
+  endDate: string
+): Promise<SprintInfo> {
+  const client = new JiraClient('ignite');
+  const result = await client.post<{ id: number; name: string; state: string }>(
+    'agile/1.0/sprint',
+    { name, originBoardId: BOARD_IDS.FEHG, startDate, endDate }
+  );
+
+  if (!result.success || !result.data) {
+    throw new Error(`스프린트 생성 실패: ${result.error}`);
+  }
+
+  return {
+    id: result.data.id,
+    name: result.data.name,
+    state: 'future',
+    boardId: BOARD_IDS.FEHG,
+    endDate,
+  };
+}
+
+/**
+ * 다음 달 스프린트의 startDate / endDate 계산
+ * "FEHG 2605" → { startDate: '2026-05-01T00:00:00.000Z', endDate: '2026-05-31T23:59:59.000Z' }
+ */
+export function buildNextSprintDates(nextSprintName: string): {
+  startDate: string;
+  endDate: string;
+} {
+  const period = nextSprintName.split(' ')[1]; // "2605"
+  const year = 2000 + parseInt(period.slice(0, 2), 10);
+  const month = parseInt(period.slice(2, 4), 10) - 1; // 0-indexed
+
+  const start = new Date(Date.UTC(year, month, 1, 0, 0, 0));
+  // 다음 달 0일 = 이번 달 마지막 날
+  const end = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59));
+
+  return {
+    startDate: start.toISOString(),
+    endDate: end.toISOString(),
+  };
 }

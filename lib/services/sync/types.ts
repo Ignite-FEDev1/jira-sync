@@ -47,6 +47,7 @@ export interface SprintInfo {
   name: string;
   state: 'active' | 'future' | 'closed';
   boardId: number;
+  endDate?: string; // 스프린트 종료일
 }
 
 // 동기화 옵션
