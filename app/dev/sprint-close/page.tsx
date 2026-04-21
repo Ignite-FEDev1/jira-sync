@@ -178,10 +178,33 @@ export default function SprintCloseTestPage() {
 
   // ── 정리 ──────────────────────────────────────────────
   const [cleanupInput, setCleanupInput] = useState('');
+
+  // ── 이메일 미리보기 ────────────────────────────────────
+  const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewUser, setPreviewUser] = useState('');
   const [cleanupLoading, setCleanupLoading] = useState(false);
   const [cleanupResult, setCleanupResult] = useState<ApiResult | null>(null);
 
   const ticketKey = ticketInfo?.key ?? '';
+
+  const PREVIEW_USERS = ['팀 전체', '김가빈', '김찬영', '박성찬', '서성주', '손현지', '조한빈', '한준호'];
+
+  const selectPreviewUser = async (name: string) => {
+    setPreviewUser(name);
+    setPreviewLoading(true);
+    try {
+      const user = name === '팀 전체' ? '' : name;
+      const url = user
+        ? `/api/dev/sprint-close/preview-email?user=${encodeURIComponent(user)}`
+        : '/api/dev/sprint-close/preview-email';
+      const res = await fetch(url);
+      setPreviewHtml(await res.text());
+    } catch {
+      // ignore
+    }
+    setPreviewLoading(false);
+  };
 
   // ── 기준 티켓 불러오기 ────────────────────────────────
 
@@ -534,6 +557,48 @@ export default function SprintCloseTestPage() {
           )}
         </div>
         <ResultBox result={cleanupResult} />
+      </Section>
+
+      {/* ── 이메일 미리보기 ──────────────────────────── */}
+      <Section step="[미리보기]" title="이메일 레이아웃 미리보기">
+        <p style={{ fontSize: 12, color: '#6b7280', marginBottom: 10 }}>
+          이름 선택 시 해당 수신자 기준으로 미리봅니다. (목업 데이터)
+        </p>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+          {PREVIEW_USERS.map((name) => {
+            const active = previewUser === name;
+            return (
+              <button
+                key={name}
+                onClick={() => selectPreviewUser(name)}
+                disabled={previewLoading}
+                style={{
+                  padding: '4px 12px',
+                  fontSize: 12,
+                  border: `1px solid ${active ? '#3b82f6' : '#d1d5db'}`,
+                  borderRadius: 20,
+                  background: active ? '#3b82f6' : '#f9fafb',
+                  color: active ? '#fff' : '#374151',
+                  cursor: previewLoading ? 'not-allowed' : 'pointer',
+                  fontWeight: active ? 600 : 400,
+                  transition: 'all 0.1s',
+                }}
+              >
+                {name}
+              </button>
+            );
+          })}
+        </div>
+        {previewLoading && (
+          <p style={{ fontSize: 12, color: '#9ca3af' }}>불러오는 중...</p>
+        )}
+        {previewHtml && !previewLoading && (
+          <iframe
+            srcDoc={previewHtml}
+            sandbox="allow-same-origin"
+            style={{ width: '100%', height: 660, border: 'none' }}
+          />
+        )}
       </Section>
     </div>
   );

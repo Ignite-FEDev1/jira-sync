@@ -4,7 +4,9 @@ let _resend: Resend | null = null;
 
 function getResend(): Resend {
   if (!_resend) {
-    _resend = new Resend(process.env.RESEND_API_KEY);
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) throw new Error('RESEND_API_KEY 환경변수가 설정되지 않았습니다.');
+    _resend = new Resend(apiKey);
   }
   return _resend;
 }
@@ -105,22 +107,28 @@ export async function sendSyncReportEmail({
 /**
  * Sprint Closing 결과 이메일 발송 (HTML)
  * 티켓명 옆에 ↗ 인라인 링크 포함
+ * to 생략 시 NOTIFY_EMAIL(fedev1@ignite.co.kr)로 발송
  */
 export async function sendSprintCloseEmail(
   html: string,
   fromSprint: string,
-  toSprint: string
+  toSprint: string,
+  { to = NOTIFY_EMAIL, isDryRun = false }: { to?: string; isDryRun?: boolean } = {}
 ): Promise<void> {
+  const fromNum = fromSprint.replace('FEHG ', '');
+  const toNum = toSprint.replace('FEHG ', '');
+  const prefix = isDryRun ? '[TEST] ' : '';
+
   const { error } = await getResend().emails.send({
     from: 'FE1 Tool <onboarding@resend.dev>',
-    to: NOTIFY_EMAIL,
-    subject: `[FE1 Tool] Sprint Closing (${fromSprint} → ${toSprint}) 완료`,
+    to,
+    subject: `${prefix}[FE1 Tool] FEHG 스프린트 마감 · ${fromNum} → ${toNum}`,
     html,
   });
 
   if (error) {
-    console.error('[이메일] 발송 실패:', error);
+    console.error(`[이메일] 발송 실패 (${to}):`, error);
   } else {
-    console.log(`[이메일] ${NOTIFY_EMAIL}에 Sprint Closing 결과 발송 완료`);
+    console.log(`[이메일] ${to}에 Sprint Closing 결과 발송 완료`);
   }
 }
