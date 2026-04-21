@@ -19,37 +19,24 @@ export type ProjectKey = 'groupware' | 'hmg-board' | 'cpo';
 
 /**
  * JQL fixVersion 조건을 변환
- * fixVersion = "타입_날짜" 형식을 배포 타입과 새 날짜에 맞게 변경
- * 예: fixVersion = "release_260226" → fixVersion = "release_260303"
+ * 기존 fixVersion 조건을 모두 release/adhoc/hotfix OR 조건으로 치환
+ * 배포 유형이 중간에 바뀔 수 있으므로 항상 3가지 유형을 모두 포함
  */
 function transformFixVersionInJql(
   jqlQuery: string,
-  deploymentType: DeploymentType,
   newDate: string
 ): string {
+  const allTypesOr = `fixVersion = &quot;release_${newDate}&quot; or fixVersion = &quot;adhoc_${newDate}&quot; or fixVersion = &quot;hotfix_${newDate}&quot;`;
+
   let result = jqlQuery;
 
-  // fixVersion 패턴 찾기 및 치환
-  // 1. 단일 타입: fixVersion = "release_260226"
-  const singleTypePattern = /fixVersion = &quot;(release|hotfix|adhoc)_\d{6}&quot;/g;
-  result = result.replace(
-    singleTypePattern,
-    `fixVersion = &quot;${deploymentType}_${newDate}&quot;`
-  );
+  // OR 조건 패턴 치환 (2~3개 OR)
+  const orPattern = /(?:fixVersion = &quot;(?:release|hotfix|adhoc)_\d{6}&quot;\s*(?:or\s*)?){2,3}/g;
+  result = result.replace(orPattern, allTypesOr);
 
-  // 2. OR 조건: fixVersion = "hotfix_260226" or fixVersion = "adhoc_260226" or fixVersion = "release_260226"
-  const orPattern = /fixVersion = &quot;hotfix_\d{6}&quot; or fixVersion = &quot;adhoc_\d{6}&quot; or fixVersion = &quot;release_\d{6}&quot;/g;
-  if (deploymentType === 'release') {
-    result = result.replace(
-      orPattern,
-      `fixVersion = &quot;release_${newDate}&quot;`
-    );
-  } else {
-    result = result.replace(
-      orPattern,
-      `fixVersion = &quot;hotfix_${newDate}&quot; or fixVersion = &quot;adhoc_${newDate}&quot;`
-    );
-  }
+  // 단일 fixVersion 패턴 치환
+  const singlePattern = /fixVersion = &quot;(release|hotfix|adhoc)_\d{6}&quot;/g;
+  result = result.replace(singlePattern, allTypesOr);
 
   return result;
 }
@@ -301,9 +288,8 @@ export async function createDeploymentDocument(
       };
     }
 
-    // 4. 원본 페이지 가져오기 (가장 최근 배포대장 사용)
-    // TODO: 프로젝트별로 다른 템플릿을 사용할 수 있도록 확장 가능
-    const SOURCE_PAGE_ID = '322340333';
+    // 4. 원본 페이지 가져오기 (기준 템플릿)
+    const SOURCE_PAGE_ID = '441257489';
 
     const sourceResponse = await axios.get(
       `${CONFLUENCE_BASE_URL}/rest/api/content/${SOURCE_PAGE_ID}`,
@@ -324,68 +310,10 @@ export async function createDeploymentDocument(
 
     const sourceHtml = sourceResponse.data.body.storage.value;
 
-    // 5. JQL fixVersion 조건 변환 (배포 타입에 따라)
-    let newHtml = transformFixVersionInJql(sourceHtml, deploymentType, shortDate);
+    // 5. JQL fixVersion 조건 변환 (3가지 배포 유형 모두 OR 조건으로)
+    const newHtml = transformFixVersionInJql(sourceHtml, shortDate);
 
-    // 6. 두레이 테이블 데이터 정리 (헤더 + 빈 행 3개)
-    // "개발 안건" h1 다음 table의 tbody 내용을 헤더만 남기고 빈 행 3개로 교체
-    const doreiTableMatch = newHtml.match(/(<h1[^>]*>개발 안건<\/h1>[\s\S]*?<table[^>]*>[\s\S]*?<tbody[^>]*>)([\s\S]*?)(<\/tbody>)/i);
-    
-    if (doreiTableMatch) {
-      const beforeTbody = doreiTableMatch[1];
-      const tbodyContent = doreiTableMatch[2];
-      const afterTbody = doreiTableMatch[3];
-      
-      const allRows = tbodyContent.match(/<tr[^>]*>[\s\S]*?<\/tr>/g) || [];
-      
-      if (allRows.length > 0) {
-        const headerRow = allRows[0];
-        
-        // 데이터 행 찾기 (헤더가 아닌 첫 번째 행)
-        const dataRow = allRows.length > 1 ? allRows[1] : null;
-        
-        if (dataRow) {
-          // 데이터 행에서 각 셀의 구조 추출 (td 태그와 속성)
-          const dataCells = dataRow.match(/<td([^>]*)>[\s\S]*?<\/td>/gi) || [];
-          
-          // 빈 행 생성: 데이터 행의 구조를 복사하되 내용만 비움
-          const createEmptyRow = (rowNum: number): string => {
-            const cells = dataCells.map((cell, index) => {
-              // 셀 속성 추출
-              const cellMatch = cell.match(/<td([^>]*)>/i);
-              if (!cellMatch) return '';
-              
-              let attrs = cellMatch[1];
-              
-              // local-id 제거 (Confluence가 자동 생성)
-              attrs = attrs.replace(/(data-local-id|ac:local-id)="[^"]*"/gi, '').trim();
-              
-              // 회색 음영 제거
-              attrs = attrs.replace(/data-highlight-colour="[^"]*"/gi, '').trim();
-              attrs = attrs.replace(/data-cell-background="[^"]*"/gi, '').trim();
-              attrs = attrs.replace(/style="[^"]*background[^"]*"/gi, '').trim();
-              
-              // 첫 번째 셀이 numberingColumn인 경우 번호 추가
-              if (index === 0 && attrs.includes('numberingColumn')) {
-                return `<td${attrs ? ' ' + attrs : ''}><p>${rowNum}</p></td>`;
-              }
-              
-              // 나머지 셀은 빈 p 태그만
-              return `<td${attrs ? ' ' + attrs : ''}><p /></td>`;
-            }).join('');
-            
-            return `<tr>${cells}</tr>`;
-          };
-          
-          const emptyRows = [2, 3, 4].map(createEmptyRow).join('');
-          
-          const newTbody = `${beforeTbody}${headerRow}${emptyRows}${afterTbody}`;
-          newHtml = newHtml.replace(doreiTableMatch[0], newTbody);
-        }
-      }
-    }
-
-    // 8. 새 페이지 생성
+    // 6. 새 페이지 생성
     const createResponse = await axios.post(
       `${CONFLUENCE_BASE_URL}/rest/api/content`,
       {
