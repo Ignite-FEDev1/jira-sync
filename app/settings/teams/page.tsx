@@ -77,10 +77,10 @@ export default function TeamsPage() {
   // --- 데이터 로드 ---
 
   const fetchData = useCallback(async () => {
-    const [projectsRes, usersRes, teamsRes, targetsRes, profilesRes] =
+    const [projectsRes, usersApiRes, teamsRes, targetsRes, profilesRes] =
       await Promise.all([
         db.from('projects').select('id, name, jira_instance').order('name'),
-        db.from('users').select('id, name, team_id').order('name'),
+        fetch('/api/users').then((r) => r.json()),
         db.from('teams').select('id, name, source_project_id, leader_id, created_at').order('name'),
         db.from('team_target_projects').select('team_id, project_id, sync_profile_id'),
         db
@@ -99,8 +99,8 @@ export default function TeamsPage() {
       );
     }
 
-    if (usersRes.data) {
-      setUsers(usersRes.data.map((u) => ({ id: u.id, name: u.name })));
+    if (usersApiRes.success && usersApiRes.data) {
+      setUsers(usersApiRes.data.map((u: { id: string; name: string }) => ({ id: u.id, name: u.name })));
     }
 
     if (profilesRes.data) {
@@ -125,10 +125,10 @@ export default function TeamsPage() {
       });
 
       const memberMap: Record<string, string[]> = {};
-      usersRes.data?.forEach((u) => {
-        if (u.team_id) {
-          if (!memberMap[u.team_id]) memberMap[u.team_id] = [];
-          memberMap[u.team_id].push(u.id);
+      (usersApiRes.data ?? []).forEach((u: { id: string; teamId: string }) => {
+        if (u.teamId) {
+          if (!memberMap[u.teamId]) memberMap[u.teamId] = [];
+          memberMap[u.teamId].push(u.id);
         }
       });
 

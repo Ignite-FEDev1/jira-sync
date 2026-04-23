@@ -20,7 +20,6 @@ import {
 } from '@/components/ui/select';
 import { Plus, Pencil, Trash2, Check, Loader2, Search, CircleCheck, CircleX, RotateCcw, AlertTriangle, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
-import { db } from '@/lib/db';
 import { useCurrentUser } from '@/contexts/user-context';
 
 interface Team {
@@ -99,26 +98,26 @@ export default function UsersPage() {
 
   const fetchData = useCallback(async () => {
     const [teamsRes, usersRes] = await Promise.all([
-      db.from('teams').select('id, name').order('name'),
-      db.from('users').select('*').order('name'),
+      fetch('/api/teams').then((r) => r.json()),
+      fetch('/api/users').then((r) => r.json()),
     ]);
 
-    if (teamsRes.data) setTeams(teamsRes.data);
-    if (usersRes.data) {
+    if (teamsRes.success && teamsRes.data) setTeams(teamsRes.data);
+    if (usersRes.success && usersRes.data) {
       setUsers(
-        usersRes.data.map((u) => ({
+        usersRes.data.map((u: Record<string, string>) => ({
           id: u.id,
           name: u.name,
-          igniteAccountId: u.ignite_account_id || '',
-          igniteJiraEmail: u.ignite_jira_email || '',
-          igniteJiraApiToken: u.ignite_jira_api_token || '',
-          hmgAccountId: u.hmg_account_id || '',
-          hmgJiraEmail: u.hmg_jira_email || '',
-          hmgJiraApiToken: u.hmg_jira_api_token || '',
-          hmgUserId: u.hmg_user_id || '',
-          hChatApiKey: u.h_chat_api_key || '',
-          gitlabToken: u.gitlab_token || '',
-          teamId: u.team_id || '',
+          igniteAccountId: u.igniteAccountId || '',
+          igniteJiraEmail: u.igniteJiraEmail || '',
+          igniteJiraApiToken: u.igniteJiraApiToken || '',
+          hmgAccountId: u.hmgAccountId || '',
+          hmgJiraEmail: u.hmgJiraEmail || '',
+          hmgJiraApiToken: u.hmgJiraApiToken || '',
+          hmgUserId: u.hmgUserId || '',
+          hChatApiKey: u.hChatApiKey || '',
+          gitlabToken: u.gitlabToken || '',
+          teamId: u.teamId || '',
         }))
       );
     }
@@ -243,18 +242,18 @@ export default function UsersPage() {
 
   const bothVerified = !!igniteVerified && !!hmgVerified;
 
-  const toDbRow = () => ({
+  const toApiBody = () => ({
     name: form.name.trim(),
-    team_id: form.teamId || null,
-    ignite_account_id: igniteVerified?.accountId || '',
-    ignite_jira_email: form.igniteJiraEmail.trim(),
-    ignite_jira_api_token: form.igniteJiraApiToken.trim(),
-    hmg_account_id: hmgVerified?.accountId || '',
-    hmg_jira_email: form.hmgJiraEmail.trim(),
-    hmg_jira_api_token: form.hmgJiraApiToken.trim(),
-    hmg_user_id: form.hmgUserId.trim(),
-    h_chat_api_key: form.hChatApiKey.trim(),
-    gitlab_token: form.gitlabToken.trim(),
+    teamId: form.teamId || null,
+    igniteAccountId: igniteVerified?.accountId || '',
+    igniteJiraEmail: form.igniteJiraEmail.trim(),
+    igniteJiraApiToken: form.igniteJiraApiToken.trim(),
+    hmgAccountId: hmgVerified?.accountId || '',
+    hmgJiraEmail: form.hmgJiraEmail.trim(),
+    hmgJiraApiToken: form.hmgJiraApiToken.trim(),
+    hmgUserId: form.hmgUserId.trim(),
+    hChatApiKey: form.hChatApiKey.trim(),
+    gitlabToken: form.gitlabToken.trim(),
   });
 
   const handleAdd = async () => {
@@ -272,11 +271,16 @@ export default function UsersPage() {
     }
 
     setSaving(true);
-    const { error } = await db.from('users').insert(toDbRow());
+    const res = await fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(toApiBody()),
+    });
+    const result = await res.json();
     setSaving(false);
 
-    if (error) {
-      toast.error(`저장 실패: ${error.message}`);
+    if (!result.success) {
+      toast.error(`저장 실패: ${result.error}`);
       return;
     }
 
@@ -328,14 +332,16 @@ export default function UsersPage() {
     }
 
     setSaving(true);
-    const { error } = await db
-      .from('users')
-      .update(toDbRow())
-      .eq('id', editingId);
+    const res = await fetch(`/api/users/${editingId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(toApiBody()),
+    });
+    const result = await res.json();
     setSaving(false);
 
-    if (error) {
-      toast.error(`저장 실패: ${error.message}`);
+    if (!result.success) {
+      toast.error(`저장 실패: ${result.error}`);
       return;
     }
 
@@ -370,9 +376,10 @@ export default function UsersPage() {
   };
 
   const handleDelete = async (user: User) => {
-    const { error } = await db.from('users').delete().eq('id', user.id);
-    if (error) {
-      toast.error(`삭제 실패: ${error.message}`);
+    const res = await fetch(`/api/users/${user.id}`, { method: 'DELETE' });
+    const result = await res.json();
+    if (!result.success) {
+      toast.error(`삭제 실패: ${result.error}`);
       return;
     }
     toast.success(`${user.name} 사용자가 삭제되었습니다.`);

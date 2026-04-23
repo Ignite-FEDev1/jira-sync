@@ -16,7 +16,6 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { db } from '@/lib/db';
 import type { DeployRoomTemplate, ChecklistItemAssignee } from '@/lib/types/deploy-room';
 
 const ASSIGNEE_LABELS: Record<ChecklistItemAssignee, string> = {
@@ -47,23 +46,23 @@ export default function DeployScenarioListPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [templatesRes, teamsRes, usersRes] = await Promise.all([
+      const [templatesRes, teamsApiRes, usersApiRes] = await Promise.all([
         fetch('/api/admin/deploy-room/templates').then((r) => r.json()),
-        db.from('teams').select('id, leader_id'),
-        db.from('users').select('id, name'),
+        fetch('/api/teams').then((r) => r.json()),
+        fetch('/api/users').then((r) => r.json()),
       ]);
 
       if (templatesRes.success) setTemplates(templatesRes.templates);
       else toast.error(`조회 실패: ${templatesRes.error}`);
 
       // leader_id → name 매핑
-      if (teamsRes.data && usersRes.data) {
-        const userMap = new Map(usersRes.data.map((u: { id: string; name: string }) => [u.id, u.name]));
+      if (teamsApiRes.success && usersApiRes.success) {
+        const userMap = new Map(usersApiRes.data.map((u: { id: string; name: string }) => [u.id, u.name]));
         const leaders = new Set<string>();
-        for (const t of teamsRes.data) {
+        for (const t of teamsApiRes.data as { leader_id?: string }[]) {
           if (t.leader_id) {
             const name = userMap.get(t.leader_id);
-            if (name) leaders.add(name);
+            if (name) leaders.add(name as string);
           }
         }
         setLeaderNames(leaders);

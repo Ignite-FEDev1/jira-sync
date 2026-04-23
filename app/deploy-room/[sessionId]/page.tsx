@@ -200,22 +200,21 @@ export default function DeployRoomDetailPage() {
       const teamId = sessionJson.session?.teamId;
       if (teamId) {
         try {
-          const { db } = await import('@/lib/db');
-          const [usersResult, teamResult] = await Promise.all([
-            db.from('users').select('id, name').eq('team_id', teamId).order('name'),
-            db.from('teams').select('leader_id').eq('id', teamId).single(),
-          ]);
-          if (usersResult.data?.length) {
-            setTemplateTeamMembers(usersResult.data.map((u: { name: string }) => u.name));
-          }
-          if (teamResult.data?.leader_id) {
-            if (currentUser) {
-              setIsLeader(teamResult.data.leader_id === currentUser.id);
+          const teamInfoRes = await fetch(`/api/deploy-room/team-info?teamId=${teamId}`);
+          const teamInfo = await teamInfoRes.json();
+          if (teamInfo.success) {
+            if (teamInfo.members?.length) {
+              setTemplateTeamMembers(teamInfo.members.map((u: { name: string }) => u.name));
             }
-            const leader = usersResult.data?.find(
-              (u: { id: string; name: string }) => u.id === teamResult.data.leader_id
-            );
-            if (leader) setLeaderName(leader.name);
+            if (teamInfo.leaderId) {
+              if (currentUser) {
+                setIsLeader(teamInfo.leaderId === currentUser.id);
+              }
+              const leader = teamInfo.members?.find(
+                (u: { id: string; name: string }) => u.id === teamInfo.leaderId
+              );
+              if (leader) setLeaderName(leader.name);
+            }
           }
         } catch {}
         // 템플릿에서 gitlabProjects 가져오기
@@ -429,16 +428,15 @@ export default function DeployRoomDetailPage() {
       return;
     }
 
-    // DB에서 gitlab_token이 있는 사용자 조회 (관리자 토큰)
+    // 서버에서 gitlab_token 조회 (관리자 토큰)
     let gitlabToken = '';
     try {
-      const { db: dbClient } = await import('@/lib/db');
-      const { data: tokenUsers } = await dbClient
-        .from('users')
-        .select('gitlab_token')
-        .neq('gitlab_token', '')
-        .limit(1);
-      gitlabToken = tokenUsers?.[0]?.gitlab_token ?? '';
+      const teamId = session.teamId;
+      if (teamId) {
+        const tokenRes = await fetch(`/api/deploy-room/team-info?teamId=${teamId}`);
+        const tokenJson = await tokenRes.json();
+        gitlabToken = tokenJson.gitlabToken ?? '';
+      }
     } catch {}
 
     if (!gitlabToken) {
