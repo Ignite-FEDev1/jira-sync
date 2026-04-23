@@ -7,10 +7,9 @@ import { IgniteSyncService } from './ignite-sync.service';
 import { HMGSyncService } from './hmg-sync.service';
 import { chunkArray } from './field-mapper';
 import { initSprintCache, preloadSprintCache } from './sprint-mapper';
-import { clearDbMappingCache, getSyncProfileInfo, getAllowedEpicsFromDb, getSourceFieldsFromDb } from './db-field-mapper';
+import { clearDbMappingCache, getSyncProfileInfo, getSourceFieldsFromDb } from './db-field-mapper';
 import { clearTransitionCache } from './transition-helper';
 import { jira } from '@/lib/services/jira';
-import { ConfluenceEpicClient } from '@/lib/services/confluence/client';
 import { dbServer } from '@/lib/db';
 
 /**
@@ -57,25 +56,12 @@ export class SyncOrchestrator {
 
       this.logger.info(`동기화 시작 (소스 프로젝트: ${this._sourceProjectKey})`);
 
-      // AUTOWAY 동기화 프로필 조회 (DB 기반)
+      // AUTOWAY 동기화 프로필 조회 (DB 기��)
       const autowayProfile = await this.findAutowayProfile();
       if (autowayProfile) {
-        const allowedEpics = await getAllowedEpicsFromDb(autowayProfile.id);
         this.logger.info(
-          `DB 기반 AUTOWAY 프로필 로드 완료: 허용 에픽 ${allowedEpics.length}개, link_field=${autowayProfile.linkField}`
+          `AUTOWAY 프로필 로드 완��: link_field=${autowayProfile.linkField}, 에픽 필터=[GW] 접두사 기반`
         );
-      } else {
-        // DB에 프로필이 없으면 Confluence 폴백
-        const preloadResult = await ConfluenceEpicClient.getAllowedEpics();
-        if (preloadResult.success && preloadResult.data) {
-          this.logger.info(
-            `Confluence Epic 목록 로드 완료: ${preloadResult.data.length}개`
-          );
-        } else {
-          this.logger.warning(
-            `AUTOWAY 프로필 없음 & Confluence 로드 실패 - AUTOWAY 동기화 제한`
-          );
-        }
       }
 
       // 1. 대상 프로젝트 결정
@@ -352,7 +338,7 @@ export class SyncOrchestrator {
         }
       }
 
-      // 2. AUTOWAY 확인 (link field 또는 허용된 에픽)
+      // 2. AUTOWAY 확인 (link field 또는 에픽 이름 [GW] 접두사)
       if (targetProjects.includes('AUTOWAY')) {
         const autowayProf = await this.findAutowayProfile();
         const linkFieldId = autowayProf?.linkField || 'customfield_10306';
@@ -361,26 +347,11 @@ export class SyncOrchestrator {
         const hmgLink = ticket.fields[linkFieldId] as string | undefined;
         const hasTargetLink = hmgLink && new RegExp(`${targetKey}-\\d+`).test(hmgLink);
 
-        const parentKey = ticket.fields.parent?.key;
-        let isAllowedEpic = false;
+        // 에픽 이름이 [GW]로 시작하면 AUTOWAY 동기화 대상
+        const parentSummary = ticket.fields.parent?.fields?.summary ?? '';
+        const isGwEpic = parentSummary.startsWith('[GW]');
 
-        if (parentKey && autowayProf) {
-          // DB 기반 에픽 필터링
-          const allowedEpics = await getAllowedEpicsFromDb(autowayProf.id);
-          isAllowedEpic = allowedEpics.includes(parentKey);
-        } else if (parentKey) {
-          // Confluence 폴백
-          const match = parentKey.match(/\w+-(\d+)/);
-          const epicNumber = match ? parseInt(match[1], 10) : null;
-          if (epicNumber) {
-            const allowedEpicsResult = await ConfluenceEpicClient.getAllowedEpics();
-            if (allowedEpicsResult.success && allowedEpicsResult.data) {
-              isAllowedEpic = allowedEpicsResult.data.some((epic) => epic.id === epicNumber);
-            }
-          }
-        }
-
-        if (hasTargetLink || isAllowedEpic) {
+        if (hasTargetLink || isGwEpic) {
           targets.push('AUTOWAY');
         }
       }
@@ -552,42 +523,18 @@ export class SyncOrchestrator {
         return ['AUTOWAY'];
       }
 
-      // 3. 상위 에픽 확인
-      const parentKey = ticket.fields.parent?.key;
-      if (parentKey) {
-        if (autowayProf) {
-          // DB 기반 에픽 필터링
-          const allowedEpics = await getAllowedEpicsFromDb(autowayProf.id);
-          if (allowedEpics.includes(parentKey)) {
-            this.logger.info(
-              `${srcKey}-${ticketId}: 허용된 에픽(${parentKey}) → AUTOWAY 동기화 (DB)`
-            );
-            return ['AUTOWAY'];
-          }
-        } else {
-          // Confluence 폴백
-          const match = parentKey.match(/\w+-(\d+)/);
-          if (match) {
-            const epicNumber = parseInt(match[1], 10);
-            const allowedEpicsResult = await ConfluenceEpicClient.getAllowedEpics();
-            if (allowedEpicsResult.success && allowedEpicsResult.data) {
-              const isAllowedEpic = allowedEpicsResult.data.some(
-                (epic) => epic.id === epicNumber
-              );
-              if (isAllowedEpic) {
-                this.logger.info(
-                  `${srcKey}-${ticketId}: 허용된 에픽(${parentKey}) → AUTOWAY 동기화`
-                );
-                return ['AUTOWAY'];
-              }
-            }
-          }
-        }
+      // 3. 상위 에픽 이름이 [GW]로 시작하면 AUTOWAY 대상
+      const parentSummary = ticket.fields.parent?.fields?.summary ?? '';
+      if (parentSummary.startsWith('[GW]')) {
+        this.logger.info(
+          `${srcKey}-${ticketId}: [GW] 에픽(${ticket.fields.parent?.key}) → AUTOWAY 동기화`
+        );
+        return ['AUTOWAY'];
       }
 
       // 4. 어디에도 해당하지 않음
       this.logger.warning(
-        `${srcKey}-${ticketId}: 동기화 대상 아님 (연결 티켓 없음, ${linkFieldId} 없음, 허용되지 않은 에픽)`
+        `${srcKey}-${ticketId}: 동기화 대상 아님 (연결 티켓 없음, ${linkFieldId} 없음, [GW] 에픽 아님)`
       );
       return [];
     } catch (error) {
@@ -606,42 +553,9 @@ export class SyncOrchestrator {
   ): Promise<Array<'KQ' | 'HDD' | 'HB' | 'AUTOWAY'>> {
     const srcKey = this.getSourceProjectKey();
     try {
-      // 1. 에픽 ID 숫자 추출
-      const epicNumber = parseInt(epicId, 10);
-
-      // 2. AUTOWAY 허용 목록 확인 (DB 우선, Confluence 폴백)
-      const autowayProf = await this.findAutowayProfile();
       const epicKey = `${srcKey}-${epicId}`;
 
-      if (autowayProf) {
-        const allowedEpics = await getAllowedEpicsFromDb(autowayProf.id);
-        if (allowedEpics.includes(epicKey)) {
-          this.logger.info(
-            `${epicKey}: AUTOWAY 허용 에픽 → AUTOWAY만 동기화 (DB)`
-          );
-          return ['AUTOWAY'];
-        }
-      } else {
-        // Confluence 폴백
-        const allowedEpicsResult = await ConfluenceEpicClient.getAllowedEpics();
-        if (allowedEpicsResult.success && allowedEpicsResult.data) {
-          const isAllowedEpic = allowedEpicsResult.data.some(
-            (epic) => epic.id === epicNumber
-          );
-          if (isAllowedEpic) {
-            this.logger.info(
-              `${epicKey}: AUTOWAY 허용 에픽 → AUTOWAY만 동기화`
-            );
-            return ['AUTOWAY'];
-          }
-        } else {
-          this.logger.warning(
-            `${epicKey}: AUTOWAY 대상 여부 확인 불가 - 기본 프로젝트로 동기화`
-          );
-        }
-      }
-
-      // 3. 에픽 정보 조회하여 summary 확인
+      // 1. 에픽 정보 조회하여 summary 확인
       this.logger.info(`${epicKey}: 에픽 정보 조회 중...`);
       const epicResult = await jira.ignite.getIssue(epicKey);
 
@@ -655,7 +569,11 @@ export class SyncOrchestrator {
       const epicSummary = epicResult.data.fields.summary;
       this.logger.info(`${epicKey}: "${epicSummary}"`);
 
-      // 4. Summary에서 프로젝트 prefix 확인
+      // 2. Summary에서 프로젝트 prefix 확인
+      if (epicSummary.startsWith('[GW]')) {
+        this.logger.info('에픽 summary [GW] 접두사 → AUTOWAY만 동기화');
+        return ['AUTOWAY'];
+      }
       if (epicSummary.includes('[KQ]')) {
         this.logger.info('에픽 summary에 [KQ] 발견 → KQ만 동기화');
         return ['KQ'];
@@ -669,7 +587,7 @@ export class SyncOrchestrator {
         return ['HDD'];
       }
 
-      // 5. prefix 없으면 모든 Ignite 프로젝트로 동기화
+      // 3. prefix 없으면 모든 Ignite 프로젝트로 동기화
       this.logger.info(
         '에픽 summary에 프로젝트 prefix 없음 → KQ, HB, HDD 전체 동기화'
       );

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -329,6 +329,13 @@ export default function FieldMappingsPage() {
   const [pendingStatusMappings, setPendingStatusMappings] = useState<StatusMapping[]>([]);
   const [selectedSourceStatus, setSelectedSourceStatus] = useState<{ id: string; name: string } | null>(null);
 
+  // 편집 시 원본 스냅샷 (변경분 비교용)
+  const snapshotRef = useRef<{
+    mappings: string;
+    statusMappings: string;
+    epics: string;
+  } | null>(null);
+
   // 목록에서 펼치기
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [expandedMappings, setExpandedMappings] = useState<FieldMapping[]>([]);
@@ -585,52 +592,55 @@ export default function FieldMappingsPage() {
     }
   };
 
-  // 대상 프로젝트의 워크플로우(전이 그래프)를 자동 생성
+  // 대상 프로젝트의 워크플로우(전이 그래프)를 자동 생성 (병렬 처리)
   const autoGenerateWorkflows = async (
     targetProjectName: string,
     targetInst: 'ignite' | 'hmg',
     statuses: { id: string; name: string }[]
   ): Promise<WorkflowEdge[]> => {
-    const edges: WorkflowEdge[] = [];
     const statusNameMap = new Map(statuses.map((s) => [s.id, s.name]));
 
-    for (const status of statuses) {
-      try {
-        // 해당 상태의 이슈 1개 찾기
-        const jql = `project = "${targetProjectName}" AND status = ${status.id}`;
-        const searchRes = await jiraFetch(
-          `/api/jira/${targetInst}/search/jql?jql=${encodeURIComponent(jql)}&maxResults=1&fields=status`
-        );
-        const searchResult = await searchRes.json();
-        const issue = searchResult.data?.issues?.[0];
-        if (!issue) continue;
+    const results = await Promise.all(
+      statuses.map(async (status): Promise<WorkflowEdge[]> => {
+        try {
+          // 해당 상태의 이슈 1개 찾기
+          const jql = `project = "${targetProjectName}" AND status = ${status.id}`;
+          const searchRes = await jiraFetch(
+            `/api/jira/${targetInst}/search/jql?jql=${encodeURIComponent(jql)}&maxResults=1&fields=status`
+          );
+          const searchResult = await searchRes.json();
+          const issue = searchResult.data?.issues?.[0];
+          if (!issue) return [];
 
-        // 해당 이슈의 가능한 전이 조회
-        const transRes = await jiraFetch(
-          `/api/jira/${targetInst}/issue/${issue.key}/transitions`
-        );
-        const transResult = await transRes.json();
-        const transitions = transResult.data?.transitions || [];
+          // 해당 이슈의 가능한 전이 조회
+          const transRes = await jiraFetch(
+            `/api/jira/${targetInst}/issue/${issue.key}/transitions`
+          );
+          const transResult = await transRes.json();
+          const transitions = transResult.data?.transitions || [];
 
-        for (const t of transitions) {
-          const toStatusId = t.to?.id;
-          const toStatusName = t.to?.name || statusNameMap.get(toStatusId) || '';
-          if (toStatusId && toStatusId !== status.id) {
-            edges.push({
-              fromStatusId: status.id,
-              fromStatusName: status.name,
-              toStatusId,
-              toStatusName,
-              transitionId: t.id,
-            });
+          const edges: WorkflowEdge[] = [];
+          for (const t of transitions) {
+            const toStatusId = t.to?.id;
+            const toStatusName = t.to?.name || statusNameMap.get(toStatusId) || '';
+            if (toStatusId && toStatusId !== status.id) {
+              edges.push({
+                fromStatusId: status.id,
+                fromStatusName: status.name,
+                toStatusId,
+                toStatusName,
+                transitionId: t.id,
+              });
+            }
           }
+          return edges;
+        } catch {
+          return [];
         }
-      } catch {
-        // 해당 상태에 이슈가 없으면 스킵
-      }
-    }
+      })
+    );
 
-    return edges;
+    return results.flat();
   };
 
   // ── 필드 선택 로직 ──
@@ -707,6 +717,18 @@ export default function FieldMappingsPage() {
 
     setSaving(true);
 
+    // 현재 상태의 직렬화 키 (변경 비교용)
+    const sortKey = (arr: object[]) =>
+      JSON.stringify([...arr].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+    const currentMappingsKey = sortKey(pendingMappings.map((m) => ({ sourceField: m.sourceField, targetField: m.targetField })));
+    const currentStatusKey = sortKey(pendingStatusMappings.map((s) => ({ sourceStatusId: s.sourceStatusId, targetStatusId: s.targetStatusId })));
+    const currentEpicsKey = sortKey(selectedEpics.map((e) => ({ key: e.key })));
+
+    const snap = snapshotRef.current;
+    const mappingsChanged = !snap || snap.mappings !== currentMappingsKey;
+    const statusChanged = !snap || snap.statusMappings !== currentStatusKey;
+    const epicsChanged = !snap || snap.epics !== currentEpicsKey;
+
     try {
       let profileId = editingId;
 
@@ -730,29 +752,19 @@ export default function FieldMappingsPage() {
           return;
         }
 
-        // 기존 매핑 삭제
-        await db
-          .from('sync_field_mappings')
-          .delete()
-          .eq('profile_id', editingId);
-
-        // HMG: 기존 에픽 삭제 후 재삽입
-        if (isHmgTarget) {
-          await db
-            .from('sync_profile_allowed_epics')
-            .delete()
-            .eq('profile_id', editingId);
+        // 변경된 항목만 삭제 후 재삽입
+        if (mappingsChanged) {
+          await db.from('sync_field_mappings').delete().eq('profile_id', editingId);
         }
-
-        // 기존 상태 매핑 & 워크플로우 삭제
-        await db
-          .from('sync_profile_status_mappings')
-          .delete()
-          .eq('profile_id', editingId);
-        await db
-          .from('sync_profile_workflows')
-          .delete()
-          .eq('profile_id', editingId);
+        if (epicsChanged && isHmgTarget) {
+          await db.from('sync_profile_allowed_epics').delete().eq('profile_id', editingId);
+        }
+        if (statusChanged) {
+          await Promise.all([
+            db.from('sync_profile_status_mappings').delete().eq('profile_id', editingId),
+            db.from('sync_profile_workflows').delete().eq('profile_id', editingId),
+          ]);
+        }
       } else {
         // 새 프로필 생성
         const { data, error } = await db
@@ -779,13 +791,12 @@ export default function FieldMappingsPage() {
         profileId = data.id;
       }
 
-      // 필드 매핑 저장
-      if (pendingMappings.length > 0 && profileId) {
+      // 필드 매핑 저장 (변경된 경우만)
+      if (mappingsChanged && pendingMappings.length > 0 && profileId) {
         const { error: mappingError } = await db
           .from('sync_field_mappings')
           .insert(
             pendingMappings.map((m) => {
-              // 인스턴스가 다를 때 사람 필드는 account_map 자동 적용
               const ACCOUNT_FIELDS = ['assignee', 'reporter', 'creator'];
               const isCrossInstance =
                 projects.find((p) => p.id === sourceProjectId)?.jiraInstance !==
@@ -812,8 +823,8 @@ export default function FieldMappingsPage() {
         }
       }
 
-      // HMG: 허용 에픽 저장
-      if (isHmgTarget && selectedEpics.length > 0 && profileId) {
+      // HMG: 허용 에픽 저장 (변경된 경우만)
+      if (epicsChanged && isHmgTarget && selectedEpics.length > 0 && profileId) {
         const { error: epicError } = await db
           .from('sync_profile_allowed_epics')
           .insert(
@@ -830,52 +841,54 @@ export default function FieldMappingsPage() {
         }
       }
 
-      // 상태 매핑 저장
-      if (pendingStatusMappings.length > 0 && profileId) {
-        const { error: smError } = await db
-          .from('sync_profile_status_mappings')
-          .insert(
-            pendingStatusMappings.map((s) => ({
-              profile_id: profileId,
-              source_status_id: s.sourceStatusId,
-              source_status_name: s.sourceStatusName,
-              target_status_id: s.targetStatusId,
-              target_status_name: s.targetStatusName,
-            }))
-          );
-        if (smError) {
-          toast.error(`상태 매핑 저장 실패: ${smError.message}`);
-          setSaving(false);
-          return;
+      // 상태 매핑 & 워크플로우 저장 (변경된 경우만)
+      if (statusChanged) {
+        if (pendingStatusMappings.length > 0 && profileId) {
+          const { error: smError } = await db
+            .from('sync_profile_status_mappings')
+            .insert(
+              pendingStatusMappings.map((s) => ({
+                profile_id: profileId,
+                source_status_id: s.sourceStatusId,
+                source_status_name: s.sourceStatusName,
+                target_status_id: s.targetStatusId,
+                target_status_name: s.targetStatusName,
+              }))
+            );
+          if (smError) {
+            toast.error(`상태 매핑 저장 실패: ${smError.message}`);
+            setSaving(false);
+            return;
+          }
         }
-      }
 
-      // 워크플로우 자동 생성 및 저장
-      if (pendingStatusMappings.length > 0 && profileId && targetStatuses.length > 0) {
-        const targetProject = projects.find((p) => p.id === targetProjectId);
-        if (targetProject) {
-          const workflows = await autoGenerateWorkflows(
-            targetProject.name,
-            targetProject.jiraInstance,
-            targetStatuses
-          );
-          if (workflows.length > 0) {
-            const { error: wfError } = await db
-              .from('sync_profile_workflows')
-              .insert(
-                workflows.map((w) => ({
-                  profile_id: profileId,
-                  from_status_id: w.fromStatusId,
-                  from_status_name: w.fromStatusName,
-                  to_status_id: w.toStatusId,
-                  to_status_name: w.toStatusName,
-                  transition_id: w.transitionId,
-                }))
-              );
-            if (wfError) {
-              toast.error(`워크플로우 저장 실패: ${wfError.message}`);
-            } else {
-              toast.success(`워크플로우 ${workflows.length}개 전이 자동 생성`);
+        // 워크플로우 자동 생성 (상태 매핑이 변경된 경우만 실행)
+        if (pendingStatusMappings.length > 0 && profileId && targetStatuses.length > 0) {
+          const targetProject = projects.find((p) => p.id === targetProjectId);
+          if (targetProject) {
+            const workflows = await autoGenerateWorkflows(
+              targetProject.name,
+              targetProject.jiraInstance,
+              targetStatuses
+            );
+            if (workflows.length > 0) {
+              const { error: wfError } = await db
+                .from('sync_profile_workflows')
+                .insert(
+                  workflows.map((w) => ({
+                    profile_id: profileId,
+                    from_status_id: w.fromStatusId,
+                    from_status_name: w.fromStatusName,
+                    to_status_id: w.toStatusId,
+                    to_status_name: w.toStatusName,
+                    transition_id: w.transitionId,
+                  }))
+                );
+              if (wfError) {
+                toast.error(`워크플로우 저장 실패: ${wfError.message}`);
+              } else {
+                toast.success(`워크플로우 ${workflows.length}개 전이 자동 생성`);
+              }
             }
           }
         }
@@ -918,13 +931,15 @@ export default function FieldMappingsPage() {
     // HMG 대상인 경우 link_field, source_link_field 및 allowed epics 로드
     setLinkField(profile.linkField || '');
     setSourceLinkField(profile.sourceLinkField || '');
+    let epicsData: { epic_key: string; epic_summary?: string }[] | null = null;
     const targetInst = projects.find((p) => p.id === profile.targetProjectId)?.jiraInstance;
     if (targetInst === 'hmg') {
       // 허용 에픽 로드
-      const { data: epicsData } = await db
+      const { data } = await db
         .from('sync_profile_allowed_epics')
         .select('epic_key, epic_summary')
         .eq('profile_id', profile.id);
+      epicsData = data;
       if (epicsData) {
         setSelectedEpics(
           epicsData.map((e) => ({ key: e.epic_key, summary: e.epic_summary || '' }))
@@ -954,9 +969,8 @@ export default function FieldMappingsPage() {
       .select('source_field, target_field')
       .eq('profile_id', profile.id);
 
-    if (data) {
-      setPendingMappings(
-        data.map((m) => ({
+    const mappings = data
+      ? data.map((m) => ({
           sourceField: m.source_field,
           sourceFieldName: m.source_field,
           targetField: m.target_field,
@@ -964,8 +978,24 @@ export default function FieldMappingsPage() {
           sourceType: '',
           targetType: '',
         }))
-      );
-    }
+      : [];
+    setPendingMappings(mappings);
+
+    // 원본 스냅샷 저장 (저장 시 변경 여부 비교용)
+    const sortKey = (arr: { sourceField?: string; sourceStatusId?: string; key?: string }[]) =>
+      JSON.stringify([...arr].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+    snapshotRef.current = {
+      mappings: sortKey(mappings.map((m) => ({ sourceField: m.sourceField, targetField: m.targetField }))),
+      statusMappings: sortKey(
+        (statusData ?? []).map((s) => ({
+          sourceStatusId: s.source_status_id,
+          targetStatusId: s.target_status_id,
+        }))
+      ),
+      epics: sortKey(
+        (epicsData ?? []).map((e: { epic_key: string }) => ({ key: e.epic_key }))
+      ),
+    };
   };
 
   // 필드 로드 완료 시 pending 매핑의 이름 resolve
@@ -1033,6 +1063,7 @@ export default function FieldMappingsPage() {
     setTargetStatuses([]);
     setPendingStatusMappings([]);
     setSelectedSourceStatus(null);
+    snapshotRef.current = null;
   };
 
   // 목록에서 프로필 펼칠 때 매핑 로드 (이름은 DB에 저장됨)
