@@ -5,7 +5,10 @@ import { SyncResult, SyncTargetProject } from './types';
 import { SyncLogger } from './logger';
 import { mapFieldsForIgniteProject } from './field-mapper';
 import { mapFieldsFromDb } from './db-field-mapper';
-import { syncStatusWithPath, syncStatusWithPathFromDb } from './transition-helper';
+import {
+  syncStatusWithPath,
+  syncStatusWithPathFromDb,
+} from './transition-helper';
 import { jira } from '@/lib/services/jira';
 
 /**
@@ -99,7 +102,9 @@ export class IgniteSyncService {
     syncProfileId?: string
   ): Promise<SyncResult> {
     try {
-      this.logger.info(`${targetKey}: 업데이트 시작...${syncProfileId ? ' (DB 매핑)' : ''}`);
+      this.logger.info(
+        `${targetKey}: 업데이트 시작...${syncProfileId ? ' (DB 매핑)' : ''}`
+      );
 
       // 1. 필드 매핑 (DB 기반 또는 하드코딩)
       const mappedFields = syncProfileId
@@ -118,12 +123,13 @@ export class IgniteSyncService {
 
       this.logger.success(`${targetKey}: 필드 업데이트 완료`);
 
-      // 3. 상태 동기화 (HDD는 권한 문제로 제외)
-      if (targetProject !== 'HDD') {
-        await this.syncIgniteStatus(fehgTicket, targetKey, syncProfileId);
-      } else {
-        this.logger.info(`${targetKey}: 상태 동기화 스킵 (HDD는 제외)`);
-      }
+      // 3. 상태 동기화
+      await this.syncIgniteStatus(
+        fehgTicket,
+        targetKey,
+        targetProject,
+        syncProfileId
+      );
 
       return {
         fehgKey: fehgTicket.key,
@@ -155,6 +161,7 @@ export class IgniteSyncService {
   private async syncIgniteStatus(
     fehgTicket: JiraIssue,
     targetKey: string,
+    targetProject: 'KQ' | 'HDD' | 'HB',
     syncProfileId?: string
   ): Promise<void> {
     const fehgStatusId = fehgTicket.fields.status?.id;
@@ -170,19 +177,50 @@ export class IgniteSyncService {
 
       const currentStatusId = targetIssue.data.fields.status?.id;
       if (!currentStatusId) {
-        this.logger.warning(`${targetKey}: 현재 상태 ID 없음 - 상태 동기화 스킵`);
+        this.logger.warning(
+          `${targetKey}: 현재 상태 ID 없음 - 상태 동기화 스킵`
+        );
+        return;
+      }
+
+      // KQ는 Verify in QA 상태에서 QA가 수동으로 변경하기 때문에 이 상태에서는 동기화 스킵
+      if (
+        targetProject === 'KQ' &&
+        targetIssue.data.fields.status?.name === 'Verify in QA'
+      ) {
+        this.logger.info(
+          `${targetKey}: KQ 상태가 "Verify in QA" → 동기화 스킵`
+        );
+        return;
+      }
+
+      // HDD는 상태 동기화 권한 문제로 인해 스킵
+      if (targetProject === 'HDD') {
+        this.logger.info(`${targetKey}: HDD → 상태 동기화 권한 문제로 스킵`);
         return;
       }
 
       // 2. 동적 경로 탐색 및 순차 실행 (DB 매핑 우선)
-      const executeTransitionFn = async (issueKey: string, transitionId: string) => {
+      const executeTransitionFn = async (
+        issueKey: string,
+        transitionId: string
+      ) => {
         return await jira.ignite.updateIssueStatus(issueKey, transitionId);
       };
 
       const getTransitionsFn = async (issueKey: string) => {
         const res = await jira.ignite.getIssueTransitions(issueKey);
         if (res.success && res.data) {
-          return (res.data as { transitions: Array<{ id: string; to: { id: string; name: string } }> }).transitions || [];
+          return (
+            (
+              res.data as {
+                transitions: Array<{
+                  id: string;
+                  to: { id: string; name: string };
+                }>;
+              }
+            ).transitions || []
+          );
         }
         return [];
       };
