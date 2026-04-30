@@ -9,6 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { JiraClient } from '@/lib/services/jira/client';
+import { KQ_CUSTOM_FIELDS } from '@/lib/constants/jira';
 import { setupJiraAuth } from '../_auth';
 
 export async function POST(req: NextRequest) {
@@ -57,14 +58,19 @@ export async function POST(req: NextRequest) {
 
     // 4. 필드 비우기 + 제목 변경
     // priority는 null 설정 불가(Jira 400) — 제외
+    const fieldsToReset: Record<string, unknown> = {
+      summary: 'deprecated',
+      description: null,
+      assignee: null,
+      labels: [],
+      customfield_10020: null, // 스프린트 제거
+    };
+    // KQ 티켓은 공동담당자(customfield_10132) 별도 제거 필요 (Jira 자동화가 assignee만 제거)
+    if (ticketKey.startsWith('KQ-')) {
+      fieldsToReset[KQ_CUSTOM_FIELDS.CO_ASSIGNEE] = null;
+    }
     const updateResult = await client.put(`issue/${ticketKey}`, {
-      fields: {
-        summary: 'deprecated',
-        description: null,
-        assignee: null,
-        labels: [],
-        customfield_10020: null, // 스프린트 제거
-      },
+      fields: fieldsToReset,
     });
 
     if (updateResult.success) {

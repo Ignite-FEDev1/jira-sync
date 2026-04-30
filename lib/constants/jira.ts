@@ -316,7 +316,14 @@ export const STATUS_WORKFLOW: Record<
 export const IGNITE_CUSTOM_FIELDS = {
   START_DATE: 'customfield_10015', // 시작일
   SPRINT: 'customfield_10020', // 스프린트
+  STORY_POINTS: 'customfield_10016', // 추정치 (Story Points) — 클론 생성 시 null 처리
   HMG_JIRA_LINK: 'customfield_10306', // HMG Jira 티켓 URL (FEHG 전용)
+} as const;
+
+// KQ 프로젝트 커스텀 필드
+export const KQ_CUSTOM_FIELDS = {
+  CO_ASSIGNEE: 'customfield_10132', // 공동담당자 (user picker)
+  EPIC_LINK: 'customfield_10014',   // Epic Link (상위 에픽 키, 문자열 e.g. "KQ-11203")
 } as const;
 
 // HMG Jira 커스텀 필드 (AUTOWAY 프로젝트)

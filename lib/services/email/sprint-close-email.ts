@@ -137,10 +137,18 @@ export function buildSprintCloseEmailHtml(
     : '';
 
   const descBlock = `
-    <div style="padding:10px 22px;border-bottom:1px solid #e5e7eb;background:${isDryRun ? '#fffbeb' : '#f8fafc'};font-size:11px;color:#6b7280;line-height:2;">
+    <div style="padding:10px 22px;border-bottom:1px solid #e5e7eb;background:${isDryRun ? '#fffbeb' : '#f8fafc'};font-size:11px;color:#6b7280;">
       ${testNotice}
-      <div>${dot('#6b7280')}<strong>이월</strong> — 마감일까지 '할 일' 상태인 티켓은 스프린트를 ${toSprint}으로 변경합니다.</div>
-      <div>${dot('#3b82f6')}<strong>완료 → 신규</strong> — 마감일까지 '진행 중' 상태인 티켓은 이번 스프린트에서 완료 처리 후, 잔여 작업을 위한 새 티켓이 ${toSprint} 스프린트에 자동 발행됩니다. 발행된 티켓은 아래 목록에서 ${newBadge}로 표시됩니다.</div>
+      <table style="border-collapse:collapse;width:100%;">
+        <tr>
+          <td style="white-space:nowrap;padding:3px 12px 3px 0;vertical-align:top;">${dot('#6b7280')}<strong style="color:#111827;">이월</strong></td>
+          <td style="padding:3px 0;line-height:1.6;">할 일 상태 티켓 → <strong>${toSprint}</strong> 스프린트로 이동</td>
+        </tr>
+        <tr>
+          <td style="white-space:nowrap;padding:3px 12px 3px 0;vertical-align:top;">${dot('#3b82f6')}<strong style="color:#111827;">완료 → 신규</strong></td>
+          <td style="padding:3px 0;line-height:1.6;">진행 중 상태 티켓 → 완료 처리 후 <strong>${toSprint}</strong>에 신규 발행 · 아래 목록에서 ${newBadge}로 표시</td>
+        </tr>
+      </table>
     </div>`;
 
   // ── 내 티켓 섹션 ────────────────────────────────────────────
@@ -170,7 +178,7 @@ export function buildSprintCloseEmailHtml(
     .sort((a, b) => {
       if (a === '미배정') return 1;
       if (b === '미배정') return -1;
-      return a.localeCompare(b, 'ko');
+      return assigneeMap.get(b)!.length - assigneeMap.get(a)!.length;
     });
 
   const divider = `<div style="height:12px;"></div>`;
@@ -180,7 +188,7 @@ export function buildSprintCloseEmailHtml(
     const avatar = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#93c5fd;margin-right:8px;vertical-align:middle;position:relative;top:-1px;"></span>`;
     return `
       <div>
-        <div style="font-weight:700;font-size:14px;color:#1f2937;margin-bottom:4px;">
+        <div style="font-weight:700;font-size:14px;color:#1f2937;margin-bottom:6px;background:#f8fafc;padding:5px 8px;">
           ${avatar}${name} <span style="font-weight:400;font-size:12px;color:#9ca3af;margin-left:4px;">${countLabel(items)}</span>
         </div>
         <div style="padding-left:14px;">
@@ -195,7 +203,7 @@ export function buildSprintCloseEmailHtml(
   if (assigneeSectionsList.length > 0) {
     teamSection = `
       <div style="padding:16px 22px;">
-        <div style="font-size:13px;font-weight:700;color:#6b7280;margin-bottom:12px;border-left:3px solid #9ca3af;padding-left:8px;">${teamSectionLabel}</div>
+        <div style="font-size:13px;font-weight:700;color:#1f2937;margin-bottom:12px;border-left:3px solid #9ca3af;padding-left:8px;">${teamSectionLabel}</div>
         ${assigneeSectionsList.join(divider)}
       </div>`;
   }
