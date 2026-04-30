@@ -1,27 +1,6 @@
 import { dbServer } from '@/lib/db';
 import type { DeployRoomTimelineEvent } from '@/lib/types/deploy-room';
-
-type TimelineRow = {
-  id: string;
-  session_id: string;
-  actor_user_id: string | null;
-  action: string;
-  target: string | null;
-  payload: Record<string, unknown> | null;
-  created_at: string;
-};
-
-function toTimeline(row: TimelineRow): DeployRoomTimelineEvent {
-  return {
-    id: row.id,
-    sessionId: row.session_id,
-    actorUserId: row.actor_user_id,
-    action: row.action,
-    target: row.target,
-    payload: row.payload,
-    createdAt: row.created_at,
-  };
-}
+import { toTimelineEvent, type TimelineRow } from './mappers';
 
 interface RecordTimelineInput {
   sessionId: string;
@@ -43,7 +22,7 @@ export async function recordTimeline(
   });
 
   if (error) {
-    // 타임라인 실패는 치명적이지 않음 — 로그만 남기고 throw하지 않음
+    // 타임라인 실패는 비치명적 — 본 작업이 롤백되지 않아야 한다
     console.error('[deploy-room] 타임라인 기록 실패:', error.message);
   }
 }
@@ -58,5 +37,5 @@ export async function listTimeline(
     .order('created_at', { ascending: false });
 
   if (error) throw new Error(`타임라인 조회 실패: ${error.message}`);
-  return (data as TimelineRow[]).map(toTimeline);
+  return (data as TimelineRow[]).map(toTimelineEvent);
 }

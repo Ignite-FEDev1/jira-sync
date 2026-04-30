@@ -30,20 +30,16 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
+  DEPLOY_TYPE_CHIP,
   DEPLOY_TYPES,
+  SESSION_STATUS_LABELS,
+  SESSION_STATUS_LIST_STYLES,
   deployDateToYYMMDD,
   type DeployType,
 } from '@/lib/constants/deploy-room';
-
-const DEPLOY_TYPE_CHIP: Record<string, { label: string; style: string }> = {
-  regular: { label: '정기', style: 'bg-blue-100 text-blue-700' },
-  adhoc: { label: '비정기', style: 'bg-violet-100 text-violet-700' },
-  hotfix: { label: '핫픽스', style: 'bg-rose-100 text-rose-700' },
-};
 import { useCurrentUser } from '@/contexts/user-context';
 import type {
   DeployRoomSession,
-  DeployRoomSessionStatus,
   DeployRoomTemplate,
 } from '@/lib/types/deploy-room';
 
@@ -51,20 +47,6 @@ interface TeamOption {
   id: string;
   name: string;
 }
-
-const STATUS_LABELS: Record<DeployRoomSessionStatus, string> = {
-  preparing: '준비 중',
-  in_progress: '진행 중',
-  completed: '완료',
-  rolled_back: '롤백됨',
-};
-
-const STATUS_STYLES: Record<DeployRoomSessionStatus, string> = {
-  preparing: 'bg-slate-100 text-slate-700',
-  in_progress: 'bg-blue-100 text-blue-700',
-  completed: 'bg-emerald-100 text-emerald-700',
-  rolled_back: 'bg-amber-100 text-amber-700',
-};
 
 export default function DeployRoomListPage() {
   const { currentUser } = useCurrentUser();
@@ -112,11 +94,7 @@ export default function DeployRoomListPage() {
     try {
       const [templatesRes, teamsRes] = await Promise.all([
         fetch('/api/deploy-room/templates').then((r) => r.json()),
-        (async () => {
-          const { db } = await import('@/lib/db');
-          const { data } = await db.from('teams').select('id, name').order('name');
-          return data ?? [];
-        })(),
+        fetch('/api/teams').then((r) => r.json()),
       ]);
       if (templatesRes.success) {
         setTemplates(templatesRes.templates);
@@ -124,10 +102,12 @@ export default function DeployRoomListPage() {
           setSelectedTemplateId(templatesRes.templates[0].id);
         }
       }
-      const teamList = teamsRes.map((t: { id: string; name: string }) => ({ id: t.id, name: t.name }));
+      const teamList: TeamOption[] = (teamsRes.success ? teamsRes.data : []).map(
+        (t: { id: string; name: string }) => ({ id: t.id, name: t.name })
+      );
       setTeams(teamList);
       if (teamList.length > 0 && !selectedTeamId) {
-        const fe1 = teamList.find((t: TeamOption) => t.name === 'FE1');
+        const fe1 = teamList.find((t) => t.name === 'FE1');
         setSelectedTeamId(fe1?.id ?? teamList[0].id);
       }
     } catch {}
@@ -266,9 +246,9 @@ export default function DeployRoomListPage() {
                           )}
                         </div>
                         <span
-                          className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[session.status]}`}
+                          className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full font-medium ${SESSION_STATUS_LIST_STYLES[session.status]}`}
                         >
-                          {STATUS_LABELS[session.status]}
+                          {SESSION_STATUS_LABELS[session.status]}
                         </span>
                       </div>
                       <CardDescription>{session.deployDate}</CardDescription>

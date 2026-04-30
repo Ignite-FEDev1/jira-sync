@@ -1,46 +1,7 @@
 import { dbServer } from '@/lib/db';
 import type { DeployRoomMr, DeployRoomMrStatus } from '@/lib/types/deploy-room';
+import { toMr, type MrRow } from './mappers';
 import { recordTimeline } from './timeline.service';
-
-type MrRow = {
-  id: string;
-  session_id: string;
-  gitlab_project_path: string;
-  mr_iid: number;
-  title: string;
-  url: string;
-  author_name: string | null;
-  assignee_name: string | null;
-  source_branch: string | null;
-  target_branch: string | null;
-  included: boolean;
-  owner_user_id: string | null;
-  status: string;
-  notes: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export function toMr(row: MrRow): DeployRoomMr {
-  return {
-    id: row.id,
-    sessionId: row.session_id,
-    gitlabProjectPath: row.gitlab_project_path,
-    mrIid: row.mr_iid,
-    title: row.title,
-    url: row.url,
-    authorName: row.author_name,
-    assigneeName: row.assignee_name,
-    sourceBranch: row.source_branch,
-    targetBranch: row.target_branch,
-    included: row.included,
-    ownerUserId: row.owner_user_id,
-    status: row.status as DeployRoomMrStatus,
-    notes: row.notes,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
 
 export async function listMrs(sessionId: string): Promise<DeployRoomMr[]> {
   const { data, error } = await dbServer
@@ -100,7 +61,6 @@ export async function updateMr(input: UpdateMrInput): Promise<DeployRoomMr> {
   const mr = toMr(data as MrRow);
   const target = `${mr.gitlabProjectPath} !${mr.mrIid}`;
 
-  // 변경점별 타임라인 기록
   if (input.included !== undefined && input.included !== before.included) {
     await recordTimeline({
       sessionId: mr.sessionId,

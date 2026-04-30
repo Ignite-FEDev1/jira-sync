@@ -1,6 +1,6 @@
 import { dbServer } from '@/lib/db';
 import type { DeployRoomChecklistItem } from '@/lib/types/deploy-room';
-import { toChecklistItem } from './session.service';
+import { toChecklistItem, type ChecklistRow } from './mappers';
 import { recordTimeline } from './timeline.service';
 
 interface ToggleChecklistInput {
@@ -29,7 +29,7 @@ export async function toggleChecklistItem(
     throw new Error(`체크리스트 토글 실패: ${error?.message ?? 'unknown'}`);
   }
 
-  const item = toChecklistItem(data as Parameters<typeof toChecklistItem>[0]);
+  const item = toChecklistItem(data as ChecklistRow);
 
   await recordTimeline({
     sessionId: item.sessionId,

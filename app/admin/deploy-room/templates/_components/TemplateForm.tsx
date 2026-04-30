@@ -13,7 +13,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { db } from '@/lib/db';
 import { DEFAULT_CHECKLIST_WITH_ASSIGNEE } from '@/lib/constants/deploy-room';
 import type {
   DeployRoomTemplate,
@@ -79,30 +78,27 @@ export default function TemplateForm({ initialData }: Props) {
   useEffect(() => {
     Promise.all([
       fetch('/api/users').then((r) => r.json()),
-      db.from('teams').select('id, leader_id'),
-    ]).then(([usersJson, teamsRes]) => {
-      if (usersJson.success) {
-        const users: DbUser[] = usersJson.data.map((u: { id: string; name: string }) => ({
-          id: u.id,
-          name: u.name,
-        }));
-        setAllUsers(users);
-        if (!initialData && teamMembers.length === 0) {
-          setTeamMembers(users.map((u) => u.name));
-        }
+      fetch('/api/teams').then((r) => r.json()),
+    ]).then(([usersJson, teamsJson]) => {
+      if (!usersJson.success) return;
+      const users: DbUser[] = usersJson.data.map(
+        (u: { id: string; name: string }) => ({ id: u.id, name: u.name })
+      );
+      setAllUsers(users);
+      if (!initialData && teamMembers.length === 0) {
+        setTeamMembers(users.map((u) => u.name));
+      }
 
-        // leader 이름 Set 구성
-        if (teamsRes.data) {
-          const userMap = new Map(users.map((u) => [u.id, u.name]));
-          const leaders = new Set<string>();
-          for (const t of teamsRes.data) {
-            if (t.leader_id) {
-              const n = userMap.get(t.leader_id);
-              if (n) leaders.add(n);
-            }
+      if (teamsJson.success && teamsJson.data) {
+        const userMap = new Map(users.map((u) => [u.id, u.name]));
+        const leaders = new Set<string>();
+        for (const t of teamsJson.data as { leader_id?: string }[]) {
+          if (t.leader_id) {
+            const n = userMap.get(t.leader_id);
+            if (n) leaders.add(n);
           }
-          setLeaderNames(leaders);
         }
+        setLeaderNames(leaders);
       }
     }).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
