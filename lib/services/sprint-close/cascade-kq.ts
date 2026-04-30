@@ -197,6 +197,7 @@ async function patchKqFromSource(
  * 3. 원본 FEHG의 Blocks→KQ 기준으로 상위항목/컴포넌트/수정버전/스프린트 패치
  *
  * @param isDryRun true이면 Jira 변경 없이 로그만 출력
+ * @returns 자동화로 생성된 KQ 키 (없으면 null)
  */
 export async function patchAutomationKqTicket(
   client: JiraClient,
@@ -206,19 +207,19 @@ export async function patchAutomationKqTicket(
   nextSprintName: string,
   log: (msg: string) => void,
   isDryRun = false
-): Promise<void> {
+): Promise<string | null> {
   const originalKqKeys = issuelinks
     .filter((l) => l.type?.name === 'Blocks' && l.outwardIssue?.key.startsWith('KQ-'))
     .map((l) => l.outwardIssue!.key);
 
   if (originalKqKeys.length === 0) {
     log(`[SKIP] KQ 패치 — ${originalFehgKey}에 연결된 KQ 없음 (자동화 미발동)`);
-    return;
+    return null;
   }
 
   if (isDryRun) {
     log(`[DRY RUN] 자동화 KQ 패치 예정 (원본: ${originalKqKeys.join(', ')}) — 상위항목/컴포넌트/수정버전/스프린트`);
-    return;
+    return null;
   }
 
   log(`[INFO] 자동화 KQ 생성 대기 (원본 KQ: ${originalKqKeys.join(', ')})`);
@@ -226,7 +227,7 @@ export async function patchAutomationKqTicket(
 
   if (!automationKqKey) {
     log('[WARN] 자동화 KQ 미생성 — 패치 건너뜀');
-    return;
+    return null;
   }
 
   // 원본 KQ가 복수인 경우 첫 번째 기준으로 패치 (단일 KQ가 일반적)
@@ -236,4 +237,5 @@ export async function patchAutomationKqTicket(
   }
 
   await patchKqFromSource(client, automationKqKey, originalKqKey, nextSprintName, log);
+  return automationKqKey;
 }
