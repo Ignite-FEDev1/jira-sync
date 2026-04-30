@@ -154,7 +154,7 @@ export async function POST(req: NextRequest) {
     });
 
     // 4. 자동화 KQ 대기 후 원본 KQ 기준 필드 패치 (상위항목/컴포넌트/수정버전/스프린트)
-    await patchAutomationKqTicket(client, ticketKey, original.issuelinks ?? [], newKey, nextSprintName, (msg) => cascadeLog.push(msg));
+    const kqKey = await patchAutomationKqTicket(client, ticketKey, original.issuelinks ?? [], newKey, nextSprintName, (msg) => cascadeLog.push(msg));
 
     // 5. FEHG 클론 스프린트 재고정 (자동화가 리셋했을 경우 대비)
     await client.post(`agile/1.0/sprint/${nextSprint.id}/issue`, { issues: [newKey] });
@@ -162,6 +162,7 @@ export async function POST(req: NextRequest) {
     // 6. AUTOWAY 연쇄 생성 (상위 에픽 summary에 [GW] 포함 — daily sync와 동일 조건)
     const parentSummaryForGw = original.parent?.fields?.summary ?? '';
     const isGwEpic = parentSummaryForGw.includes('[GW]');
+    let autowayKey: string | null = null;
 
     if (isGwEpic) {
       if (!hmgClient) {
@@ -189,9 +190,9 @@ export async function POST(req: NextRequest) {
         if (!newAutowayResult.success || !newAutowayResult.data) {
           cascadeLog.push(`[ERROR] AUTOWAY 생성 실패: ${newAutowayResult.error}`);
         } else {
-          const newAutowayKey = newAutowayResult.data.key;
-          const autowayUrl = `${JIRA_ENDPOINTS.HMG}/browse/${newAutowayKey}`;
-          cascadeLog.push(`AUTOWAY 연쇄 생성: ${newAutowayKey} → ${autowayUrl}`);
+          autowayKey = newAutowayResult.data.key;
+          const autowayUrl = `${JIRA_ENDPOINTS.HMG}/browse/${autowayKey}`;
+          cascadeLog.push(`AUTOWAY 연쇄 생성: ${autowayKey} → ${autowayUrl}`);
 
           const saveResult = await client.put(`issue/${newKey}`, {
             fields: { [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: autowayUrl },
@@ -211,6 +212,10 @@ export async function POST(req: NextRequest) {
       newKey,
       newUrl: `${JIRA_ENDPOINTS.IGNITE}/browse/${newKey}`,
       nextSprint: { id: nextSprint.id, name: nextSprint.name },
+      kqKey,
+      kqUrl: kqKey ? `${JIRA_ENDPOINTS.IGNITE}/browse/${kqKey}` : null,
+      autowayKey,
+      autowayUrl: autowayKey ? `${JIRA_ENDPOINTS.HMG}/browse/${autowayKey}` : null,
       cascadeLog,
     });
   } catch (err) {
