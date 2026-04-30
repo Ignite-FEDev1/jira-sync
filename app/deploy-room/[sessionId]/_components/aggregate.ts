@@ -1,4 +1,4 @@
-import { normalizeName } from '@/lib/services/deploy-room/utils';
+import { namesMatch } from '@/lib/services/deploy-room/utils';
 import type {
   ChecklistItemStatus,
   ChecklistUserStatus,
@@ -28,9 +28,12 @@ export function getAggregate(
   const doneUsers: string[] = [];
 
   for (const p of activeParticipants) {
-    const s = itemStatuses.find(
-      (st) => st.userName === p || normalizeName(st.userName) === normalizeName(p)
-    );
+    // 한 사용자에 대해 표기 차이로 row가 둘 이상일 수 있음 → 최신 updatedAt 우선
+    const s = itemStatuses
+      .filter((st) => namesMatch(st.userName, p))
+      .sort(
+        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      )[0];
     if (!s || s.status === 'pending') pendingUsers.push(p);
     else if (s.status === 'in_progress') inProgressUsers.push(p);
     else if (s.status === 'done') doneUsers.push(p);
@@ -49,6 +52,24 @@ export function cycleStatus(s: ChecklistItemStatus): ChecklistItemStatus {
   if (s === 'pending') return 'in_progress';
   if (s === 'in_progress') return 'done';
   return 'pending';
+}
+
+/**
+ * (item, user) 조합의 현재 상태를 namesMatch + 최신 updatedAt 정책으로 조회.
+ * page / hook / panel 모두 동일 정책을 사용하도록 단일화.
+ */
+export function findUserStatus(
+  userStatuses: ChecklistUserStatus[],
+  itemId: string,
+  userName: string
+): ChecklistItemStatus {
+  return (
+    userStatuses
+      .filter((s) => s.checklistItemId === itemId && namesMatch(s.userName, userName))
+      .sort(
+        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      )[0]?.status ?? 'pending'
+  );
 }
 
 // ---------- MR stage ----------

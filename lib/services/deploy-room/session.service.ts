@@ -5,6 +5,7 @@ import type {
   DeployRoomChecklistItem,
   DeployRoomSession,
   DeployRoomSessionStatus,
+  DeployRoomSessionWithProgress,
 } from '@/lib/types/deploy-room';
 import {
   DEFAULT_TEAM_ID,
@@ -17,6 +18,7 @@ import {
   type ChecklistRow,
   type SessionRow,
 } from './mappers';
+import { normalizeName } from './utils';
 import { getTemplateById } from './template.service';
 import { recordTimeline } from './timeline.service';
 import { importMrsForSession } from './gitlab.service';
@@ -31,6 +33,111 @@ export async function listSessions(): Promise<DeployRoomSession[]> {
 
   if (error) throw new Error(`세션 목록 조회 실패: ${error.message}`);
   return (data as SessionRow[]).map(toSession);
+}
+
+/**
+ * 세션 목록 + 진행률(완료 항목수 / 전체 항목수) 일괄 계산.
+ * 정책은 상세 페이지의 getAggregate와 동일 (assignee별 expected participants 모두 done 이어야 완료).
+ */
+export async function listSessionsWithProgress(): Promise<DeployRoomSessionWithProgress[]> {
+  const sessions = await listSessions();
+  if (sessions.length === 0) return [];
+
+  const sessionIds = sessions.map((s) => s.id);
+  const teamIds = Array.from(
+    new Set(sessions.map((s) => s.teamId).filter((x): x is string => !!x))
+  );
+
+  const [checklistResult, statusesResult, usersResult, teamsResult] = await Promise.all([
+    dbServer
+      .from('deploy_room_checklist_items')
+      .select('id, session_id, assignee')
+      .in('session_id', sessionIds),
+    dbServer
+      .from('deploy_room_checklist_user_status')
+      .select('checklist_item_id, user_name, status, updated_at')
+      .in('session_id', sessionIds),
+    teamIds.length > 0
+      ? dbServer.from('users').select('id, name, team_id').in('team_id', teamIds)
+      : Promise.resolve({ data: [], error: null }),
+    teamIds.length > 0
+      ? dbServer.from('teams').select('id, leader_id').in('id', teamIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+
+  if (checklistResult.error) throw new Error(checklistResult.error.message);
+  if (statusesResult.error) throw new Error(statusesResult.error.message);
+
+  type ItemRow = { id: string; session_id: string; assignee: string };
+  type StatusRow = { checklist_item_id: string; user_name: string; status: string; updated_at: string };
+  type UserRow = { id: string; name: string; team_id: string };
+  type TeamRow = { id: string; leader_id: string | null };
+
+  const itemsBySession = new Map<string, ItemRow[]>();
+  for (const c of (checklistResult.data ?? []) as ItemRow[]) {
+    if (!itemsBySession.has(c.session_id)) itemsBySession.set(c.session_id, []);
+    itemsBySession.get(c.session_id)!.push(c);
+  }
+
+  const statusesByItem = new Map<string, StatusRow[]>();
+  for (const s of (statusesResult.data ?? []) as StatusRow[]) {
+    if (!statusesByItem.has(s.checklist_item_id)) statusesByItem.set(s.checklist_item_id, []);
+    statusesByItem.get(s.checklist_item_id)!.push(s);
+  }
+
+  const usersByTeam = new Map<string, UserRow[]>();
+  for (const u of (usersResult.data ?? []) as UserRow[]) {
+    if (!usersByTeam.has(u.team_id)) usersByTeam.set(u.team_id, []);
+    usersByTeam.get(u.team_id)!.push(u);
+  }
+
+  const teamLeaders = new Map<string, string | null>();
+  for (const t of (teamsResult.data ?? []) as TeamRow[]) {
+    teamLeaders.set(t.id, t.leader_id);
+  }
+
+  return sessions.map((session) => {
+    const items = itemsBySession.get(session.id) ?? [];
+    const totalCount = items.length;
+    if (totalCount === 0) {
+      return { ...session, doneCount: 0, totalCount: 0 };
+    }
+
+    const teamUsers = session.teamId ? usersByTeam.get(session.teamId) ?? [] : [];
+    const inactiveSet = new Set((session.inactiveParticipants ?? []).map(normalizeName));
+    const allMembers = teamUsers.map((u) => normalizeName(u.name));
+    const activeMembers = allMembers.filter((n) => !inactiveSet.has(n));
+
+    const leaderId = session.teamId ? teamLeaders.get(session.teamId) ?? null : null;
+    const leader = teamUsers.find((u) => u.id === leaderId);
+    const leaderName = leader ? normalizeName(leader.name) : null;
+
+    const doneCount = items.reduce((acc, item) => {
+      let participants: string[];
+      if (!leaderName || item.assignee === 'all') {
+        participants = activeMembers;
+      } else if (item.assignee === 'leader') {
+        participants = activeMembers.filter((n) => n === leaderName);
+      } else {
+        participants = activeMembers.filter((n) => n !== leaderName);
+      }
+      if (participants.length === 0) return acc;
+
+      const itemStatuses = statusesByItem.get(item.id) ?? [];
+      const allDone = participants.every((p) => {
+        const latest = itemStatuses
+          .filter((s) => normalizeName(s.user_name) === p)
+          .sort(
+            (a, b) =>
+              new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+          )[0];
+        return latest?.status === 'done';
+      });
+      return allDone ? acc + 1 : acc;
+    }, 0);
+
+    return { ...session, doneCount, totalCount };
+  });
 }
 
 export async function getSession(

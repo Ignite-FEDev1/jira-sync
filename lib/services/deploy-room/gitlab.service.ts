@@ -2,6 +2,7 @@ import https from 'https';
 import axios from 'axios';
 import { dbServer } from '@/lib/db';
 import { extractGitlabProjectPath } from '@/lib/constants/deploy-room';
+import { matchesLabel } from './utils';
 import { recordTimeline } from './timeline.service';
 
 // 사내망 SSL 회피 (Jira 서비스와 동일 패턴)
@@ -26,22 +27,6 @@ function getGitlabConfig(): { baseUrl: string; token: string } {
     throw new Error('GITLAB_TOKEN 환경변수가 설정되지 않았습니다');
   }
   return { baseUrl: baseUrl.replace(/\/$/, ''), token };
-}
-
-/**
- * 라벨 정규화: 모든 공백 제거 후 소문자 변환
- * "비정기 배포 ( 260416 )" → "비정기배포(260416)"
- */
-function normalizeLabel(label: string): string {
-  return label.replace(/\s+/g, '').toLowerCase();
-}
-
-/**
- * MR의 라벨 목록 중 하나라도 기대 라벨과 정규화 매칭되는지 확인
- */
-function matchesLabel(mrLabels: string[], expected: string): boolean {
-  const norm = normalizeLabel(expected);
-  return mrLabels.some((l) => normalizeLabel(l) === norm);
 }
 
 /**

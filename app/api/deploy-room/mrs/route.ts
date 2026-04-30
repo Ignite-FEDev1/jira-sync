@@ -7,7 +7,7 @@ import { recordTimeline } from '@/lib/services/deploy-room/timeline.service';
 export async function POST(request: NextRequest) {
   try {
     const { sessionId, mrs, actorUserId } = await request.json();
-    if (!sessionId || !Array.isArray(mrs) || mrs.length === 0) {
+    if (!sessionId || !Array.isArray(mrs)) {
       return NextResponse.json(
         { success: false, error: 'sessionId와 mrs 배열이 필요합니다' },
         { status: 400 }
@@ -38,22 +38,41 @@ export async function POST(request: NextRequest) {
       status: mr.status ?? 'pending',
     }));
 
-    const { data, error } = await dbServer
-      .from('deploy_room_mrs')
-      .upsert(rows, { onConflict: 'session_id,gitlab_project_path,mr_iid' })
-      .select('id');
+    // 1) 받아온 MR들을 upsert (0건이면 스킵 — 곧이어 전체 삭제됨)
+    let inserted = 0;
+    let keepIds: string[] = [];
+    if (rows.length > 0) {
+      const { data, error } = await dbServer
+        .from('deploy_room_mrs')
+        .upsert(rows, { onConflict: 'session_id,gitlab_project_path,mr_iid' })
+        .select('id');
 
-    if (error) throw new Error(error.message);
+      if (error) throw new Error(error.message);
+      inserted = data?.length ?? 0;
+      keepIds = (data ?? []).map((r) => r.id as string);
+    }
+
+    // 2) 이번 동기화에 포함되지 않은 기존 MR 삭제 (라벨 제거되거나 매칭 0건인 경우 정리)
+    let deleteQuery = dbServer
+      .from('deploy_room_mrs')
+      .delete({ count: 'exact' })
+      .eq('session_id', sessionId);
+    if (keepIds.length > 0) {
+      deleteQuery = deleteQuery.not('id', 'in', `(${keepIds.join(',')})`);
+    }
+    const { count, error: delError } = await deleteQuery;
+    if (delError) throw new Error(delError.message);
+    const deleted = count ?? 0;
 
     await recordTimeline({
       sessionId,
       actorUserId,
       action: 'gitlab.import.success',
       target: null,
-      payload: { inserted: data?.length ?? 0, source: 'browser' },
+      payload: { inserted, deleted, source: 'browser' },
     });
 
-    return NextResponse.json({ success: true, inserted: data?.length ?? 0 });
+    return NextResponse.json({ success: true, inserted, deleted });
   } catch (error) {
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : String(error) },

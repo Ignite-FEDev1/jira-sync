@@ -28,7 +28,7 @@ import { OverviewChecklistPanel } from './_components/overview-checklist-panel';
 import { PageHeader } from './_components/page-header';
 import { SessionMetaHeader } from './_components/session-meta-header';
 import { TimelinePanel } from './_components/timeline-panel';
-import { cycleStatus, getAggregate } from './_components/aggregate';
+import { cycleStatus, findUserStatus, getAggregate } from './_components/aggregate';
 import { useUpdateUserStatus } from './_components/use-user-status';
 
 interface TeamInfo {
@@ -180,20 +180,17 @@ export default function DeployRoomDetailPage() {
       onUserStatusChange: ({ type, newRow }) => {
         if (type === 'DELETE' || !newRow) return;
         setUserStatuses((prev) => {
-          const exists = prev.some(
+          const idx = prev.findIndex(
             (s) =>
               s.checklistItemId === newRow.checklistItemId &&
               s.userName === newRow.userName
           );
-          if (exists) {
-            return prev.map((s) =>
-              s.checklistItemId === newRow.checklistItemId &&
-              s.userName === newRow.userName
-                ? newRow
-                : s
-            );
-          }
-          return [...prev, newRow];
+          if (idx === -1) return [...prev, newRow];
+          // 로컬이 더 최신이면 무시 — 낙관적 업데이트가 stale broadcast로 덮이지 않게
+          const localTs = new Date(prev[idx].updatedAt).getTime();
+          const incomingTs = new Date(newRow.updatedAt).getTime();
+          if (incomingTs < localTs) return prev;
+          return prev.map((s, i) => (i === idx ? newRow : s));
         });
       },
     });
@@ -219,10 +216,7 @@ export default function DeployRoomDetailPage() {
     async (itemId: string) => {
       const myName = currentUser?.name;
       if (!myName) return;
-      const current =
-        userStatuses.find(
-          (s) => s.checklistItemId === itemId && s.userName === myName
-        )?.status ?? 'pending';
+      const current = findUserStatus(userStatuses, itemId, myName);
       await updateUserStatus(itemId, myName, cycleStatus(current));
     },
     [currentUser?.name, userStatuses, updateUserStatus]
@@ -233,6 +227,16 @@ export default function DeployRoomDetailPage() {
       void updateUserStatus(itemId, userName, 'done');
     },
     [updateUserStatus]
+  );
+
+  const handlePropagateAllDone = useCallback(
+    async (itemId: string) => {
+      const myName = currentUser?.name;
+      if (!myName) return;
+      await updateUserStatus(itemId, myName, 'done', { propagate: true });
+      toast.success('팀 전체를 완료 처리했습니다');
+    },
+    [currentUser?.name, updateUserStatus]
   );
 
   // 참여자 ON/OFF 토글
@@ -366,38 +370,37 @@ export default function DeployRoomDetailPage() {
         />
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <div className="flex flex-col gap-4">
-            <OverviewChecklistPanel
+          <OverviewChecklistPanel
+            checklist={checklist}
+            userStatuses={userStatuses}
+            doneCount={doneCount}
+            getParticipantsForItem={getParticipantsForItem}
+            onForceUserDone={handleForceUserDone}
+          />
+          {myName && (
+            <MyChecklistPanel
+              myName={myName}
+              isLeader={isLeader}
               checklist={checklist}
               userStatuses={userStatuses}
-              doneCount={doneCount}
-              getParticipantsForItem={getParticipantsForItem}
-              onForceUserDone={handleForceUserDone}
+              onCycle={handleCycleMyStatus}
+              onPropagateAllDone={isLeader ? handlePropagateAllDone : undefined}
             />
-            {myName && (
-              <MyChecklistPanel
-                myName={myName}
-                isLeader={isLeader}
-                checklist={checklist}
-                userStatuses={userStatuses}
-                onCycle={handleCycleMyStatus}
-              />
-            )}
-          </div>
-
-          <MrPanel
-            session={session}
-            mrs={mrs}
-            mrsByAssignee={mrsByAssignee}
-            templateGitlabProjects={teamInfo.gitlabProjects}
-            gitlabToken={teamInfo.gitlabToken}
-            actorUserId={currentUser?.id}
-            onMrUpdated={(updated) =>
-              setMrs((prev) => prev.map((m) => (m.id === updated.id ? updated : m)))
-            }
-            onMrsImported={refreshMrs}
-          />
+          )}
         </div>
+
+        <MrPanel
+          session={session}
+          mrs={mrs}
+          mrsByAssignee={mrsByAssignee}
+          templateGitlabProjects={teamInfo.gitlabProjects}
+          gitlabToken={teamInfo.gitlabToken}
+          actorUserId={currentUser?.id}
+          onMrUpdated={(updated) =>
+            setMrs((prev) => prev.map((m) => (m.id === updated.id ? updated : m)))
+          }
+          onMrsImported={refreshMrs}
+        />
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <ConfluenceTasksPanel

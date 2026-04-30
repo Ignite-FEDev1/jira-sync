@@ -39,13 +39,16 @@ export async function POST(request: NextRequest) {
       sessionId: string;
       userName: string;
       status: ChecklistItemStatus;
+      propagate?: boolean;
     };
 
-    const { checklistItemId, sessionId, userName, status } = body;
-    if (!checklistItemId || !sessionId || !userName || !status) {
+    const { checklistItemId, sessionId, userName: rawUserName, status, propagate } = body;
+    if (!checklistItemId || !sessionId || !rawUserName || !status) {
       return NextResponse.json({ success: false, error: '필수 파라미터 누락' }, { status: 400 });
     }
 
+    // user_name은 정규화하여 저장 — '손현지' / '손현지/책임' 같은 표기 차이로 row가 중복되지 않도록
+    const userName = normalizeName(rawUserName);
     const now = new Date().toISOString();
 
     const { data, error } = await dbServer
@@ -65,7 +68,8 @@ export async function POST(request: NextRequest) {
 
     if (error || !data) throw new Error(error?.message ?? 'unknown');
 
-    if (status === 'done') {
+    // 전파는 팀장이 명시적으로 요청했을 때만 (실수로 토글 시 팀원 상태가 'done'으로 고착되는 것을 방지)
+    if (propagate && status === 'done') {
       await propagateLeaderDone(sessionId, checklistItemId, userName, now);
     }
 
@@ -126,7 +130,7 @@ async function propagateLeaderDone(
       .map((m) => ({
         session_id: sessionId,
         checklist_item_id: checklistItemId,
-        user_name: m.name,
+        user_name: normalizeName(m.name),
         status: 'done' as const,
         updated_at: now,
       }));

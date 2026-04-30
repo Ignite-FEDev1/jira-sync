@@ -112,7 +112,6 @@ export const MR_STATUS_LABELS: Record<DeployRoomMrStatus, string> = {
 
 /**
  * deployDate(YYYY-MM-DD) + deployType → GitLab 라벨 필터 문자열
- * hotfix는 별도 라벨 규칙이 없으므로 null 반환
  */
 export function getGitlabLabelFilter(
   deployType: DeployType,
@@ -121,6 +120,7 @@ export function getGitlabLabelFilter(
   const yyMMdd = deployDateToYYMMDD(deployDate);
   if (deployType === 'regular') return `정기배포(${yyMMdd})`;
   if (deployType === 'adhoc') return `비정기배포(${yyMMdd})`;
+  if (deployType === 'hotfix') return `핫픽스(${yyMMdd})`;
   return null;
 }
 

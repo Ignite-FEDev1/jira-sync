@@ -31,7 +31,7 @@ export function OverviewChecklistPanel({
     checklist.length > 0 ? Math.round((doneCount / checklist.length) * 100) : 0;
 
   return (
-    <div className="h-[400px] flex flex-col bg-slate-50 rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+    <div className="h-[640px] flex flex-col bg-slate-50 rounded-xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-5 pt-5 pb-4 border-b border-slate-200 shrink-0">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">

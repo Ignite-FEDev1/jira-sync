@@ -45,6 +45,11 @@ export interface DeployRoomSession {
   updatedAt: string;
 }
 
+export interface DeployRoomSessionWithProgress extends DeployRoomSession {
+  doneCount: number;
+  totalCount: number;
+}
+
 export interface DeployRoomChecklistItem {
   id: string;
   sessionId: string;

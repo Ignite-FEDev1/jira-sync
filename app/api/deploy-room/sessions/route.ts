@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   createSession,
-  listSessions,
+  listSessionsWithProgress,
 } from '@/lib/services/deploy-room/session.service';
 import type { CreateDeployRoomSessionRequest } from '@/lib/types/deploy-room';
 
 export async function GET() {
   try {
-    const sessions = await listSessions();
+    const sessions = await listSessionsWithProgress();
     return NextResponse.json({ success: true, sessions });
   } catch (error) {
     return NextResponse.json(

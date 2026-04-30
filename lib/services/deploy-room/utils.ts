@@ -43,3 +43,17 @@ export function formatTime(iso: string): string {
     minute: '2-digit',
   });
 }
+
+// ---- GitLab 라벨 매칭 ----
+// "비정기 배포 ( 260416 )" 같은 표기 변형도 허용
+
+/** 공백 제거 + 소문자 변환 */
+export function normalizeLabel(label: string): string {
+  return label.replace(/\s+/g, '').toLowerCase();
+}
+
+/** MR의 현재 라벨 목록에 기대 라벨이 포함되어 있는지 (정규화 매칭) */
+export function matchesLabel(mrLabels: string[], expected: string): boolean {
+  const norm = normalizeLabel(expected);
+  return mrLabels.some((l) => normalizeLabel(l) === norm);
+}
