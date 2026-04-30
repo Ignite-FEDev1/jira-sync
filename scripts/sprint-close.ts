@@ -14,7 +14,7 @@
 process.env.BATCH_MODE = 'true';
 
 import { JiraClient } from '@/lib/services/jira/client';
-import { FEHG_TRANSITIONS, IGNITE_CUSTOM_FIELDS } from '@/lib/constants/jira';
+import { FEHG_TRANSITIONS, IGNITE_CUSTOM_FIELDS, JIRA_ENDPOINTS } from '@/lib/constants/jira';
 import { getAllUsers } from '@/lib/services/user-lookup';
 import { sendSprintCloseEmail } from '@/lib/services/email/resend-client';
 import { buildSprintCloseEmailHtml, SprintCloseResult } from '@/lib/services/email/sprint-close-email';
@@ -26,6 +26,7 @@ import {
   buildNextSprintDates,
 } from '@/lib/services/sync/sprint-mapper';
 import { SprintInfo } from '@/lib/services/sync/types';
+import { patchAutomationKqTicket, FehgIssueLink } from '@/lib/services/sprint-close/cascade-kq';
 
 // ─── 타입 ────────────────────────────────────────────────────
 
@@ -44,9 +45,11 @@ interface JiraIssue {
     assignee?: { accountId: string; displayName: string } | null;
     priority?: { name: string } | null;
     issuetype?: { name: string; id: string };
-    parent?: { key: string; id: string };
+    parent?: { key: string; id: string; fields?: { summary?: string } };
     labels?: string[];
     customfield_10015?: string | null; // 시작일
+    customfield_10306?: string | null; // HMG Jira 링크 (AUTOWAY 연동)
+    issuelinks?: FehgIssueLink[];
   };
 }
 
@@ -76,12 +79,14 @@ async function fetchActiveSprintTickets(
     'parent',
     'labels',
     'customfield_10015', // 시작일
+    'customfield_10306', // HMG Jira 링크 (AUTOWAY)
+    'issuelinks',        // Blocks → KQ-* (KQ 연쇄 생성용)
   ].join(',');
 
   const result = await client.get<{ issues: JiraIssue[]; total: number }>(
     'search/jql',
     {
-      jql: `project = FEHG AND sprint = ${sprintId}`,
+      jql: `project = FEHG AND sprint = ${sprintId} AND issuetype != Epic`,
       fields,
       maxResults: 200,
     }
@@ -126,19 +131,19 @@ async function createCloneTicket(
   nextSprintId: number,
   nextMonthLabel: string
 ): Promise<string> {
+  // parent는 의도적으로 제외: 에픽 소속 티켓은 생성 시 parent를 포함하면 에픽 스프린트를
+  // Jira가 즉시 상속시켜 Agile API sprint 설정을 덮어씀. parent는 sprint 고정 후 별도 PUT.
   const fields: Record<string, unknown> = {
     project: { key: 'FEHG' },
     summary: `${original.fields.summary} - ${nextMonthLabel}`,
     issuetype: original.fields.issuetype,
     [IGNITE_CUSTOM_FIELDS.SPRINT]: nextSprintId,
+    [IGNITE_CUSTOM_FIELDS.STORY_POINTS]: null, // 추정치 초기화 (프로젝트 기본값 방지)
   };
 
   if (original.fields.description) fields.description = original.fields.description;
-  if (original.fields.assignee) {
-    fields.assignee = { accountId: original.fields.assignee.accountId };
-  }
+  if (original.fields.assignee) fields.assignee = { accountId: original.fields.assignee.accountId };
   if (original.fields.priority) fields.priority = original.fields.priority;
-  if (original.fields.parent) fields.parent = { key: original.fields.parent.key };
   if (original.fields.labels?.length) fields.labels = original.fields.labels;
 
   const result = await client.post<{ id: string; key: string }>('issue', { fields });
@@ -148,19 +153,23 @@ async function createCloneTicket(
 
   const newKey = result.data.key;
 
-  // parent 상속 등으로 스프린트가 덮어씌워질 수 있으므로 생성 후 강제 재설정
-  // Jira 처리 지연으로 첫 시도 실패 시 1회 재시도
-  let sprintFixResult = await client.put(`issue/${newKey}`, {
-    fields: { [IGNITE_CUSTOM_FIELDS.SPRINT]: nextSprintId },
+  // 에픽 스프린트 상속 방지: Agile API로 다음 달 스프린트 1차 고정
+  const sprintFix1 = await client.post(`agile/1.0/sprint/${nextSprintId}/issue`, {
+    issues: [newKey],
   });
-  if (!sprintFixResult.success) {
-    await new Promise((r) => setTimeout(r, 1500));
-    sprintFixResult = await client.put(`issue/${newKey}`, {
-      fields: { [IGNITE_CUSTOM_FIELDS.SPRINT]: nextSprintId },
-    });
+  if (!sprintFix1.success) {
+    throw new Error(`스프린트 변경 실패 (${newKey}): ${sprintFix1.error}`);
   }
-  if (!sprintFixResult.success) {
-    throw new Error(`스프린트 강제 재설정 2회 모두 실패 (${newKey}): ${sprintFixResult.error}`);
+
+  // parent 설정 (sprint 고정 후 적용)
+  // parent PUT 시 Jira가 에픽 스프린트로 재설정할 수 있어 Agile API로 2차 재고정
+  if (original.fields.parent) {
+    await client.put(`issue/${newKey}`, {
+      fields: { parent: { key: original.fields.parent.key } },
+    });
+    await client.post(`agile/1.0/sprint/${nextSprintId}/issue`, {
+      issues: [newKey],
+    });
   }
 
   return newKey;
@@ -212,6 +221,82 @@ async function changeTicketSprint(
 
 // ─── 메인 ────────────────────────────────────────────────────
 
+/**
+ * 클론 FEHG 티켓에 대해 AUTOWAY 티켓을 연쇄 생성
+ *
+ * daily sync와 동일한 조건 사용:
+ * - 상위 에픽 summary에 [GW] 포함 시 생성
+ * - 이미 customfield_10306이 있으면 생성 불필요 (daily sync가 업데이트 처리)
+ */
+async function cascadeLinkedTickets(
+  igniteClient: JiraClient,
+  hmgClient: JiraClient | null,
+  original: JiraIssue,
+  cloneKey: string,
+  cloneSummary: string,
+  userByAccountId: Map<string, { name: string; igniteAccountId: string; hmgAccountId?: string | null }>,
+  isDryRun: boolean
+): Promise<void> {
+  // daily sync와 동일한 조건: 상위 에픽 summary에 [GW] 포함 시 AUTOWAY 생성
+  const parentKey = original.fields.parent?.key;
+  const parentSummary = original.fields.parent?.fields?.summary ?? '';
+  if (!parentKey || !parentSummary.includes('[GW]')) {
+    console.log(`    [SKIP] AUTOWAY 연쇄 생성 — [GW] 에픽 아님 (${parentSummary || parentKey || '부모 없음'})`);
+    return;
+  }
+
+  if (isDryRun) {
+    console.log(`    [DRY RUN] AUTOWAY 연쇄 생성 예정 ([GW] 에픽: ${parentSummary})`);
+    return;
+  }
+
+  if (!hmgClient) {
+    console.log(`    [SKIP] AUTOWAY 연쇄 생성 불가 — HMG Jira 인증정보 없음`);
+    return;
+  }
+
+  const accountId = original.fields.assignee?.accountId ?? null;
+  const dbUser = accountId ? userByAccountId.get(accountId) : undefined;
+
+  try {
+    const newAutowayResult = await hmgClient.post<{ id: string; key: string }>('issue', {
+      fields: {
+        project: { key: 'AUTOWAY' },
+        summary: cloneSummary,
+        issuetype: { name: '작업' },
+        ...(dbUser?.hmgAccountId
+          ? {
+              assignee: { accountId: dbUser.hmgAccountId },
+              reporter: { accountId: dbUser.hmgAccountId },
+            }
+          : {}),
+        ...(original.fields.description ? { description: original.fields.description } : {}),
+        ...(original.fields.labels?.length ? { labels: original.fields.labels } : {}),
+      },
+    });
+
+    if (!newAutowayResult.success || !newAutowayResult.data) {
+      console.error(`    [ERROR] AUTOWAY 연쇄 생성 실패: ${newAutowayResult.error}`);
+      return;
+    }
+    const newAutowayKey = newAutowayResult.data.key;
+    const autowayUrl = `${JIRA_ENDPOINTS.HMG}/browse/${newAutowayKey}`;
+    console.log(`    -> AUTOWAY 연쇄 생성: ${newAutowayKey} (${autowayUrl})`);
+
+    // 클론 FEHG의 customfield_10306에 AUTOWAY URL 저장 (daily sync와 동일)
+    const saveResult = await igniteClient.put(`issue/${cloneKey}`, {
+      fields: { [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: autowayUrl },
+    });
+    if (!saveResult.success) {
+      console.warn(`    [WARN] ${cloneKey} AUTOWAY 링크 저장 실패 (티켓은 생성됨): ${saveResult.error}`);
+    } else {
+      console.log(`    -> ${cloneKey}.customfield_10306 = ${autowayUrl}`);
+    }
+  } catch (err) {
+    console.error(`    [ERROR] AUTOWAY 연쇄 처리 예외:`, err);
+  }
+}
+
 async function main() {
   console.log('========================================');
   console.log('스프린트 마감 배치 시작');
@@ -243,16 +328,36 @@ async function main() {
   const userByAccountId = new Map(users.map((u) => [u.igniteAccountId, u]));
   const user = users.find((u) => u.igniteJiraEmail && u.igniteJiraApiToken);
   if (!user) {
-    console.error('Ignite Jira 인증정보가 있는 사용자를 찾을 수 없습니다.');
-    process.exit(1);
+    // 로컬 테스트용 fallback: 환경변수에 직접 설정된 경우 사용
+    if (process.env.IGNITE_JIRA_EMAIL && process.env.IGNITE_JIRA_API_TOKEN) {
+      console.log(`[FALLBACK] DB 인증정보 없음 — 환경변수 사용: ${process.env.IGNITE_JIRA_EMAIL}\n`);
+    } else {
+      console.error('Ignite Jira 인증정보가 있는 사용자를 찾을 수 없습니다.');
+      process.exit(1);
+    }
+  } else {
+    // JiraClient.directRequest()가 읽는 환경변수 설정
+    process.env.IGNITE_JIRA_EMAIL = user.igniteJiraEmail;
+    process.env.IGNITE_JIRA_API_TOKEN = user.igniteJiraApiToken;
+    console.log(`Jira 인증 계정: ${user.name} (${user.igniteJiraEmail})\n`);
   }
 
-  // JiraClient.directRequest()가 읽는 환경변수 설정
-  process.env.IGNITE_JIRA_EMAIL = user.igniteJiraEmail;
-  process.env.IGNITE_JIRA_API_TOKEN = user.igniteJiraApiToken;
-  console.log(`Jira 인증 계정: ${user.name} (${user.igniteJiraEmail})\n`);
-
   const client = new JiraClient('ignite');
+
+  // HMG Jira 클라이언트 (AUTOWAY 연쇄 생성용 — 인증정보 없으면 null)
+  const hmgUser = users.find((u) => u.hmgJiraEmail && u.hmgJiraApiToken);
+  let hmgClient: JiraClient | null = null;
+  if (hmgUser) {
+    process.env.HMG_JIRA_EMAIL = hmgUser.hmgJiraEmail;
+    process.env.HMG_JIRA_API_TOKEN = hmgUser.hmgJiraApiToken;
+    hmgClient = new JiraClient('hmg');
+    console.log(`HMG Jira 인증 계정: ${hmgUser.name} (${hmgUser.hmgJiraEmail})\n`);
+  } else if (process.env.HMG_JIRA_EMAIL && process.env.HMG_JIRA_API_TOKEN) {
+    hmgClient = new JiraClient('hmg');
+    console.log(`[FALLBACK] HMG DB 인증정보 없음 — 환경변수 사용: ${process.env.HMG_JIRA_EMAIL}\n`);
+  } else {
+    console.log('HMG Jira 인증정보 없음 — AUTOWAY 연쇄 생성 비활성\n');
+  }
 
   // ── FEHG 액티브 스프린트 조회 ────────────────────────────
   console.log('[1/4] FEHG 액티브 스프린트 조회...');
@@ -290,8 +395,6 @@ async function main() {
   // ── 티켓별 상태 처리 ──────────────────────────────────────
   console.log('[4/4] 티켓 처리...');
   const result: SprintCloseResult = { moved: [], cloned: [], errors: [] };
-  // 개인 이메일 발송 대상: accountId -> { name, email }
-  const personalEmailTargets = new Map<string, { name: string; email: string }>();
 
   for (const ticket of tickets) {
     const sprints = ticket.fields.customfield_10020 ?? [];
@@ -301,12 +404,6 @@ async function main() {
     // DB 사용자 이름 우선 사용 (currentUserName과 일치 보장), 없으면 Jira displayName
     const dbUser = accountId ? userByAccountId.get(accountId) : undefined;
     const assigneeName = dbUser?.name ?? ticket.fields.assignee?.displayName ?? null;
-
-    // 이메일 수신 대상 등록 (igniteJiraEmail이 있는 DB 사용자만)
-    const trimmedEmail = dbUser?.igniteJiraEmail?.trim();
-    if (accountId && dbUser && trimmedEmail && !personalEmailTargets.has(accountId)) {
-      personalEmailTargets.set(accountId, { name: dbUser.name, email: trimmedEmail });
-    }
 
     // 완료 상태: 그대로 스킵 (스프린트 중복 여부 관계없이)
     if (statusKey === 'done') {
@@ -324,6 +421,12 @@ async function main() {
           } else {
             console.log(`  [DRY RUN 진행중] ${ticket.key}: 완료 전환 + 신규 발행 예정 (변경 없음)`);
           }
+          await patchAutomationKqTicket(client, ticket.key, ticket.fields.issuelinks ?? [], '(신규발행예정)', nextSprintName, (msg) => console.log(`    ${msg}`), true);
+          await cascadeLinkedTickets(
+            client, hmgClient, ticket, '(신규발행예정)',
+            `${ticket.fields.summary} - ${nextMonthLabel}`,
+            userByAccountId, true
+          );
           result.cloned.push({
             originalKey: ticket.key,
             originalSummary: ticket.fields.summary,
@@ -347,7 +450,19 @@ async function main() {
           const newKey = await createCloneTicket(client, ticket, nextSprint.id, nextMonthLabel);
           console.log(`    -> 신규 발행: ${newKey}`);
 
+          // Cloners 링크 → 자동화 트리거 (KQ 자동 생성 + Blocks 링크)
           await linkCloners(client, ticket.key, newKey);
+
+          // 자동화 KQ 대기 후 원본 KQ 기준 필드 패치 (상위항목/컴포넌트/수정버전/스프린트)
+          await patchAutomationKqTicket(client, ticket.key, ticket.fields.issuelinks ?? [], newKey, nextSprintName, (msg) => console.log(`    ${msg}`));
+
+          // FEHG 클론 스프린트 재고정 (자동화가 리셋했을 경우 대비)
+          await client.post(`agile/1.0/sprint/${nextSprint.id}/issue`, { issues: [newKey] });
+          await cascadeLinkedTickets(
+            client, hmgClient, ticket, newKey,
+            `${ticket.fields.summary} - ${nextMonthLabel}`,
+            userByAccountId, false
+          );
 
           result.cloned.push({
             originalKey: ticket.key,
@@ -385,21 +500,9 @@ async function main() {
   console.log(`  오류:          ${result.errors.length}건`);
 
   // ── 이메일 발송 ────────────────────────────────────────────
+  // 팀 요약 이메일 1건만 fedev1@ignite.co.kr으로 발송 (담당자별 그룹, 개인 강조 없음)
+  // 개인 발송은 Resend 도메인 인증 없이 불가 (403 validation_error)
   if (process.env.RESEND_API_KEY) {
-    // 담당자별 개인 이메일 — 내 티켓 상단 + 팀 전체 하단
-    for (const { name, email } of personalEmailTargets.values()) {
-      const personalHtml = buildSprintCloseEmailHtml(
-        activeSprint.name, nextSprint.name, result,
-        { isDryRun, currentUserName: name }
-      );
-      try {
-        await sendSprintCloseEmail(personalHtml, activeSprint.name, nextSprint.name, { to: email, isDryRun });
-      } catch (err) {
-        console.error(`[이메일] 개인 발송 실패 (${name} <${email}>):`, err);
-      }
-    }
-
-    // 팀 요약 이메일 — fedev1@ignite.co.kr (담당자별 그룹, 개인 강조 없음)
     const summaryHtml = buildSprintCloseEmailHtml(activeSprint.name, nextSprint.name, result, { isDryRun });
     try {
       await sendSprintCloseEmail(summaryHtml, activeSprint.name, nextSprint.name, { isDryRun });

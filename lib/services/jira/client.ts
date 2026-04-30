@@ -86,12 +86,15 @@ export class JiraClient {
         };
       }
 
-      // 204 No Content (PUT 성공 등)
+      // 204 No Content (PUT, POST agile/sprint 등) 또는 빈 body 응답 (POST issueLink: 201 + empty body)
       if (response.status === 204) {
         return { success: true, data: {} as T };
       }
-
-      const data = await response.json();
+      const text = await response.text();
+      if (!text) {
+        return { success: true, data: {} as T };
+      }
+      const data = JSON.parse(text);
       return { success: true, data };
     } catch (error) {
       console.error(`[BATCH] Jira ${this.instance} API Error:`, error);
