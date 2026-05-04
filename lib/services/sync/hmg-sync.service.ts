@@ -11,15 +11,32 @@ import { jira } from '@/lib/services/jira';
 import { IGNITE_CUSTOM_FIELDS, JIRA_ENDPOINTS } from '@/lib/constants/jira';
 
 /**
- * AUTOWAY 이슈 생성 시 사용할 issuetype 캐시
- * - HMG Jira에서 프로젝트별로 허용되는 이슈 타입(이름/로캘)이 다를 수 있어 name 하드코딩이 깨질 수 있음
- * - 가능하면 issuetype "id"로 생성하도록 함
+ * HMG 프로젝트별 이슈타입 ID 캐시
+ * - 프로젝트마다 허용되는 이슈타입이 다름 (AUTOWAY: 작업/Task, HMGBOARD: 개발처리 등)
  */
-let autowayCreateIssueTypeIdCache: string | null = null;
+const createIssueTypeIdCache: Map<string, string> = new Map();
+
+/**
+ * HMG 프로젝트별 선호 이슈타입 이름 (위에서부터 우선 매칭)
+ */
+const PREFERRED_ISSUETYPE_NAMES: Record<string, string[]> = {
+  AUTOWAY: ['작업', 'Task', '업무', '스토리', 'Story', '버그', 'Bug'],
+  HMGBOARD: ['개발처리', '스토리', 'Story', '운영업무', '버그', 'Bug'],
+};
+
+const DEFAULT_PREFERRED_NAMES = [
+  '작업',
+  'Task',
+  '업무',
+  '스토리',
+  'Story',
+  '버그',
+  'Bug',
+];
 
 /**
  * HMG 프로젝트 동기화 서비스
- * FEHG → AUTOWAY 동기화 담당
+ * FEHG → AUTOWAY/HMGBOARD 동기화 담당
  */
 export class HMGSyncService {
   constructor(private logger: SyncLogger) {}
@@ -27,10 +44,14 @@ export class HMGSyncService {
   private async resolveCreateIssueType(targetProjectKey: string): Promise<
     { id: string } | { name: string }
   > {
-    // 이미 한번 찾았으면 재사용
-    if (autowayCreateIssueTypeIdCache) {
-      return { id: autowayCreateIssueTypeIdCache };
+    // 이미 한번 찾았으면 재사용 (프로젝트별)
+    const cached = createIssueTypeIdCache.get(targetProjectKey);
+    if (cached) {
+      return { id: cached };
     }
+
+    const fallbackName =
+      PREFERRED_ISSUETYPE_NAMES[targetProjectKey]?.[0] ?? '작업';
 
     try {
       const projectResult = await jira.hmg.getProject(targetProjectKey);
@@ -46,39 +67,36 @@ export class HMGSyncService {
 
       if (!issueTypes || issueTypes.length === 0) {
         this.logger.warning(
-          `${targetProjectKey}: 프로젝트 issueTypes 조회 실패(비어있음) → issuetype name으로 fallback`
+          `${targetProjectKey}: 프로젝트 issueTypes 조회 실패(비어있음) → issuetype name으로 fallback ("${fallbackName}")`
         );
-        return { name: '작업' };
+        return { name: fallbackName };
       }
 
       const nonSubtaskTypes = issueTypes.filter((t) => !t.subtask);
-      const preferredNames = [
-        '작업',
-        'Task',
-        '업무',
-        '스토리',
-        'Story',
-        '버그',
-        'Bug',
-      ];
+      const preferredNames =
+        PREFERRED_ISSUETYPE_NAMES[targetProjectKey] ?? DEFAULT_PREFERRED_NAMES;
 
-      const preferred = nonSubtaskTypes.find((t) =>
-        preferredNames.includes(t.name)
-      );
+      // 선호 이름 순서대로 매칭 (먼저 나오는 게 더 우선)
+      let preferred: typeof nonSubtaskTypes[number] | undefined;
+      for (const name of preferredNames) {
+        preferred = nonSubtaskTypes.find((t) => t.name === name);
+        if (preferred) break;
+      }
+
       const chosen = preferred ?? nonSubtaskTypes[0] ?? issueTypes[0];
 
-      autowayCreateIssueTypeIdCache = chosen.id;
+      createIssueTypeIdCache.set(targetProjectKey, chosen.id);
       this.logger.info(
         `${targetProjectKey}: issuetype 선택 → "${chosen.name}" (id=${chosen.id})`
       );
       return { id: chosen.id };
     } catch (e) {
       this.logger.warning(
-        `${targetProjectKey}: issuetype 조회 중 예외 → name fallback ("작업") - ${
+        `${targetProjectKey}: issuetype 조회 중 예외 → name fallback ("${fallbackName}") - ${
           e instanceof Error ? e.message : String(e)
         }`
       );
-      return { name: '작업' };
+      return { name: fallbackName };
     }
   }
 
@@ -184,7 +202,7 @@ export class HMGSyncService {
 
       // 1. 필드 매핑 (DB 기반 또는 하드코딩)
       const mappedFields = syncProfileId
-        ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey)
+        ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey, teamUsers)
         : mapFieldsForAutoway(fehgTicket, assigneeAccountId, teamUsers);
 
       const autowayIssueType = await this.resolveCreateIssueType(targetProjectKey);
@@ -240,7 +258,7 @@ export class HMGSyncService {
       return {
         fehgKey: fehgTicket.key,
         targetKey: createdKey,
-        targetProject: 'AUTOWAY',
+        targetProject: targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
         success: true,
         message: '신규 생성 및 동기화 완료',
         isNewlyCreated: true,
@@ -255,7 +273,7 @@ export class HMGSyncService {
       return {
         fehgKey: fehgTicket.key,
         targetKey: '',
-        targetProject: 'AUTOWAY',
+        targetProject: targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
         success: false,
         error: errorMessage,
       };
@@ -280,7 +298,7 @@ export class HMGSyncService {
 
       // 1. 필드 매핑 (DB 기반 또는 하드코딩)
       const mappedFields = syncProfileId
-        ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey)
+        ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey, teamUsers)
         : mapFieldsForAutoway(fehgTicket, assigneeAccountId, teamUsers);
 
       // 2. 소스 링크 필드 병합
@@ -317,7 +335,7 @@ export class HMGSyncService {
       return {
         fehgKey: fehgTicket.key,
         targetKey,
-        targetProject: 'AUTOWAY',
+        targetProject: targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
         success: true,
         message: '동기화 완료',
         isNewlyCreated: false,
@@ -330,7 +348,7 @@ export class HMGSyncService {
       return {
         fehgKey: fehgTicket.key,
         targetKey,
-        targetProject: 'AUTOWAY',
+        targetProject: targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
         success: false,
         error: errorMessage,
       };

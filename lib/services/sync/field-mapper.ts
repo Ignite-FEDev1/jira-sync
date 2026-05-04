@@ -14,7 +14,7 @@ import { mapSprintToTarget } from './sprint-mapper';
  */
 export async function mapFieldsForIgniteProject(
   fehgTicket: JiraIssue,
-  targetProject: 'KQ' | 'HDD' | 'HB'
+  targetProject: 'KQ' | 'HDD'
 ): Promise<Record<string, unknown>> {
   const fields: Record<string, unknown> = {};
   const fehgFields = fehgTicket.fields;

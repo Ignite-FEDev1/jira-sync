@@ -59,10 +59,21 @@ export function clearDbMappingCache() {
  */
 const ACCOUNT_FIELDS = ['assignee', 'reporter', 'creator'];
 
+/**
+ * 팀 사용자 정보 (브라우저 환경에서 account_map 폴백용)
+ * - dbServer는 브라우저에서 anon key로 동작 → users 테이블 RLS에 막힘
+ * - teamUsers를 메모리에서 먼저 lookup하면 브라우저에서도 매핑 가능
+ */
+export interface TeamUserForMapping {
+  igniteAccountId: string;
+  hmgAccountId: string;
+}
+
 export async function mapFieldsFromDb(
   fehgTicket: JiraIssue,
   profileId: string,
-  targetProjectKey: string
+  targetProjectKey: string,
+  teamUsers?: TeamUserForMapping[]
 ): Promise<Record<string, unknown>> {
   const mappings = await getFieldMappings(profileId);
   const fields: Record<string, unknown> = {};
@@ -118,7 +129,7 @@ export async function mapFieldsFromDb(
         if (sprint && sprint.length > 0) {
           const mappedSprintId = await mapSprintToTarget(
             sprint[0].name,
-            targetProjectKey as 'KQ' | 'HDD' | 'HB'
+            targetProjectKey as 'KQ' | 'HDD' | 'HMGBOARD'
           );
           if (mappedSprintId) {
             fields[target_field] = mappedSprintId;
@@ -132,7 +143,17 @@ export async function mapFieldsFromDb(
         const sourceValue = getFieldValue(fehgTicket, fehgFields, source_field);
         if (sourceValue && typeof sourceValue === 'object' && 'accountId' in sourceValue) {
           const igniteAccountId = (sourceValue as { accountId: string }).accountId;
-          const hmgAccountId = await lookupHmgAccountId(igniteAccountId);
+
+          // 1순위: teamUsers 메모리 lookup (브라우저 환경에서 RLS 우회)
+          let hmgAccountId: string | null =
+            teamUsers?.find((u) => u.igniteAccountId === igniteAccountId)
+              ?.hmgAccountId ?? null;
+
+          // 2순위: DB lookup (서버 환경, teamUsers 미제공 시)
+          if (!hmgAccountId) {
+            hmgAccountId = await lookupHmgAccountId(igniteAccountId);
+          }
+
           if (hmgAccountId) {
             fields[target_field] = { accountId: hmgAccountId };
           }

@@ -5,27 +5,44 @@ import { JiraClient } from '@/lib/services/jira/client';
 import { BOARD_IDS } from '@/lib/constants/jira';
 import { dbServer } from '@/lib/db';
 
+type JiraInstance = 'ignite' | 'hmg';
+
 /**
  * 스프린트 캐시 클래스
  * 동기화 세션 동안 스프린트 목록을 캐싱하여 API 호출 최소화
+ * 인스턴스별로 별도 클라이언트 사용 (Ignite/HMG)
  */
 class SprintCache {
-  private cache = new Map<number, SprintInfo[]>();
-  private client = new JiraClient('ignite');
+  private cache = new Map<string, SprintInfo[]>();
+  private clients: Record<JiraInstance, JiraClient> = {
+    ignite: new JiraClient('ignite'),
+    hmg: new JiraClient('hmg'),
+  };
 
-  async getSprintsForBoard(boardId: number): Promise<SprintInfo[]> {
-    if (this.cache.has(boardId)) {
-      return this.cache.get(boardId)!;
+  private cacheKey(instance: JiraInstance, boardId: number): string {
+    return `${instance}:${boardId}`;
+  }
+
+  async getSprintsForBoard(
+    boardId: number,
+    instance: JiraInstance = 'ignite'
+  ): Promise<SprintInfo[]> {
+    const key = this.cacheKey(instance, boardId);
+    if (this.cache.has(key)) {
+      return this.cache.get(key)!;
     }
 
-    const sprints = await this.fetchSprints(boardId);
-    this.cache.set(boardId, sprints);
+    const sprints = await this.fetchSprints(boardId, instance);
+    this.cache.set(key, sprints);
     return sprints;
   }
 
-  private async fetchSprints(boardId: number): Promise<SprintInfo[]> {
+  private async fetchSprints(
+    boardId: number,
+    instance: JiraInstance
+  ): Promise<SprintInfo[]> {
     try {
-      const result = await this.client.get<{
+      const result = await this.clients[instance].get<{
         values: Array<{
           id: number;
           name: string;
@@ -56,26 +73,33 @@ class SprintCache {
 // 싱글톤 인스턴스
 const sprintCache = new SprintCache();
 
-// 프로젝트별 board_id 캐시 (DB 조회 결과)
-const boardIdCache = new Map<string, number>();
+// 프로젝트별 board_id + instance 캐시 (DB 조회 결과)
+const boardInfoCache = new Map<string, { boardId: number; instance: JiraInstance }>();
 
-async function getBoardId(projectKey: string): Promise<number | null> {
-  if (boardIdCache.has(projectKey)) {
-    return boardIdCache.get(projectKey)!;
+async function getBoardInfo(
+  projectKey: string
+): Promise<{ boardId: number; instance: JiraInstance } | null> {
+  if (boardInfoCache.has(projectKey)) {
+    return boardInfoCache.get(projectKey)!;
   }
 
   const { data } = await dbServer
     .from('projects')
-    .select('board_id')
+    .select('board_id, jira_instance')
     .eq('name', projectKey)
     .single();
 
   if (data?.board_id) {
-    boardIdCache.set(projectKey, data.board_id);
-    return data.board_id;
+    const info = {
+      boardId: data.board_id,
+      instance: (data.jira_instance === 'hmg' ? 'hmg' : 'ignite') as JiraInstance,
+    };
+    boardInfoCache.set(projectKey, info);
+    return info;
   }
   return null;
 }
+
 
 /**
  * 소스 프로젝트 스프린트 이름에서 기간 추출
@@ -101,11 +125,21 @@ function convertToFullYearMonth(period: string): string {
 }
 
 /**
+ * 프로젝트 키 → 스프린트 이름 prefix
+ * HMGBOARD는 스프린트 이름에 'HB' 접두사를 사용 (예: "HB 202604")
+ * (옛 Ignite HB는 HMGBOARD로 이관됨, prefix는 그대로 유지)
+ */
+function getSprintNamePrefix(projectKey: string): string {
+  if (projectKey === 'HMGBOARD') return 'HB';
+  return projectKey;
+}
+
+/**
  * 대상 프로젝트의 스프린트 이름 생성
  * 예: "HB", "202511" → "HB 202511"
  */
 function buildTargetSprintName(projectKey: string, yearMonth: string): string {
-  return `${projectKey} ${yearMonth}`;
+  return `${getSprintNamePrefix(projectKey)} ${yearMonth}`;
 }
 
 /**
@@ -113,7 +147,7 @@ function buildTargetSprintName(projectKey: string, yearMonth: string): string {
  */
 export async function mapSprintToTarget(
   fehgSprintName: string | null,
-  targetProject: 'KQ' | 'HDD' | 'HB'
+  targetProject: 'KQ' | 'HDD' | 'HMGBOARD'
 ): Promise<number | null> {
   if (!fehgSprintName) return null;
 
@@ -127,10 +161,13 @@ export async function mapSprintToTarget(
   // 3. 대상 프로젝트 스프린트 이름 생성
   const targetSprintName = buildTargetSprintName(targetProject, fullYearMonth);
 
-  // 4. 대상 보드의 스프린트 조회 (캐시 사용)
-  const boardId = await getBoardId(targetProject);
-  if (!boardId) return null;
-  const targetSprints = await sprintCache.getSprintsForBoard(boardId);
+  // 4. 대상 보드의 스프린트 조회 (캐시 사용, 인스턴스별)
+  const boardInfo = await getBoardInfo(targetProject);
+  if (!boardInfo) return null;
+  const targetSprints = await sprintCache.getSprintsForBoard(
+    boardInfo.boardId,
+    boardInfo.instance
+  );
 
   // 5. 이름으로 매칭
   const matchedSprint = targetSprints.find(
@@ -145,20 +182,20 @@ export async function mapSprintToTarget(
  */
 export function initSprintCache() {
   sprintCache.clear();
-  boardIdCache.clear();
+  boardInfoCache.clear();
 }
 
 /**
  * 스프린트 캐시 프리로드 (선택적)
  */
 export async function preloadSprintCache(
-  projects: Array<'KQ' | 'HDD' | 'HB'>
+  projects: Array<'KQ' | 'HDD' | 'HMGBOARD'>
 ): Promise<void> {
-  const boardIds = await Promise.all(projects.map((p) => getBoardId(p)));
+  const infos = await Promise.all(projects.map((p) => getBoardInfo(p)));
   await Promise.all(
-    boardIds
-      .filter((id): id is number => id !== null)
-      .map((boardId) => sprintCache.getSprintsForBoard(boardId))
+    infos
+      .filter((info): info is { boardId: number; instance: JiraInstance } => info !== null)
+      .map((info) => sprintCache.getSprintsForBoard(info.boardId, info.instance))
   );
 }
 

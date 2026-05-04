@@ -106,20 +106,21 @@ export default function Home() {
   useEffect(() => {
     if (!currentUser?.teamId) return;
 
-    // 사용자 목록 조회
-    db
-      .from('users')
-      .select('name, ignite_account_id, hmg_account_id, hmg_user_id')
-      .eq('team_id', currentUser.teamId)
-      .order('name')
-      .then(({ data }) => {
-        if (data) {
-          setTeamUsers(data.map((u) => ({
-            name: u.name,
-            igniteAccountId: u.ignite_account_id || '',
-            hmgAccountId: u.hmg_account_id || '',
-            hmgUserId: u.hmg_user_id || '',
-          })));
+    // 사용자 목록 조회 (API route 경유 — users 테이블은 anon RLS 차단됨)
+    fetch('/api/users')
+      .then((r) => r.json())
+      .then((res: { success: boolean; data?: Array<{ name: string; teamId: string; igniteAccountId: string; hmgAccountId: string; hmgUserId: string }> }) => {
+        if (res.success && res.data) {
+          setTeamUsers(
+            res.data
+              .filter((u) => u.teamId === currentUser.teamId)
+              .map((u) => ({
+                name: u.name,
+                igniteAccountId: u.igniteAccountId || '',
+                hmgAccountId: u.hmgAccountId || '',
+                hmgUserId: u.hmgUserId || '',
+              }))
+          );
         }
       });
 
@@ -1184,7 +1185,8 @@ export default function Home() {
                             <>
                               <a
                                 href={`${
-                                  result.targetProject === 'AUTOWAY'
+                                  result.targetProject === 'AUTOWAY' ||
+                                  result.targetProject === 'HMGBOARD'
                                     ? JIRA_ENDPOINTS.HMG
                                     : JIRA_ENDPOINTS.IGNITE
                                 }/browse/${result.targetKey}`}
