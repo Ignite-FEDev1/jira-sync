@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { revalidatePath } from 'next/cache';
 import {
   getScript,
   updateScript,
@@ -37,6 +38,7 @@ export async function PUT(
     const { name, description, code } = body;
 
     const script = await updateScript(id, { name, description, code });
+    revalidatePath(`/api/tampermonkey/${id}/user.js`);
     return NextResponse.json({ success: true, script });
   } catch (error) {
     return NextResponse.json(
@@ -53,6 +55,7 @@ export async function DELETE(
   try {
     const { id } = await params;
     await deleteScript(id);
+    revalidatePath(`/api/tampermonkey/${id}/user.js`);
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json(

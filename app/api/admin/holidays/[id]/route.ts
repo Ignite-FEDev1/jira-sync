@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { revalidatePath } from 'next/cache';
 import { deleteHoliday } from '@/lib/services/holiday/holiday.service';
 
 export async function DELETE(
@@ -8,6 +9,7 @@ export async function DELETE(
   try {
     const { id } = await params;
     await deleteHoliday(id);
+    revalidatePath('/api/holidays');
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json(

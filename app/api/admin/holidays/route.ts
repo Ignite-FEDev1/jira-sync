@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { revalidatePath } from 'next/cache';
 import { listHolidays, createHoliday, HOLIDAY_TYPES } from '@/lib/services/holiday/holiday.service';
 
 export async function GET() {
@@ -32,6 +33,7 @@ export async function POST(req: Request) {
     }
 
     const item = await createHoliday({ date, name, type });
+    revalidatePath('/api/holidays');
     return NextResponse.json({ success: true, item }, { status: 201 });
   } catch (error) {
     return NextResponse.json(

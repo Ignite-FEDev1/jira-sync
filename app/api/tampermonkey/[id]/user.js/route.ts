@@ -42,7 +42,7 @@ export async function GET(
       status: 200,
       headers: {
         'Content-Type': 'application/javascript; charset=utf-8',
-        'Cache-Control': 'public, max-age=60, s-maxage=60',
+        'Cache-Control': 'public, max-age=0, s-maxage=86400, stale-while-revalidate=60',
         ...CORS_HEADERS,
       },
     });
