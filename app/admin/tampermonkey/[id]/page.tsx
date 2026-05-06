@@ -67,9 +67,12 @@ export default function TampermonkeyDetailPage({
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(code);
+      // 자동 업데이트 메타가 주입된 버전을 복사 (사용자가 이걸로 설치하면 이후 자동 업데이트됨)
+      const res = await fetch(`/api/tampermonkey/${id}/user.js`);
+      const codeWithMeta = await res.text();
+      await navigator.clipboard.writeText(codeWithMeta);
       setCopied(true);
-      toast.success('클립보드에 복사되었습니다');
+      toast.success('클립보드에 복사되었습니다 (자동 업데이트 메타 포함)');
       setTimeout(() => setCopied(false), 1500);
     } catch {
       toast.error('복사 실패');
@@ -87,16 +90,22 @@ export default function TampermonkeyDetailPage({
     }
   };
 
-  const handleDownload = () => {
-    const blob = new Blob([code], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${id}.user.js`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const handleDownload = async () => {
+    try {
+      const res = await fetch(`/api/tampermonkey/${id}/user.js`);
+      const codeWithMeta = await res.text();
+      const blob = new Blob([codeWithMeta], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${id}.user.js`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error('다운로드 실패');
+    }
   };
 
   const handleSave = async () => {
