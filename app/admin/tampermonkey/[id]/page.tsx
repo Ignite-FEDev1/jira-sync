@@ -2,7 +2,7 @@
 
 import { useEffect, useState, use } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Copy, Check, Save, Eye, Pencil, Download, ExternalLink, Zap } from 'lucide-react';
+import { ArrowLeft, Copy, Check, Save, Eye, Pencil, Download } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -34,14 +34,6 @@ export default function TampermonkeyDetailPage({
   const [code, setCode] = useState('');
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [installUrlCopied, setInstallUrlCopied] = useState(false);
-  const [installUrl, setInstallUrl] = useState('');
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      setInstallUrl(`${window.location.origin}/api/tampermonkey/${id}/user.js`);
-    }
-  }, [id]);
 
   const load = async () => {
     setLoading(true);
@@ -74,17 +66,6 @@ export default function TampermonkeyDetailPage({
       setCopied(true);
       toast.success('클립보드에 복사되었습니다 (자동 업데이트 메타 포함)');
       setTimeout(() => setCopied(false), 1500);
-    } catch {
-      toast.error('복사 실패');
-    }
-  };
-
-  const handleCopyInstallUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(installUrl);
-      setInstallUrlCopied(true);
-      toast.success('설치 URL이 복사되었습니다');
-      setTimeout(() => setInstallUrlCopied(false), 1500);
     } catch {
       toast.error('복사 실패');
     }
@@ -219,62 +200,6 @@ export default function TampermonkeyDetailPage({
       </div>
 
       <div className="container mx-auto px-6 py-6 space-y-4">
-        {/* 설치 URL */}
-        <div className="bg-gradient-to-br from-emerald-50 to-emerald-50/50 rounded-xl border border-emerald-200/60 p-5">
-          <div className="flex items-start gap-3">
-            <div className="h-10 w-10 rounded-lg bg-emerald-100 flex items-center justify-center shrink-0">
-              <Zap className="h-5 w-5 text-emerald-600" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="font-semibold text-sm text-emerald-900">자동 업데이트 설치 URL</h3>
-              <p className="text-xs text-emerald-800/80 mt-0.5">
-                이 URL로 설치하면 코드 수정 시 Tampermonkey가 자동으로 업데이트합니다 (
-                <code className="px-1 py-0.5 rounded bg-emerald-100/60">@updateURL</code> /
-                <code className="px-1 py-0.5 rounded bg-emerald-100/60">@version</code> 자동 주입)
-              </p>
-              <div className="mt-3 flex items-center gap-2">
-                <code className="flex-1 min-w-0 truncate text-xs font-mono bg-white border border-emerald-200/60 rounded-md px-3 py-1.5 text-emerald-900">
-                  {installUrl || '(URL 생성 중)'}
-                </code>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0 border-emerald-300 bg-white hover:bg-emerald-50"
-                  onClick={handleCopyInstallUrl}
-                  disabled={!installUrl}
-                >
-                  {installUrlCopied ? (
-                    <Check className="mr-1.5 h-3.5 w-3.5" />
-                  ) : (
-                    <Copy className="mr-1.5 h-3.5 w-3.5" />
-                  )}
-                  {installUrlCopied ? '복사됨' : 'URL 복사'}
-                </Button>
-                <a
-                  href={installUrl || '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="shrink-0"
-                >
-                  <Button
-                    variant="default"
-                    size="sm"
-                    className="bg-emerald-600 hover:bg-emerald-700"
-                    disabled={!installUrl}
-                  >
-                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
-                    바로 설치
-                  </Button>
-                </a>
-              </div>
-              <p className="text-[11px] text-emerald-800/70 mt-2">
-                💡 <strong>바로 설치</strong> 버튼을 누르면 Tampermonkey가 설치 다이얼로그를 띄웁니다.
-                이미 설치된 사용자는 별도 작업 없이 자동 업데이트됩니다.
-              </p>
-            </div>
-          </div>
-        </div>
-
         {/* 설명 */}
         <div className="bg-white rounded-xl border p-5 space-y-3">
           <div>
