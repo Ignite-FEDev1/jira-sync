@@ -41,7 +41,7 @@ export interface FetchDeploymentTicketsResponse {
  */
 const PROJECT_TO_JIRA_KEY: Record<string, string> = {
   groupware: 'AUTOWAY',
-  'hmg-board': 'HB',
+  'hmg-board': 'HMGBOARD',
   cpo: 'KQ',
 } as const;
 

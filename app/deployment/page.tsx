@@ -768,17 +768,12 @@ export default function DeploymentPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="groupware">Groupware (GW)</SelectItem>
-                    <SelectItem value="hmg-board" disabled>
-                      HMG Board (HB)
-                    </SelectItem>
+                    <SelectItem value="hmg-board">HMG Board (HB)</SelectItem>
                     <SelectItem value="cpo" disabled>
                       CPO
                     </SelectItem>
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  현재는 Groupware만 가능합니다.
-                </p>
               </div>
 
               {/* 담당자 선택 */}
