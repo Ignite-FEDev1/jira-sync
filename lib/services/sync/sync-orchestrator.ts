@@ -9,6 +9,7 @@ import { chunkArray } from './field-mapper';
 import { initSprintCache, preloadSprintCache } from './sprint-mapper';
 import { clearDbMappingCache, getSyncProfileInfo, getSourceFieldsFromDb } from './db-field-mapper';
 import { clearTransitionCache } from './transition-helper';
+import { clearEpicCache } from './epic-resolver';
 import { jira } from '@/lib/services/jira';
 import { dbServer } from '@/lib/db';
 
@@ -50,6 +51,7 @@ export class SyncOrchestrator {
       initSprintCache();
       clearDbMappingCache();
       clearTransitionCache();
+      clearEpicCache();
 
       // 소스 프로젝트 키 결정 (execute 시작 시 1회, 이후 모든 내부 메서드에서 재사용)
       this._sourceProjectKey = options.sourceProjectKey || await this.resolveSourceProjectKey(options.syncProfileId);
@@ -104,10 +106,10 @@ export class SyncOrchestrator {
         targetProjects = ['KQ', 'HDD', 'AUTOWAY', 'HMGBOARD'];
       }
 
-      // 2. 스프린트 캐시 프리로드 (병렬) - 스프린트 사용 프로젝트만 (AUTOWAY 제외)
-      const sprintProjects = targetProjects.filter(
-        (p) => p !== 'AUTOWAY'
-      ) as Array<'KQ' | 'HDD' | 'HMGBOARD'>;
+      // 2. 스프린트 캐시 프리로드 (병렬) - 모든 대상 프로젝트
+      const sprintProjects = targetProjects as Array<
+        'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'
+      >;
       if (sprintProjects.length > 0) {
         this.logger.info('스프린트 정보 프리로드 중...');
         await preloadSprintCache(sprintProjects);

@@ -126,11 +126,12 @@ function convertToFullYearMonth(period: string): string {
 
 /**
  * 프로젝트 키 → 스프린트 이름 prefix
- * HMGBOARD는 스프린트 이름에 'HB' 접두사를 사용 (예: "HB 202604")
- * (옛 Ignite HB는 HMGBOARD로 이관됨, prefix는 그대로 유지)
+ * - HMGBOARD: 'HB' 접두사 (예: "HB 202604")  ← 옛 Ignite HB 이관
+ * - AUTOWAY:  'GW' 접두사 (예: "GW 202605")  ← 그룹웨어
  */
 function getSprintNamePrefix(projectKey: string): string {
   if (projectKey === 'HMGBOARD') return 'HB';
+  if (projectKey === 'AUTOWAY') return 'GW';
   return projectKey;
 }
 
@@ -147,7 +148,7 @@ function buildTargetSprintName(projectKey: string, yearMonth: string): string {
  */
 export async function mapSprintToTarget(
   fehgSprintName: string | null,
-  targetProject: 'KQ' | 'HDD' | 'HMGBOARD'
+  targetProject: 'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'
 ): Promise<number | null> {
   if (!fehgSprintName) return null;
 
@@ -189,7 +190,7 @@ export function initSprintCache() {
  * 스프린트 캐시 프리로드 (선택적)
  */
 export async function preloadSprintCache(
-  projects: Array<'KQ' | 'HDD' | 'HMGBOARD'>
+  projects: Array<'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'>
 ): Promise<void> {
   const infos = await Promise.all(projects.map((p) => getBoardInfo(p)));
   await Promise.all(

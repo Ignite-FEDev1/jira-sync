@@ -9,6 +9,10 @@ import { SyncOptions } from './types';
 import { syncStatusWithPath, syncStatusWithPathFromDb } from './transition-helper';
 import { jira } from '@/lib/services/jira';
 import { IGNITE_CUSTOM_FIELDS, JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import { ensureTargetEpic } from './epic-resolver';
+
+// AUTOWAY/HMGBOARD의 Epic Link 커스텀 필드 (자식 → 부모 에픽 연결)
+const HMG_EPIC_LINK_FIELD = 'customfield_10014';
 
 /**
  * HMG 프로젝트별 이슈타입 ID 캐시
@@ -40,6 +44,30 @@ const DEFAULT_PREFERRED_NAMES = [
  */
 export class HMGSyncService {
   constructor(private logger: SyncLogger) {}
+
+  /**
+   * FEHG 부모 에픽이 있으면 대상 프로젝트의 동일 이름 에픽을 찾거나 신규 생성해서
+   * mappedFields에 Epic Link(customfield_10014)를 주입.
+   * 규칙: target summary = "[FEHG] " + FEHG 부모 summary (이미 [FEHG] 시작이면 그대로)
+   */
+  private async injectEpicLink(
+    fehgTicket: JiraIssue,
+    targetProjectKey: 'AUTOWAY' | 'HMGBOARD',
+    mappedFields: Record<string, unknown>
+  ): Promise<void> {
+    const parent = fehgTicket.fields.parent;
+    if (!parent?.key || !parent.fields?.summary) {
+      return;
+    }
+    const epicKey = await ensureTargetEpic(
+      { key: parent.key, summary: parent.fields.summary },
+      targetProjectKey,
+      this.logger
+    );
+    if (epicKey) {
+      mappedFields[HMG_EPIC_LINK_FIELD] = epicKey;
+    }
+  }
 
   private async resolveCreateIssueType(targetProjectKey: string): Promise<
     { id: string } | { name: string }
@@ -203,7 +231,19 @@ export class HMGSyncService {
       // 1. 필드 매핑 (DB 기반 또는 하드코딩)
       const mappedFields = syncProfileId
         ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey, teamUsers)
-        : mapFieldsForAutoway(fehgTicket, assigneeAccountId, teamUsers);
+        : await mapFieldsForAutoway(
+            fehgTicket,
+            assigneeAccountId,
+            teamUsers,
+            targetProjectKey as 'AUTOWAY' | 'HMGBOARD'
+          );
+
+      // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성)
+      await this.injectEpicLink(
+        fehgTicket,
+        targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
+        mappedFields
+      );
 
       const autowayIssueType = await this.resolveCreateIssueType(targetProjectKey);
 
@@ -299,7 +339,19 @@ export class HMGSyncService {
       // 1. 필드 매핑 (DB 기반 또는 하드코딩)
       const mappedFields = syncProfileId
         ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey, teamUsers)
-        : mapFieldsForAutoway(fehgTicket, assigneeAccountId, teamUsers);
+        : await mapFieldsForAutoway(
+            fehgTicket,
+            assigneeAccountId,
+            teamUsers,
+            targetProjectKey as 'AUTOWAY' | 'HMGBOARD'
+          );
+
+      // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성)
+      await this.injectEpicLink(
+        fehgTicket,
+        targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
+        mappedFields
+      );
 
       // 2. 소스 링크 필드 병합
       const sourceLinkFields = this.getSourceLinkFields(fehgTicket.key, profileInfo);

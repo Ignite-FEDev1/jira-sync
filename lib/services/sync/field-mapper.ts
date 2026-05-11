@@ -66,13 +66,15 @@ export async function mapFieldsForIgniteProject(
 }
 
 /**
- * FEHG 티켓 필드를 AUTOWAY용으로 변환
+ * FEHG 티켓 필드를 HMG 인스턴스 (AUTOWAY/HMGBOARD)용으로 변환
+ * DB 매핑 프로필이 없을 때의 하드코딩 폴백 경로
  */
-export function mapFieldsForAutoway(
+export async function mapFieldsForAutoway(
   fehgTicket: JiraIssue,
   assigneeAccountId: string,
-  teamUsers?: SyncOptions['teamUsers']
-): Record<string, unknown> {
+  teamUsers?: SyncOptions['teamUsers'],
+  targetProjectKey: 'AUTOWAY' | 'HMGBOARD' = 'AUTOWAY'
+): Promise<Record<string, unknown>> {
   const fields: Record<string, unknown> = {};
   const fehgFields = fehgTicket.fields;
 
@@ -129,7 +131,21 @@ export function mapFieldsForAutoway(
     }
   }
 
-  // 스프린트는 AUTOWAY에서 제외
+  // 스프린트 매핑 (FEHG 스프린트 이름 → 대상 보드 스프린트 ID)
+  // AUTOWAY: "GW YYYYMM", HMGBOARD: "HB YYYYMM"
+  const fehgSprint = fehgFields[IGNITE_CUSTOM_FIELDS.SPRINT] as
+    | Array<{ id: number; name: string }>
+    | undefined;
+
+  if (fehgSprint && fehgSprint.length > 0) {
+    const mappedSprintId = await mapSprintToTarget(
+      fehgSprint[0].name,
+      targetProjectKey
+    );
+    if (mappedSprintId) {
+      fields[IGNITE_CUSTOM_FIELDS.SPRINT] = mappedSprintId;
+    }
+  }
 
   return fields;
 }
