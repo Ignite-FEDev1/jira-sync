@@ -92,9 +92,11 @@ export async function mapFieldsForAutoway(
     fields[HMG_CUSTOM_FIELDS.GANTT_END_DATE] = fehgFields.duedate; // Gantt End Date
   }
 
-  // 시작일 매핑 (Start Date x3, Gantt Start Date)
+  // 시작일 매핑 (표준 Start date + Start Date x3 + Gantt Start Date)
+  // - customfield_10015: Jira Cloud 표준 Start date (타임라인이 보는 필드)
   if (fehgFields[IGNITE_CUSTOM_FIELDS.START_DATE]) {
     const startDate = fehgFields[IGNITE_CUSTOM_FIELDS.START_DATE];
+    fields[IGNITE_CUSTOM_FIELDS.START_DATE] = startDate; // 표준 Start date (customfield_10015) - 타임라인용
     fields[HMG_CUSTOM_FIELDS.START_DATE] = startDate; // Start Date (customfield_10187)
     fields[HMG_CUSTOM_FIELDS.START_DATE_ALT] = startDate; // Start Date (customfield_10753)
     fields[HMG_CUSTOM_FIELDS.START_DATE_590] = startDate; // Start Date (customfield_10590)
