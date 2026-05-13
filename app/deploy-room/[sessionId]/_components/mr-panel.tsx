@@ -112,7 +112,6 @@ export function MrPanel({
   onMrsImported,
 }: Props) {
   const [importing, setImporting] = useState(false);
-  const includedCount = mrs.filter((m) => m.included).length;
 
   const handleImport = async () => {
     if (templateGitlabProjects.length === 0) {
@@ -207,7 +206,7 @@ export function MrPanel({
             </Button>
           )}
           <span className="text-xs text-slate-500">
-            포함 <span className="font-semibold text-slate-700 tabular-nums">{includedCount}</span> / {mrs.length}
+            전체 <span className="font-semibold text-slate-700 tabular-nums">{mrs.length}</span>건
           </span>
         </div>
       </div>
@@ -330,7 +329,7 @@ function MrCard({ mr, color, actorUserId, onUpdated }: MrCardProps) {
   return (
     <li
       className={`px-3 py-2 transition-colors hover:bg-slate-50/60 ${
-        mr.included ? 'bg-white' : 'bg-slate-50/40 opacity-70'
+        isMerged ? 'bg-slate-50/40 opacity-70' : 'bg-white'
       }`}
     >
       <div className="flex items-center gap-2 min-w-0">
