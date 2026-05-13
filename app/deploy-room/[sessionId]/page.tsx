@@ -381,6 +381,7 @@ export default function DeployRoomDetailPage() {
               isLeader={isLeader}
               checklist={checklist}
               userStatuses={userStatuses}
+              getParticipantsForItem={getParticipantsForItem}
               onCycle={handleCycleMyStatus}
               onPropagateAllDone={isLeader ? handlePropagateAllDone : undefined}
             />

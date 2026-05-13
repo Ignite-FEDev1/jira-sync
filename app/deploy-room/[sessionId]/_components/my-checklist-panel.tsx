@@ -8,13 +8,15 @@ import type {
   ChecklistUserStatus,
   DeployRoomChecklistItem,
 } from '@/lib/types/deploy-room';
-import { findUserStatus } from './aggregate';
+import { findUserStatus, getAggregate } from './aggregate';
 
 interface Props {
   myName: string;
   isLeader: boolean;
   checklist: DeployRoomChecklistItem[];
   userStatuses: ChecklistUserStatus[];
+  /** disabled 항목의 aggregate 상태 표시용 — 전체현황과 동일한 정책 */
+  getParticipantsForItem: (assignee: string) => string[];
   onCycle: (itemId: string) => void;
   /** 팀장일 때만 전달. 본인 + 팀원 전원 done으로 전파 */
   onPropagateAllDone?: (itemId: string) => void;
@@ -25,6 +27,7 @@ export function MyChecklistPanel({
   isLeader,
   checklist,
   userStatuses,
+  getParticipantsForItem,
   onCycle,
   onPropagateAllDone,
 }: Props) {
@@ -83,6 +86,13 @@ export function MyChecklistPanel({
                   <DisabledItem
                     key={item.id}
                     item={item}
+                    aggStatus={
+                      getAggregate(
+                        item,
+                        userStatuses,
+                        getParticipantsForItem(item.assignee)
+                      ).status
+                    }
                     onPropagate={propagate}
                   />
                 );
@@ -183,9 +193,11 @@ function ActionableItem({
 
 function DisabledItem({
   item,
+  aggStatus,
   onPropagate,
 }: {
   item: DeployRoomChecklistItem;
+  aggStatus: ChecklistItemStatus;
   onPropagate?: () => void;
 }) {
   const roleLabel = item.assignee === 'leader' ? '팀장' : '팀원';
@@ -193,6 +205,8 @@ function DisabledItem({
     item.assignee === 'leader'
       ? 'bg-blue-100 text-blue-700'
       : 'bg-amber-100 text-amber-700';
+
+  const isDone = aggStatus === 'done';
 
   const handlePropagateClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -204,10 +218,19 @@ function DisabledItem({
     <li>
       <div className="flex items-stretch rounded-lg bg-slate-50 group">
         <div className="flex-1 min-w-0 flex items-start gap-3 py-2 px-2">
-          <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0 mt-0.5" />
+          {/* aggregate status에 따라 OverviewChecklistPanel과 동일한 아이콘 */}
+          {aggStatus === 'done' ? (
+            <CheckCircle2 className="h-[18px] w-[18px] text-emerald-500 shrink-0 mt-0.5" />
+          ) : aggStatus === 'in_progress' ? (
+            <Loader2 className="h-[18px] w-[18px] text-amber-500 shrink-0 mt-0.5 animate-spin" />
+          ) : (
+            <Circle className="h-[18px] w-[18px] text-slate-300 shrink-0 mt-0.5" />
+          )}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="text-sm leading-snug text-slate-500">
+              <span
+                className={`text-sm leading-snug ${isDone ? 'line-through text-slate-400' : 'text-slate-500'}`}
+              >
                 <span className="mr-1.5 tabular-nums text-xs text-slate-400">
                   {item.orderIndex}.
                 </span>
