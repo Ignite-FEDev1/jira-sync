@@ -90,6 +90,34 @@ export default function DeployRoomDetailPage() {
       setSession(sessionJson.session);
       setChecklist(sessionJson.checklist);
 
+      // 세션 응답에 team-info + template이 묶여 옴 → 추가 round trip 없음
+      const next: TeamInfo = { ...EMPTY_TEAM_INFO };
+      const teamInfoData = sessionJson.teamInfo as {
+        members: { id: string; name: string }[];
+        leaderId: string | null;
+        gitlabToken: string;
+      } | null;
+      if (teamInfoData) {
+        next.members = teamInfoData.members.map((u) => u.name);
+        next.leaderId = teamInfoData.leaderId;
+        next.gitlabToken = teamInfoData.gitlabToken;
+        const leader = teamInfoData.members.find(
+          (u) => u.id === teamInfoData.leaderId
+        );
+        next.leaderName = leader?.name ?? null;
+      }
+      const templateData = sessionJson.template as {
+        gitlabProjects?: string[];
+        teamMembers?: string[];
+      } | null;
+      if (templateData) {
+        next.gitlabProjects = templateData.gitlabProjects ?? [];
+        if (next.members.length === 0) {
+          next.members = templateData.teamMembers ?? [];
+        }
+      }
+      setTeamInfo(next);
+
       const [mrsJson, timelineJson, statusesJson] = await Promise.all([
         mrsRes.json(),
         timelineRes.json(),
@@ -98,36 +126,6 @@ export default function DeployRoomDetailPage() {
       if (mrsJson.success) setMrs(mrsJson.mrs);
       if (timelineJson.success) setTimeline(timelineJson.events);
       if (statusesJson.success) setUserStatuses(statusesJson.statuses);
-
-      // 팀/템플릿 정보 병합 fetch
-      const sess = sessionJson.session as DeployRoomSession;
-      const [teamInfoRes, templateRes] = await Promise.all([
-        sess.teamId
-          ? fetch(`/api/deploy-room/team-info?teamId=${sess.teamId}`).then((r) => r.json()).catch(() => null)
-          : Promise.resolve(null),
-        sess.templateId
-          ? fetch(`/api/admin/deploy-room/templates/${sess.templateId}`).then((r) => r.json()).catch(() => null)
-          : Promise.resolve(null),
-      ]);
-
-      const next: TeamInfo = { ...EMPTY_TEAM_INFO };
-      if (teamInfoRes?.success) {
-        next.members =
-          teamInfoRes.members?.map((u: { name: string }) => u.name) ?? [];
-        next.leaderId = teamInfoRes.leaderId ?? null;
-        next.gitlabToken = teamInfoRes.gitlabToken ?? '';
-        const leader = teamInfoRes.members?.find(
-          (u: { id: string; name: string }) => u.id === teamInfoRes.leaderId
-        );
-        next.leaderName = leader?.name ?? null;
-      }
-      if (templateRes?.success && templateRes.template) {
-        next.gitlabProjects = templateRes.template.gitlabProjects ?? [];
-        if (next.members.length === 0) {
-          next.members = templateRes.template.teamMembers ?? [];
-        }
-      }
-      setTeamInfo(next);
     } catch (error) {
       toast.error(
         `조회 실패: ${error instanceof Error ? error.message : String(error)}`

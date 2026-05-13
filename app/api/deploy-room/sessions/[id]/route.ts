@@ -6,7 +6,16 @@ import {
   updateInactiveParticipants,
   updateSessionStatus,
 } from '@/lib/services/deploy-room/session.service';
+import { getTemplateById } from '@/lib/services/deploy-room/template.service';
+import { normalizeName } from '@/lib/services/deploy-room/utils';
+import { dbServer } from '@/lib/db';
 import type { DeployRoomSessionStatus } from '@/lib/types/deploy-room';
+
+/** 팀 멤버 중 시나리오 teamMembers에 없는 사람을 inactive로 반환 */
+function deriveInactive(teamMembers: string[], templateMembers: string[]): string[] {
+  const templateSet = new Set(templateMembers.map(normalizeName));
+  return teamMembers.filter((n) => !templateSet.has(normalizeName(n)));
+}
 
 export async function GET(
   _request: NextRequest,
@@ -21,8 +30,42 @@ export async function GET(
         { status: 404 }
       );
     }
-    const checklist = await getChecklistItems(id);
-    return NextResponse.json({ success: true, session, checklist });
+
+    // 클라이언트 waterfall 제거: checklist + team-info + template을 한 응답에 묶음
+    const [checklist, teamInfo, template] = await Promise.all([
+      getChecklistItems(id),
+      session.teamId
+        ? loadTeamInfo(session.teamId)
+        : Promise.resolve(null),
+      session.templateId
+        ? getTemplateById(session.templateId).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    // session.inactiveParticipants가 비어있고 template.teamMembers가 지정되어 있으면
+    // (팀 멤버 - template 멤버)를 derive해서 응답. 사용자가 토글하면 그 시점에 full list가 persist됨.
+    // (기존 세션에서도 시나리오의 팀원 선택이 즉시 반영되도록)
+    const effectiveSession =
+      session.inactiveParticipants.length === 0 &&
+      template?.teamMembers &&
+      template.teamMembers.length > 0 &&
+      teamInfo
+        ? {
+            ...session,
+            inactiveParticipants: deriveInactive(
+              teamInfo.members.map((m) => m.name),
+              template.teamMembers
+            ),
+          }
+        : session;
+
+    return NextResponse.json({
+      success: true,
+      session: effectiveSession,
+      checklist,
+      teamInfo,
+      template,
+    });
   } catch (error) {
     return NextResponse.json(
       {
@@ -32,6 +75,24 @@ export async function GET(
       { status: 500 }
     );
   }
+}
+
+async function loadTeamInfo(teamId: string) {
+  const [usersResult, teamResult, tokenResult] = await Promise.all([
+    dbServer.from('users').select('id, name').eq('team_id', teamId).order('name'),
+    dbServer.from('teams').select('leader_id').eq('id', teamId).single(),
+    dbServer.from('users').select('gitlab_token').neq('gitlab_token', '').limit(1),
+  ]);
+  return {
+    members:
+      (usersResult.data as { id: string; name: string }[] | null)?.map((u) => ({
+        id: u.id,
+        name: u.name,
+      })) ?? [],
+    leaderId: (teamResult.data as { leader_id: string | null } | null)?.leader_id ?? null,
+    gitlabToken:
+      (tokenResult.data as { gitlab_token: string }[] | null)?.[0]?.gitlab_token ?? '',
+  };
 }
 
 export async function DELETE(

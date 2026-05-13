@@ -1,8 +1,21 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { Fragment, useState, useEffect, useRef, type DragEvent, type KeyboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, Trash2, X, GitBranch, Users, ListChecks, Check, Crown, MessageSquare } from 'lucide-react';
+import {
+  Plus,
+  Trash2,
+  X,
+  GitBranch,
+  Users,
+  ListChecks,
+  Check,
+  Crown,
+  MessageSquare,
+  GripVertical,
+  ChevronUp,
+  ChevronDown,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -35,6 +48,75 @@ const ASSIGNEE_DOT: Record<ChecklistItemAssignee, string> = {
   leader: 'bg-blue-500',
   member: 'bg-amber-500',
 };
+
+/**
+ * 행과 행 사이에 위치하는 얇은 zone.
+ * - 기본: 거의 보이지 않음 (10px 높이, 빈 공간으로 인식)
+ * - hover: 점선 + 작은 + 버튼이 드러나 정확한 위치 삽입 유도
+ * - 드래그 중: 모든 zone이 미세하게 보이고, drop 타겟은 파란 선으로 활성화
+ */
+function InsertZone({
+  position,
+  isDropTarget,
+  isDragMode,
+  onInsert,
+}: {
+  position: number;
+  isDropTarget: boolean;
+  isDragMode: boolean;
+  onInsert: () => void;
+}) {
+  return (
+    <div
+      data-insert-position={position}
+      className={`group/zone relative ${isDragMode ? 'h-3' : 'h-2.5'} transition-[height] duration-150`}
+    >
+      {/* hover / drop target에서 보이는 line + plus button */}
+      <div
+        className={`pointer-events-none absolute inset-x-1 inset-y-0 flex items-center transition-opacity duration-150 ${
+          isDropTarget
+            ? 'opacity-100'
+            : isDragMode
+              ? 'opacity-30'
+              : 'opacity-0 group-hover/zone:opacity-100'
+        }`}
+      >
+        <div
+          className={`h-px flex-1 transition-colors ${
+            isDropTarget ? 'bg-blue-500' : 'bg-slate-300'
+          }`}
+        />
+        <div
+          className={`mx-2 transition-all ${
+            isDropTarget ? 'scale-110' : 'scale-100'
+          }`}
+        >
+          {/* drop target일 때만 dot, 평소엔 plus button */}
+          {isDropTarget ? (
+            <div className="h-2 w-2 rounded-full bg-blue-500 ring-4 ring-blue-100" />
+          ) : (
+            <div className="pointer-events-auto">
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={onInsert}
+                className="h-4 w-4 rounded-full bg-white ring-1 ring-slate-300 hover:ring-blue-400 hover:bg-blue-50 text-slate-500 hover:text-blue-600 flex items-center justify-center transition-colors"
+                title="이 위치에 단계 추가"
+              >
+                <Plus className="h-2.5 w-2.5" strokeWidth={2.75} />
+              </button>
+            </div>
+          )}
+        </div>
+        <div
+          className={`h-px flex-1 transition-colors ${
+            isDropTarget ? 'bg-blue-500' : 'bg-slate-300'
+          }`}
+        />
+      </div>
+    </div>
+  );
+}
 
 interface Props {
   initialData?: DeployRoomTemplate;
@@ -73,6 +155,13 @@ export default function TemplateForm({ initialData }: Props) {
     });
     return initial;
   });
+
+  // Drag & drop / reorder state
+  const [dragArmedIndex, setDragArmedIndex] = useState<number | null>(null);
+  const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+  const [dropPosition, setDropPosition] = useState<number | null>(null);
+  // 새로 삽입된 행의 인덱스를 기억해뒀다가 마운트되는 input에 포커스
+  const newlyInsertedRef = useRef<number | null>(null);
 
   // 사용자 + 팀장 정보 로드
   useEffect(() => {
@@ -122,22 +211,26 @@ export default function TemplateForm({ initialData }: Props) {
     );
   };
 
-  // Checklist
-  const addChecklistItem = (afterIndex?: number) => {
+  // Checklist mutations — position 기반 (0 = 맨 위, N = 맨 아래)
+  // 행 순서가 바뀌면 expandedDesc(인덱스 Set)도 같이 remap해서 펼침 상태가 어긋나지 않게 한다.
+  const insertChecklistItem = (position: number) => {
     const newItem: DeployRoomTemplateChecklist = {
       title: '',
       assignee: 'all',
     };
-    if (afterIndex === undefined) {
-      setChecklist((prev) => [...prev, newItem]);
-    } else {
-      setChecklist((prev) => [
-        ...prev.slice(0, afterIndex + 1),
-        newItem,
-        ...prev.slice(afterIndex + 1),
-      ]);
-    }
+    setChecklist((prev) => [
+      ...prev.slice(0, position),
+      newItem,
+      ...prev.slice(position),
+    ]);
+    setExpandedDesc((prev) => {
+      const next = new Set<number>();
+      prev.forEach((i) => next.add(i >= position ? i + 1 : i));
+      return next;
+    });
+    newlyInsertedRef.current = position;
   };
+
   const updateChecklistItem = (
     index: number,
     patch: Partial<DeployRoomTemplateChecklist>
@@ -145,8 +238,91 @@ export default function TemplateForm({ initialData }: Props) {
     setChecklist((prev) =>
       prev.map((item, i) => (i === index ? { ...item, ...patch } : item))
     );
-  const removeChecklistItem = (index: number) =>
+
+  const removeChecklistItem = (index: number) => {
     setChecklist((prev) => prev.filter((_, i) => i !== index));
+    setExpandedDesc((prev) => {
+      const next = new Set<number>();
+      prev.forEach((i) => {
+        if (i === index) return;
+        next.add(i > index ? i - 1 : i);
+      });
+      return next;
+    });
+  };
+
+  const moveChecklistItem = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0) return;
+    setChecklist((prev) => {
+      if (to >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+    setExpandedDesc((prev) => {
+      const next = new Set<number>();
+      prev.forEach((oldIdx) => {
+        if (oldIdx === from) {
+          next.add(to);
+          return;
+        }
+        // splice-out 보정 후 splice-in 보정
+        const intermediate = oldIdx > from ? oldIdx - 1 : oldIdx;
+        next.add(intermediate >= to ? intermediate + 1 : intermediate);
+      });
+      return next;
+    });
+  };
+
+  // 드래그 중 cursor가 행 위로 올라왔을 때 drop position 계산 (위 절반 → 행 위, 아래 절반 → 행 아래)
+  const handleRowDragOver = (e: DragEvent<HTMLDivElement>, i: number) => {
+    if (draggingIndex === null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = e.currentTarget.getBoundingClientRect();
+    const isAbove = e.clientY - rect.top < rect.height / 2;
+    const next = isAbove ? i : i + 1;
+    setDropPosition((cur) => (cur === next ? cur : next));
+  };
+
+  const finishDrop = () => {
+    if (draggingIndex !== null && dropPosition !== null) {
+      const from = draggingIndex;
+      const gap = dropPosition;
+      // gap === from 또는 gap === from + 1 은 제자리 (no-op)
+      if (gap !== from && gap !== from + 1) {
+        const to = from < gap ? gap - 1 : gap;
+        moveChecklistItem(from, to);
+      }
+    }
+    setDragArmedIndex(null);
+    setDraggingIndex(null);
+    setDropPosition(null);
+  };
+
+  const handleRowKeyDown = (
+    e: KeyboardEvent<HTMLInputElement>,
+    i: number
+  ) => {
+    // Cmd/Ctrl + Enter → 현재 행 아래에 새 단계 추가
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      insertChecklistItem(i + 1);
+      return;
+    }
+    // Alt + ↑ / ↓ → 행 이동
+    if (e.altKey && e.key === 'ArrowUp' && i > 0) {
+      e.preventDefault();
+      moveChecklistItem(i, i - 1);
+      return;
+    }
+    if (e.altKey && e.key === 'ArrowDown' && i < checklist.length - 1) {
+      e.preventDefault();
+      moveChecklistItem(i, i + 1);
+      return;
+    }
+  };
 
   const handleSubmit = async () => {
     const templateName = name.trim();
@@ -341,7 +517,7 @@ export default function TemplateForm({ initialData }: Props) {
 
       {/* 체크리스트 단계 */}
       <section className="bg-white rounded-xl border p-5 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-2 text-sm font-semibold text-foreground/80">
             <div className="h-6 w-6 rounded-md bg-emerald-50 flex items-center justify-center">
               <ListChecks className="h-3.5 w-3.5 text-emerald-600" />
@@ -363,6 +539,30 @@ export default function TemplateForm({ initialData }: Props) {
           </div>
         </div>
 
+        {/* 단축키 / 조작 힌트 — 행이 1개 이상일 때만 */}
+        {checklist.length > 0 && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground/70 -mt-1">
+            <span className="inline-flex items-center gap-1">
+              <GripVertical className="h-3 w-3" />
+              드래그로 순서 변경
+            </span>
+            <span className="text-slate-200">·</span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-flex h-3.5 items-center px-1 rounded bg-slate-100 ring-1 ring-slate-200 font-mono text-[9.5px] text-foreground/60">Alt</span>
+              <span className="text-slate-300">+</span>
+              <span className="inline-flex h-3.5 items-center px-1 rounded bg-slate-100 ring-1 ring-slate-200 font-mono text-[9.5px] text-foreground/60">↑↓</span>
+              이동
+            </span>
+            <span className="text-slate-200">·</span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-flex h-3.5 items-center px-1 rounded bg-slate-100 ring-1 ring-slate-200 font-mono text-[9.5px] text-foreground/60">⌘</span>
+              <span className="text-slate-300">+</span>
+              <span className="inline-flex h-3.5 items-center px-1 rounded bg-slate-100 ring-1 ring-slate-200 font-mono text-[9.5px] text-foreground/60">Enter</span>
+              아래에 단계 추가
+            </span>
+          </div>
+        )}
+
         {checklist.length === 0 ? (
           <div className="rounded-lg border border-dashed py-8 text-center">
             <p className="text-xs text-muted-foreground mb-3">
@@ -371,7 +571,7 @@ export default function TemplateForm({ initialData }: Props) {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => addChecklistItem()}
+              onClick={() => insertChecklistItem(0)}
               className="text-xs"
             >
               <Plus className="h-3 w-3 mr-1" />
@@ -379,117 +579,212 @@ export default function TemplateForm({ initialData }: Props) {
             </Button>
           </div>
         ) : (
-          <div className="space-y-1.5">
+          <div onDragEnd={finishDrop}>
             {checklist.map((item, i) => {
               const descOpen = expandedDesc.has(i) || !!item.description;
+              const isDragging = draggingIndex === i;
+              const isDragMode = draggingIndex !== null;
               return (
-                <div
-                  key={i}
-                  className={`group/row rounded-lg border transition-colors ${
-                    descOpen ? 'border-slate-200 bg-slate-50/40' : 'border-transparent hover:border-slate-100'
-                  }`}
-                >
-                  <div className="flex gap-2 items-center px-2 py-1.5">
-                    {/* Dot + Number */}
-                    <div
-                      className={`w-2 h-2 rounded-full shrink-0 ${ASSIGNEE_DOT[item.assignee]}`}
-                    />
-                    <span className="w-5 shrink-0 text-right text-xs text-muted-foreground/60 tabular-nums font-medium">
-                      {i + 1}
-                    </span>
+                <Fragment key={i}>
+                  {/* 행 사이 Insert Zone — hover시 line+plus, drag시 drop indicator */}
+                  <InsertZone
+                    position={i}
+                    isDropTarget={
+                      isDragMode &&
+                      dropPosition === i &&
+                      draggingIndex !== i &&
+                      draggingIndex !== i - 1
+                    }
+                    isDragMode={isDragMode}
+                    onInsert={() => insertChecklistItem(i)}
+                  />
 
-                    {/* Title */}
-                    <Input
-                      placeholder="단계 명칭을 입력하세요"
-                      value={item.title}
-                      onChange={(e) =>
-                        updateChecklistItem(i, { title: e.target.value })
-                      }
-                      className="flex-1 rounded-lg h-9 text-[13px] border-slate-200"
-                    />
+                  <div
+                    data-row-index={i}
+                    draggable={dragArmedIndex === i}
+                    onDragStart={(e) => {
+                      setDraggingIndex(i);
+                      e.dataTransfer.effectAllowed = 'move';
+                      try {
+                        e.dataTransfer.setData('text/plain', String(i));
+                      } catch {}
+                    }}
+                    onDragOver={(e) => handleRowDragOver(e, i)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      finishDrop();
+                    }}
+                    className={`group/row rounded-lg border transition-all duration-150 ${
+                      descOpen
+                        ? 'border-slate-200 bg-slate-50/40'
+                        : 'border-transparent hover:border-slate-100'
+                    } ${
+                      isDragging
+                        ? 'opacity-40 scale-[0.99] ring-1 ring-blue-200 bg-blue-50/30'
+                        : ''
+                    }`}
+                  >
+                    <div className="flex gap-2 items-center px-1.5 py-1.5">
+                      {/* Grip handle — hover에서 드러남, mousedown으로 drag arm */}
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        aria-label={`${i + 1}번째 단계 드래그`}
+                        onMouseDown={() => setDragArmedIndex(i)}
+                        onMouseUp={() => setDragArmedIndex(null)}
+                        onMouseLeave={() => {
+                          if (draggingIndex === null) setDragArmedIndex(null);
+                        }}
+                        className="shrink-0 h-7 w-4 -mr-1 flex items-center justify-center text-slate-300 hover:text-slate-500 opacity-0 group-hover/row:opacity-100 transition-opacity cursor-grab active:cursor-grabbing"
+                        title="드래그하여 순서 변경"
+                      >
+                        <GripVertical className="h-3.5 w-3.5" strokeWidth={2} />
+                      </button>
 
-                    {/* Description toggle */}
-                    <button
-                      type="button"
-                      onClick={() => setExpandedDesc((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(i)) { next.delete(i); } else { next.add(i); }
-                        return next;
-                      })}
-                      className={`shrink-0 h-8 w-8 rounded-lg flex items-center justify-center transition-colors ${
-                        descOpen
-                          ? 'text-blue-500 bg-blue-50 hover:bg-blue-100'
-                          : 'text-muted-foreground/30 hover:text-muted-foreground hover:bg-slate-100'
-                      }`}
-                      title="설명 추가/편집"
-                    >
-                      <MessageSquare className="h-3.5 w-3.5" />
-                    </button>
-
-                    {/* Assignee */}
-                    <Select
-                      value={item.assignee}
-                      onValueChange={(v) =>
-                        updateChecklistItem(i, {
-                          assignee: v as ChecklistItemAssignee,
-                        })
-                      }
-                    >
-                      <SelectTrigger className="w-[100px] shrink-0 rounded-lg h-9 text-xs">
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className={`w-2 h-2 rounded-full ${ASSIGNEE_DOT[item.assignee]}`}
-                          />
-                          <SelectValue />
-                        </div>
-                      </SelectTrigger>
-                      <SelectContent>
-                        {ASSIGNEE_OPTIONS.map((opt) => (
-                          <SelectItem key={opt.value} value={opt.value}>
-                            <div className="flex items-center gap-1.5">
-                              <span
-                                className={`w-2 h-2 rounded-full ${opt.dot}`}
-                              />
-                              {opt.label}
-                            </div>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-
-                    {/* Delete */}
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => removeChecklistItem(i)}
-                      className="shrink-0 h-8 w-8 rounded-lg opacity-0 group-hover/row:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-
-                  {/* Description */}
-                  {descOpen && (
-                    <div className="px-2 pb-2 pl-11">
-                      <Input
-                        placeholder="이 단계에 대한 설명을 입력하세요"
-                        value={item.description ?? ''}
-                        onChange={(e) =>
-                          updateChecklistItem(i, { description: e.target.value || undefined })
-                        }
-                        autoFocus={expandedDesc.has(i) && !item.description}
-                        className="rounded-lg h-8 text-xs text-muted-foreground border-dashed border-slate-200"
+                      {/* Assignee dot + Number */}
+                      <div
+                        className={`w-2 h-2 rounded-full shrink-0 ${ASSIGNEE_DOT[item.assignee]}`}
                       />
+                      <span className="w-5 shrink-0 text-right text-xs text-muted-foreground/60 tabular-nums font-medium">
+                        {i + 1}
+                      </span>
+
+                      {/* Title */}
+                      <Input
+                        ref={(el) => {
+                          if (el && newlyInsertedRef.current === i) {
+                            el.focus();
+                            newlyInsertedRef.current = null;
+                          }
+                        }}
+                        placeholder="단계 명칭을 입력하세요"
+                        value={item.title}
+                        onChange={(e) =>
+                          updateChecklistItem(i, { title: e.target.value })
+                        }
+                        onKeyDown={(e) => handleRowKeyDown(e, i)}
+                        className="flex-1 rounded-lg h-9 text-[13px] border-slate-200"
+                      />
+
+                      {/* Description toggle */}
+                      <button
+                        type="button"
+                        onClick={() => setExpandedDesc((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(i)) { next.delete(i); } else { next.add(i); }
+                          return next;
+                        })}
+                        className={`shrink-0 h-8 w-8 rounded-lg flex items-center justify-center transition-colors ${
+                          descOpen
+                            ? 'text-blue-500 bg-blue-50 hover:bg-blue-100'
+                            : 'text-muted-foreground/30 hover:text-muted-foreground hover:bg-slate-100'
+                        }`}
+                        title="설명 추가/편집"
+                      >
+                        <MessageSquare className="h-3.5 w-3.5" />
+                      </button>
+
+                      {/* Assignee */}
+                      <Select
+                        value={item.assignee}
+                        onValueChange={(v) =>
+                          updateChecklistItem(i, {
+                            assignee: v as ChecklistItemAssignee,
+                          })
+                        }
+                      >
+                        <SelectTrigger className="w-[100px] shrink-0 rounded-lg h-9 text-xs">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`w-2 h-2 rounded-full ${ASSIGNEE_DOT[item.assignee]}`}
+                            />
+                            <SelectValue />
+                          </div>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {ASSIGNEE_OPTIONS.map((opt) => (
+                            <SelectItem key={opt.value} value={opt.value}>
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`w-2 h-2 rounded-full ${opt.dot}`}
+                                />
+                                {opt.label}
+                              </div>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+
+                      {/* Reorder — vertical stack (up/down) */}
+                      <div className="shrink-0 flex flex-col gap-px opacity-0 group-hover/row:opacity-100 transition-opacity">
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => moveChecklistItem(i, i - 1)}
+                          disabled={i === 0}
+                          className="h-4 w-5 rounded-t-md flex items-center justify-center text-muted-foreground/60 hover:bg-slate-100 hover:text-foreground disabled:opacity-25 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted-foreground/60 transition-colors"
+                          title="위로 이동 (Alt+↑)"
+                        >
+                          <ChevronUp className="h-3 w-3" strokeWidth={2.5} />
+                        </button>
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => moveChecklistItem(i, i + 1)}
+                          disabled={i === checklist.length - 1}
+                          className="h-4 w-5 rounded-b-md flex items-center justify-center text-muted-foreground/60 hover:bg-slate-100 hover:text-foreground disabled:opacity-25 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted-foreground/60 transition-colors"
+                          title="아래로 이동 (Alt+↓)"
+                        >
+                          <ChevronDown className="h-3 w-3" strokeWidth={2.5} />
+                        </button>
+                      </div>
+
+                      {/* Delete */}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => removeChecklistItem(i)}
+                        className="shrink-0 h-8 w-8 rounded-lg opacity-0 group-hover/row:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
-                  )}
-                </div>
+
+                    {/* Description */}
+                    {descOpen && (
+                      <div className="px-2 pb-2 pl-[68px]">
+                        <Input
+                          placeholder="이 단계에 대한 설명을 입력하세요"
+                          value={item.description ?? ''}
+                          onChange={(e) =>
+                            updateChecklistItem(i, { description: e.target.value || undefined })
+                          }
+                          autoFocus={expandedDesc.has(i) && !item.description}
+                          className="rounded-lg h-8 text-xs text-muted-foreground border-dashed border-slate-200"
+                        />
+                      </div>
+                    )}
+                  </div>
+                </Fragment>
               );
             })}
 
-            {/* Add to end */}
+            {/* 마지막 행 뒤에도 Insert Zone (drop 타겟용 + 미세한 추가 affordance) */}
+            <InsertZone
+              position={checklist.length}
+              isDropTarget={
+                draggingIndex !== null &&
+                dropPosition === checklist.length &&
+                draggingIndex !== checklist.length - 1
+              }
+              isDragMode={draggingIndex !== null}
+              onInsert={() => insertChecklistItem(checklist.length)}
+            />
+
+            {/* Add to end — 주요 affordance, 항상 표시 */}
             <button
               type="button"
-              onClick={() => addChecklistItem()}
+              onClick={() => insertChecklistItem(checklist.length)}
               className="w-full mt-2 py-2.5 rounded-lg border border-dashed border-slate-200 hover:border-slate-300 hover:bg-slate-50/50 transition-colors flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/60"
             >
               <Plus className="h-3.5 w-3.5" />

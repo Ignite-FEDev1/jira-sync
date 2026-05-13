@@ -179,16 +179,35 @@ export async function createSession(
     confluenceTasks = await parseConfluenceTasks(req.confluencePageUrl);
   }
 
+  // 시나리오 teamMembers에 포함되지 않은 팀원은 inactive로 초기화
+  // (시나리오에서 선택된 사람만 기본 참여자가 되도록)
+  const teamId = req.teamId || DEFAULT_TEAM_ID;
+  let initialInactive: string[] = [];
+  if (template.teamMembers && template.teamMembers.length > 0) {
+    const { data: teamUsers } = await dbServer
+      .from('users')
+      .select('name')
+      .eq('team_id', teamId);
+    const templateMemberSet = new Set(
+      template.teamMembers.map((n) => normalizeName(n))
+    );
+    initialInactive =
+      (teamUsers as { name: string }[] | null)
+        ?.map((u) => u.name)
+        .filter((n) => !templateMemberSet.has(normalizeName(n))) ?? [];
+  }
+
   const { data: inserted, error: insertError } = await dbServer
     .from('deploy_room_sessions')
     .insert({
       title: req.title,
       template_id: req.templateId,
-      team_id: req.teamId || DEFAULT_TEAM_ID,
+      team_id: teamId,
       deploy_type: req.deployType ?? 'regular',
       deploy_date: req.deployDate,
       confluence_page_url: req.confluencePageUrl ?? null,
       confluence_tasks: confluenceTasks,
+      inactive_participants: initialInactive,
       created_by: req.createdBy ?? null,
       status: 'preparing',
     })
