@@ -21,15 +21,21 @@ import {
   createFehgSprint,
   buildNextSprintDates,
 } from '@/lib/services/sync/sprint-mapper';
-import { patchAutomationKqTicket, FehgIssueLink } from '@/lib/services/sprint-close/cascade-kq';
+import {
+  patchAutomationKqTicket,
+  FehgIssueLink,
+} from '@/lib/services/sprint-close/cascade-kq';
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json() as { ticketKey: string };
+    const body = (await req.json()) as { ticketKey: string };
     const { ticketKey } = body;
 
     if (!ticketKey) {
-      return NextResponse.json({ success: false, error: 'ticketKey 필수' }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: 'ticketKey 필수' },
+        { status: 400 }
+      );
     }
 
     await setupJiraAuth();
@@ -66,11 +72,15 @@ export async function POST(req: NextRequest) {
         issuelinks?: FehgIssueLink[];
       };
     }>(`issue/${ticketKey}`, {
-      fields: 'summary,description,assignee,priority,issuetype,parent,labels,customfield_10020,issuelinks',
+      fields:
+        'summary,description,assignee,priority,issuetype,parent,labels,customfield_10020,issuelinks',
     });
 
     if (!ticketResult.success || !ticketResult.data) {
-      return NextResponse.json({ success: false, error: ticketResult.error }, { status: 500 });
+      return NextResponse.json(
+        { success: false, error: ticketResult.error },
+        { status: 500 }
+      );
     }
 
     const original = ticketResult.data.fields;
@@ -107,13 +117,17 @@ export async function POST(req: NextRequest) {
       issuetype: original.issuetype,
       [IGNITE_CUSTOM_FIELDS.SPRINT]: nextSprint.id,
       [IGNITE_CUSTOM_FIELDS.STORY_POINTS]: null,
+      [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: null, // 원본 AUTOWAY 연결 제거 - 데일리 싱크가 클론 티켓용 신규 AUTOWAY 생성
     };
     if (original.description) newFields.description = original.description;
-    if (original.assignee) newFields.assignee = { accountId: original.assignee.accountId };
+    if (original.assignee)
+      newFields.assignee = { accountId: original.assignee.accountId };
     if (original.priority) newFields.priority = original.priority;
     if (original.labels?.length) newFields.labels = original.labels;
 
-    const createResult = await client.post<{ key: string }>('issue', { fields: newFields });
+    const createResult = await client.post<{ key: string }>('issue', {
+      fields: newFields,
+    });
     if (!createResult.success || !createResult.data) {
       return NextResponse.json(
         { success: false, step: 'create', error: createResult.error },
@@ -123,9 +137,12 @@ export async function POST(req: NextRequest) {
     const newKey = createResult.data.key;
 
     // 에픽 스프린트 상속 방지: Agile API로 다음 달 스프린트 1차 고정
-    const sprintFix1 = await client.post(`agile/1.0/sprint/${nextSprint.id}/issue`, {
-      issues: [newKey],
-    });
+    const sprintFix1 = await client.post(
+      `agile/1.0/sprint/${nextSprint.id}/issue`,
+      {
+        issues: [newKey],
+      }
+    );
     if (!sprintFix1.success) {
       return NextResponse.json(
         { success: false, step: 'sprint-fix', error: sprintFix1.error, newKey },
@@ -154,10 +171,19 @@ export async function POST(req: NextRequest) {
     });
 
     // 4. 자동화 KQ 대기 후 원본 KQ 기준 필드 패치 (상위항목/컴포넌트/수정버전/스프린트)
-    const kqKey = await patchAutomationKqTicket(client, ticketKey, original.issuelinks ?? [], newKey, nextSprintName, (msg) => cascadeLog.push(msg));
+    const kqKey = await patchAutomationKqTicket(
+      client,
+      ticketKey,
+      original.issuelinks ?? [],
+      newKey,
+      nextSprintName,
+      (msg) => cascadeLog.push(msg)
+    );
 
     // 5. FEHG 클론 스프린트 재고정 (자동화가 리셋했을 경우 대비)
-    await client.post(`agile/1.0/sprint/${nextSprint.id}/issue`, { issues: [newKey] });
+    await client.post(`agile/1.0/sprint/${nextSprint.id}/issue`, {
+      issues: [newKey],
+    });
 
     // 6. AUTOWAY 연쇄 생성 (상위 에픽 summary에 [GW] 포함 — daily sync와 동일 조건)
     const parentSummaryForGw = original.parent?.fields?.summary ?? '';
@@ -169,9 +195,14 @@ export async function POST(req: NextRequest) {
         cascadeLog.push(`[SKIP] AUTOWAY 연쇄 생성 불가 — HMG 인증정보 없음`);
       } else {
         const igniteAccountId = original.assignee?.accountId ?? null;
-        const dbUser = igniteAccountId ? userByIgniteId.get(igniteAccountId) : undefined;
+        const dbUser = igniteAccountId
+          ? userByIgniteId.get(igniteAccountId)
+          : undefined;
 
-        const newAutowayResult = await hmgClient.post<{ id: string; key: string }>('issue', {
+        const newAutowayResult = await hmgClient.post<{
+          id: string;
+          key: string;
+        }>('issue', {
           fields: {
             project: { key: 'AUTOWAY' },
             summary: cloneSummary,
@@ -182,13 +213,17 @@ export async function POST(req: NextRequest) {
                   reporter: { accountId: dbUser.hmgAccountId },
                 }
               : {}),
-            ...(original.description ? { description: original.description } : {}),
+            ...(original.description
+              ? { description: original.description }
+              : {}),
             ...(original.labels?.length ? { labels: original.labels } : {}),
           },
         });
 
         if (!newAutowayResult.success || !newAutowayResult.data) {
-          cascadeLog.push(`[ERROR] AUTOWAY 생성 실패: ${newAutowayResult.error}`);
+          cascadeLog.push(
+            `[ERROR] AUTOWAY 생성 실패: ${newAutowayResult.error}`
+          );
         } else {
           autowayKey = newAutowayResult.data.key;
           const autowayUrl = `${JIRA_ENDPOINTS.HMG}/browse/${autowayKey}`;
@@ -203,7 +238,9 @@ export async function POST(req: NextRequest) {
         }
       }
     } else {
-      cascadeLog.push(`[SKIP] AUTOWAY — [GW] 에픽 아님 (${parentSummaryForGw || original.parent?.key || '부모 없음'})`);
+      cascadeLog.push(
+        `[SKIP] AUTOWAY — [GW] 에픽 아님 (${parentSummaryForGw || original.parent?.key || '부모 없음'})`
+      );
     }
 
     return NextResponse.json({
@@ -215,7 +252,9 @@ export async function POST(req: NextRequest) {
       kqKey,
       kqUrl: kqKey ? `${JIRA_ENDPOINTS.IGNITE}/browse/${kqKey}` : null,
       autowayKey,
-      autowayUrl: autowayKey ? `${JIRA_ENDPOINTS.HMG}/browse/${autowayKey}` : null,
+      autowayUrl: autowayKey
+        ? `${JIRA_ENDPOINTS.HMG}/browse/${autowayKey}`
+        : null,
       cascadeLog,
     });
   } catch (err) {

@@ -14,10 +14,17 @@
 process.env.BATCH_MODE = 'true';
 
 import { JiraClient } from '@/lib/services/jira/client';
-import { FEHG_TRANSITIONS, IGNITE_CUSTOM_FIELDS, JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import {
+  FEHG_TRANSITIONS,
+  IGNITE_CUSTOM_FIELDS,
+  JIRA_ENDPOINTS,
+} from '@/lib/constants/jira';
 import { getAllUsers } from '@/lib/services/user-lookup';
 import { sendSprintCloseEmail } from '@/lib/services/email/resend-client';
-import { buildSprintCloseEmailHtml, SprintCloseResult } from '@/lib/services/email/sprint-close-email';
+import {
+  buildSprintCloseEmailHtml,
+  SprintCloseResult,
+} from '@/lib/services/email/sprint-close-email';
 import {
   getFehgActiveSprintInfo,
   buildNextFehgSprintName,
@@ -26,7 +33,10 @@ import {
   buildNextSprintDates,
 } from '@/lib/services/sync/sprint-mapper';
 import { SprintInfo } from '@/lib/services/sync/types';
-import { patchAutomationKqTicket, FehgIssueLink } from '@/lib/services/sprint-close/cascade-kq';
+import {
+  patchAutomationKqTicket,
+  FehgIssueLink,
+} from '@/lib/services/sprint-close/cascade-kq';
 
 // ─── 타입 ────────────────────────────────────────────────────
 
@@ -80,7 +90,7 @@ async function fetchActiveSprintTickets(
     'labels',
     'customfield_10015', // 시작일
     'customfield_10306', // HMG Jira 링크 (AUTOWAY)
-    'issuelinks',        // Blocks → KQ-* (KQ 연쇄 생성용)
+    'issuelinks', // Blocks → KQ-* (KQ 연쇄 생성용)
   ].join(',');
 
   const result = await client.get<{ issues: JiraIssue[]; total: number }>(
@@ -115,7 +125,9 @@ async function transitionIssue(
     });
   }
   if (!result.success) {
-    throw new Error(`상태 전환 2회 모두 실패 (${issueKey}, transition=${transitionId}): ${result.error}`);
+    throw new Error(
+      `상태 전환 2회 모두 실패 (${issueKey}, transition=${transitionId}): ${result.error}`
+    );
   }
 }
 
@@ -139,24 +151,34 @@ async function createCloneTicket(
     issuetype: original.fields.issuetype,
     [IGNITE_CUSTOM_FIELDS.SPRINT]: nextSprintId,
     [IGNITE_CUSTOM_FIELDS.STORY_POINTS]: null, // 추정치 초기화 (프로젝트 기본값 방지)
+    [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: null, // 원본 AUTOWAY 연결 제거 - 데일리 싱크가 클론 티켓용 신규 AUTOWAY 생성
   };
 
-  if (original.fields.description) fields.description = original.fields.description;
-  if (original.fields.assignee) fields.assignee = { accountId: original.fields.assignee.accountId };
+  if (original.fields.description)
+    fields.description = original.fields.description;
+  if (original.fields.assignee)
+    fields.assignee = { accountId: original.fields.assignee.accountId };
   if (original.fields.priority) fields.priority = original.fields.priority;
   if (original.fields.labels?.length) fields.labels = original.fields.labels;
 
-  const result = await client.post<{ id: string; key: string }>('issue', { fields });
+  const result = await client.post<{ id: string; key: string }>('issue', {
+    fields,
+  });
   if (!result.success || !result.data) {
-    throw new Error(`신규 티켓 발행 실패 (원본: ${original.key}): ${result.error}`);
+    throw new Error(
+      `신규 티켓 발행 실패 (원본: ${original.key}): ${result.error}`
+    );
   }
 
   const newKey = result.data.key;
 
   // 에픽 스프린트 상속 방지: Agile API로 다음 달 스프린트 1차 고정
-  const sprintFix1 = await client.post(`agile/1.0/sprint/${nextSprintId}/issue`, {
-    issues: [newKey],
-  });
+  const sprintFix1 = await client.post(
+    `agile/1.0/sprint/${nextSprintId}/issue`,
+    {
+      issues: [newKey],
+    }
+  );
   if (!sprintFix1.success) {
     throw new Error(`스프린트 변경 실패 (${newKey}): ${sprintFix1.error}`);
   }
@@ -192,7 +214,9 @@ async function linkCloners(
   });
   if (!result.success) {
     // 링크 실패는 경고 처리 (티켓 자체는 이미 생성됨)
-    console.error(`  [WARN] 링크 추가 실패 (${originalKey} ↔ ${newKey}): ${result.error}`);
+    console.error(
+      `  [WARN] 링크 추가 실패 (${originalKey} ↔ ${newKey}): ${result.error}`
+    );
   }
 }
 
@@ -215,7 +239,9 @@ async function changeTicketSprint(
     });
   }
   if (!result.success) {
-    throw new Error(`스프린트 변경 2회 모두 실패 (${issueKey}): ${result.error}`);
+    throw new Error(
+      `스프린트 변경 2회 모두 실패 (${issueKey}): ${result.error}`
+    );
   }
 }
 
@@ -234,19 +260,26 @@ async function cascadeLinkedTickets(
   original: JiraIssue,
   cloneKey: string,
   cloneSummary: string,
-  userByAccountId: Map<string, { name: string; igniteAccountId: string; hmgAccountId?: string | null }>,
+  userByAccountId: Map<
+    string,
+    { name: string; igniteAccountId: string; hmgAccountId?: string | null }
+  >,
   isDryRun: boolean
 ): Promise<void> {
   // daily sync와 동일한 조건: 상위 에픽 summary에 [GW] 포함 시 AUTOWAY 생성
   const parentKey = original.fields.parent?.key;
   const parentSummary = original.fields.parent?.fields?.summary ?? '';
   if (!parentKey || !parentSummary.includes('[GW]')) {
-    console.log(`    [SKIP] AUTOWAY 연쇄 생성 — [GW] 에픽 아님 (${parentSummary || parentKey || '부모 없음'})`);
+    console.log(
+      `    [SKIP] AUTOWAY 연쇄 생성 — [GW] 에픽 아님 (${parentSummary || parentKey || '부모 없음'})`
+    );
     return;
   }
 
   if (isDryRun) {
-    console.log(`    [DRY RUN] AUTOWAY 연쇄 생성 예정 ([GW] 에픽: ${parentSummary})`);
+    console.log(
+      `    [DRY RUN] AUTOWAY 연쇄 생성 예정 ([GW] 에픽: ${parentSummary})`
+    );
     return;
   }
 
@@ -259,24 +292,33 @@ async function cascadeLinkedTickets(
   const dbUser = accountId ? userByAccountId.get(accountId) : undefined;
 
   try {
-    const newAutowayResult = await hmgClient.post<{ id: string; key: string }>('issue', {
-      fields: {
-        project: { key: 'AUTOWAY' },
-        summary: cloneSummary,
-        issuetype: { name: '작업' },
-        ...(dbUser?.hmgAccountId
-          ? {
-              assignee: { accountId: dbUser.hmgAccountId },
-              reporter: { accountId: dbUser.hmgAccountId },
-            }
-          : {}),
-        ...(original.fields.description ? { description: original.fields.description } : {}),
-        ...(original.fields.labels?.length ? { labels: original.fields.labels } : {}),
-      },
-    });
+    const newAutowayResult = await hmgClient.post<{ id: string; key: string }>(
+      'issue',
+      {
+        fields: {
+          project: { key: 'AUTOWAY' },
+          summary: cloneSummary,
+          issuetype: { name: '작업' },
+          ...(dbUser?.hmgAccountId
+            ? {
+                assignee: { accountId: dbUser.hmgAccountId },
+                reporter: { accountId: dbUser.hmgAccountId },
+              }
+            : {}),
+          ...(original.fields.description
+            ? { description: original.fields.description }
+            : {}),
+          ...(original.fields.labels?.length
+            ? { labels: original.fields.labels }
+            : {}),
+        },
+      }
+    );
 
     if (!newAutowayResult.success || !newAutowayResult.data) {
-      console.error(`    [ERROR] AUTOWAY 연쇄 생성 실패: ${newAutowayResult.error}`);
+      console.error(
+        `    [ERROR] AUTOWAY 연쇄 생성 실패: ${newAutowayResult.error}`
+      );
       return;
     }
     const newAutowayKey = newAutowayResult.data.key;
@@ -288,7 +330,9 @@ async function cascadeLinkedTickets(
       fields: { [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: autowayUrl },
     });
     if (!saveResult.success) {
-      console.warn(`    [WARN] ${cloneKey} AUTOWAY 링크 저장 실패 (티켓은 생성됨): ${saveResult.error}`);
+      console.warn(
+        `    [WARN] ${cloneKey} AUTOWAY 링크 저장 실패 (티켓은 생성됨): ${saveResult.error}`
+      );
     } else {
       console.log(`    -> ${cloneKey}.customfield_10306 = ${autowayUrl}`);
     }
@@ -306,7 +350,9 @@ async function main() {
   // DRY_RUN 모드: Jira 변경 없이 처리 대상 조회 + 이메일 발송만 수행 (이메일 테스트용)
   const isDryRun = !!process.env.DRY_RUN;
   if (isDryRun) {
-    console.log('🔍 DRY RUN 모드: Jira 변경 없이 처리 대상만 조회하고 이메일을 발송합니다.\n');
+    console.log(
+      '🔍 DRY RUN 모드: Jira 변경 없이 처리 대상만 조회하고 이메일을 발송합니다.\n'
+    );
   }
 
   // 말일 체크 (TEST_MODE=true 또는 DRY_RUN=true면 우회)
@@ -330,7 +376,9 @@ async function main() {
   if (!user) {
     // 로컬 테스트용 fallback: 환경변수에 직접 설정된 경우 사용
     if (process.env.IGNITE_JIRA_EMAIL && process.env.IGNITE_JIRA_API_TOKEN) {
-      console.log(`[FALLBACK] DB 인증정보 없음 — 환경변수 사용: ${process.env.IGNITE_JIRA_EMAIL}\n`);
+      console.log(
+        `[FALLBACK] DB 인증정보 없음 — 환경변수 사용: ${process.env.IGNITE_JIRA_EMAIL}\n`
+      );
     } else {
       console.error('Ignite Jira 인증정보가 있는 사용자를 찾을 수 없습니다.');
       process.exit(1);
@@ -351,10 +399,14 @@ async function main() {
     process.env.HMG_JIRA_EMAIL = hmgUser.hmgJiraEmail;
     process.env.HMG_JIRA_API_TOKEN = hmgUser.hmgJiraApiToken;
     hmgClient = new JiraClient('hmg');
-    console.log(`HMG Jira 인증 계정: ${hmgUser.name} (${hmgUser.hmgJiraEmail})\n`);
+    console.log(
+      `HMG Jira 인증 계정: ${hmgUser.name} (${hmgUser.hmgJiraEmail})\n`
+    );
   } else if (process.env.HMG_JIRA_EMAIL && process.env.HMG_JIRA_API_TOKEN) {
     hmgClient = new JiraClient('hmg');
-    console.log(`[FALLBACK] HMG DB 인증정보 없음 — 환경변수 사용: ${process.env.HMG_JIRA_EMAIL}\n`);
+    console.log(
+      `[FALLBACK] HMG DB 인증정보 없음 — 환경변수 사용: ${process.env.HMG_JIRA_EMAIL}\n`
+    );
   } else {
     console.log('HMG Jira 인증정보 없음 — AUTOWAY 연쇄 생성 비활성\n');
   }
@@ -362,7 +414,9 @@ async function main() {
   // ── FEHG 액티브 스프린트 조회 ────────────────────────────
   console.log('[1/4] FEHG 액티브 스프린트 조회...');
   const activeSprint = await getFehgActiveSprintInfo();
-  console.log(`  액티브 스프린트: ${activeSprint.name} (ID: ${activeSprint.id})\n`);
+  console.log(
+    `  액티브 스프린트: ${activeSprint.name} (ID: ${activeSprint.id})\n`
+  );
 
   // ── 다음 달 스프린트 확인 / 생성 ─────────────────────────
   const nextSprintName = buildNextFehgSprintName(activeSprint.name);
@@ -373,7 +427,9 @@ async function main() {
 
   if (existing) {
     nextSprint = existing;
-    console.log(`  기존 스프린트 사용: ${nextSprint.name} (ID: ${nextSprint.id})`);
+    console.log(
+      `  기존 스프린트 사용: ${nextSprint.name} (ID: ${nextSprint.id})`
+    );
   } else {
     console.log('  스프린트 없음. 자동 생성 중...');
     const { startDate, endDate } = buildNextSprintDates(nextSprintName);
@@ -389,7 +445,10 @@ async function main() {
 
   // 신규 발행 티켓 summary suffix에 사용할 "OO월" 문자열
   const nextPeriod = nextSprintName.split(' ')[1]; // "2605"
-  if (!nextPeriod) throw new Error(`스프린트 이름 형식 오류: "${nextSprintName}" (예: "FEHG 2605")`);
+  if (!nextPeriod)
+    throw new Error(
+      `스프린트 이름 형식 오류: "${nextSprintName}" (예: "FEHG 2605")`
+    );
   const nextMonthLabel = `${parseInt(nextPeriod.slice(2, 4), 10)}월`;
 
   // ── 티켓별 상태 처리 ──────────────────────────────────────
@@ -403,7 +462,8 @@ async function main() {
 
     // DB 사용자 이름 우선 사용 (currentUserName과 일치 보장), 없으면 Jira displayName
     const dbUser = accountId ? userByAccountId.get(accountId) : undefined;
-    const assigneeName = dbUser?.name ?? ticket.fields.assignee?.displayName ?? null;
+    const assigneeName =
+      dbUser?.name ?? ticket.fields.assignee?.displayName ?? null;
 
     // 완료 상태: 그대로 스킵 (스프린트 중복 여부 관계없이)
     if (statusKey === 'done') {
@@ -417,15 +477,31 @@ async function main() {
         // 중복 스프린트인 경우 먼저 현재 스프린트만 남기도록 재설정 (다음 스프린트 제거)
         if (isDryRun) {
           if (sprints.length >= 2) {
-            console.log(`  [DRY RUN 중복+진행중] ${ticket.key}: 현재 스프린트 유지 → 완료 전환 + 신규 발행 예정 (변경 없음)`);
+            console.log(
+              `  [DRY RUN 중복+진행중] ${ticket.key}: 현재 스프린트 유지 → 완료 전환 + 신규 발행 예정 (변경 없음)`
+            );
           } else {
-            console.log(`  [DRY RUN 진행중] ${ticket.key}: 완료 전환 + 신규 발행 예정 (변경 없음)`);
+            console.log(
+              `  [DRY RUN 진행중] ${ticket.key}: 완료 전환 + 신규 발행 예정 (변경 없음)`
+            );
           }
-          await patchAutomationKqTicket(client, ticket.key, ticket.fields.issuelinks ?? [], '(신규발행예정)', nextSprintName, (msg) => console.log(`    ${msg}`), true);
+          await patchAutomationKqTicket(
+            client,
+            ticket.key,
+            ticket.fields.issuelinks ?? [],
+            '(신규발행예정)',
+            nextSprintName,
+            (msg) => console.log(`    ${msg}`),
+            true
+          );
           await cascadeLinkedTickets(
-            client, hmgClient, ticket, '(신규발행예정)',
+            client,
+            hmgClient,
+            ticket,
+            '(신규발행예정)',
             `${ticket.fields.summary} - ${nextMonthLabel}`,
-            userByAccountId, true
+            userByAccountId,
+            true
           );
           result.cloned.push({
             originalKey: ticket.key,
@@ -437,7 +513,9 @@ async function main() {
         } else {
           if (sprints.length >= 2) {
             // 현재 스프린트만 남기도록 재설정 (다음 스프린트 참조 제거)
-            console.log(`  [중복+진행중] ${ticket.key}: 현재 스프린트(${activeSprint.name})만 남기도록 재설정`);
+            console.log(
+              `  [중복+진행중] ${ticket.key}: 현재 스프린트(${activeSprint.name})만 남기도록 재설정`
+            );
             await client.put(`issue/${ticket.key}`, {
               fields: { [IGNITE_CUSTOM_FIELDS.SPRINT]: activeSprint.id },
             });
@@ -447,21 +525,39 @@ async function main() {
 
           await transitionIssue(client, ticket.key, FEHG_TRANSITIONS.DONE);
 
-          const newKey = await createCloneTicket(client, ticket, nextSprint.id, nextMonthLabel);
+          const newKey = await createCloneTicket(
+            client,
+            ticket,
+            nextSprint.id,
+            nextMonthLabel
+          );
           console.log(`    -> 신규 발행: ${newKey}`);
 
           // Cloners 링크 → 자동화 트리거 (KQ 자동 생성 + Blocks 링크)
           await linkCloners(client, ticket.key, newKey);
 
           // 자동화 KQ 대기 후 원본 KQ 기준 필드 패치 (상위항목/컴포넌트/수정버전/스프린트)
-          await patchAutomationKqTicket(client, ticket.key, ticket.fields.issuelinks ?? [], newKey, nextSprintName, (msg) => console.log(`    ${msg}`));
+          await patchAutomationKqTicket(
+            client,
+            ticket.key,
+            ticket.fields.issuelinks ?? [],
+            newKey,
+            nextSprintName,
+            (msg) => console.log(`    ${msg}`)
+          );
 
           // FEHG 클론 스프린트 재고정 (자동화가 리셋했을 경우 대비)
-          await client.post(`agile/1.0/sprint/${nextSprint.id}/issue`, { issues: [newKey] });
+          await client.post(`agile/1.0/sprint/${nextSprint.id}/issue`, {
+            issues: [newKey],
+          });
           await cascadeLinkedTickets(
-            client, hmgClient, ticket, newKey,
+            client,
+            hmgClient,
+            ticket,
+            newKey,
             `${ticket.fields.summary} - ${nextMonthLabel}`,
-            userByAccountId, false
+            userByAccountId,
+            false
           );
 
           result.cloned.push({
@@ -475,19 +571,30 @@ async function main() {
       } else {
         // 할 일 (그 외 상태): 다음 달 스프린트로 이동
         if (isDryRun) {
-          const tag = sprints.length >= 2 ? '[DRY RUN 중복+할일]' : '[DRY RUN 할일]';
-          console.log(`  ${tag} ${ticket.key}: ${nextSprint.name}으로 이동 예정 (변경 없음)`);
+          const tag =
+            sprints.length >= 2 ? '[DRY RUN 중복+할일]' : '[DRY RUN 할일]';
+          console.log(
+            `  ${tag} ${ticket.key}: ${nextSprint.name}으로 이동 예정 (변경 없음)`
+          );
         } else {
           const tag = sprints.length >= 2 ? '[중복+할일]' : '[할일]';
           console.log(`  ${tag} ${ticket.key}: 스프린트 → ${nextSprint.name}`);
           await changeTicketSprint(client, ticket.key, nextSprint.id);
         }
-        result.moved.push({ key: ticket.key, summary: ticket.fields.summary, assigneeName });
+        result.moved.push({
+          key: ticket.key,
+          summary: ticket.fields.summary,
+          assigneeName,
+        });
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`  [ERROR] ${ticket.key}: ${errorMsg}`);
-      result.errors.push({ key: ticket.key, summary: ticket.fields.summary, error: errorMsg });
+      result.errors.push({
+        key: ticket.key,
+        summary: ticket.fields.summary,
+        error: errorMsg,
+      });
     }
   }
 
@@ -503,9 +610,19 @@ async function main() {
   // 팀 요약 이메일 1건만 fedev1@ignite.co.kr으로 발송 (담당자별 그룹, 개인 강조 없음)
   // 개인 발송은 Resend 도메인 인증 없이 불가 (403 validation_error)
   if (process.env.RESEND_API_KEY) {
-    const summaryHtml = buildSprintCloseEmailHtml(activeSprint.name, nextSprint.name, result, { isDryRun });
+    const summaryHtml = buildSprintCloseEmailHtml(
+      activeSprint.name,
+      nextSprint.name,
+      result,
+      { isDryRun }
+    );
     try {
-      await sendSprintCloseEmail(summaryHtml, activeSprint.name, nextSprint.name, { isDryRun });
+      await sendSprintCloseEmail(
+        summaryHtml,
+        activeSprint.name,
+        nextSprint.name,
+        { isDryRun }
+      );
     } catch (err) {
       console.error('[이메일] 팀 요약 발송 실패:', err);
     }
