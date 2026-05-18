@@ -53,7 +53,8 @@ export class HMGSyncService {
   private async injectEpicLink(
     fehgTicket: JiraIssue,
     targetProjectKey: 'AUTOWAY' | 'HMGBOARD',
-    mappedFields: Record<string, unknown>
+    mappedFields: Record<string, unknown>,
+    syncProfileId?: string
   ): Promise<void> {
     const parent = fehgTicket.fields.parent;
     if (!parent?.key || !parent.fields?.summary) {
@@ -62,7 +63,8 @@ export class HMGSyncService {
     const epicKey = await ensureTargetEpic(
       { key: parent.key, summary: parent.fields.summary },
       targetProjectKey,
-      this.logger
+      this.logger,
+      syncProfileId
     );
     if (epicKey) {
       mappedFields[HMG_EPIC_LINK_FIELD] = epicKey;
@@ -238,11 +240,12 @@ export class HMGSyncService {
             targetProjectKey as 'AUTOWAY' | 'HMGBOARD'
           );
 
-      // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성)
+      // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성/상태동기화)
       await this.injectEpicLink(
         fehgTicket,
         targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
-        mappedFields
+        mappedFields,
+        syncProfileId
       );
 
       const autowayIssueType = await this.resolveCreateIssueType(targetProjectKey);
@@ -346,11 +349,12 @@ export class HMGSyncService {
             targetProjectKey as 'AUTOWAY' | 'HMGBOARD'
           );
 
-      // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성)
+      // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성/상태동기화)
       await this.injectEpicLink(
         fehgTicket,
         targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
-        mappedFields
+        mappedFields,
+        syncProfileId
       );
 
       // 2. 소스 링크 필드 병합

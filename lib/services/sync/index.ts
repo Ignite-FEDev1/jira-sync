@@ -9,6 +9,7 @@ export * from './ignite-sync.service';
 export * from './hmg-sync.service';
 export * from './sync-orchestrator';
 export * from './db-field-mapper';
+export * from './epic-sync.service';
 
 // 간편 사용을 위한 기본 export
 export { SyncOrchestrator } from './sync-orchestrator';

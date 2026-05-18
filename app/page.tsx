@@ -35,6 +35,9 @@ import {
   SyncSummary,
   SyncResult,
   SyncTargetProject,
+  SyncLogger,
+  executeEpicSync,
+  EpicSyncMode,
 } from '@/lib/services/sync';
 import { db } from '@/lib/db';
 import { jira } from '@/lib/services/jira';
@@ -80,6 +83,11 @@ export default function Home() {
   const [syncType, setSyncType] = useState<string>('전체'); // 기본값: 전체
   const [epicOrTicketId, setEpicOrTicketId] = useState<string>('');
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // 에픽 동기화 전용 상태
+  const [epicSyncMode, setEpicSyncMode] = useState<EpicSyncMode>('all');
+  const [epicSyncId, setEpicSyncId] = useState<string>('');
+  const [isEpicSyncing, setIsEpicSyncing] = useState(false);
 
   // 동기화 로그 및 결과
   const [syncLogs, setSyncLogs] = useState<SyncLog[]>([]);
@@ -442,6 +450,63 @@ export default function Home() {
       );
     } finally {
       setIsSyncing(false);
+    }
+  };
+
+  // 에픽 동기화 핸들러 — FEHG의 [GW]/[HB] 에픽들을 AUTOWAY/HMGBOARD로
+  // 매칭 또는 생성하고 상태를 동기화 (자식 티켓 sync와 독립)
+  const handleEpicSync = async () => {
+    if (epicSyncMode === 'single' && !epicSyncId) {
+      toast.error('에픽 번호를 입력해주세요.');
+      return;
+    }
+
+    resetResultArea();
+    setIsEpicSyncing(true);
+
+    try {
+      const sourceProj = currentUser?.sourceProject || 'FEHG';
+      const epicKey =
+        epicSyncMode === 'single' ? `${sourceProj}-${epicSyncId}` : undefined;
+
+      const logger = new SyncLogger((log) => {
+        setSyncLogs((prev) => [...prev, log]);
+      });
+
+      const modeLabel =
+        epicSyncMode === 'all'
+          ? '전체 (AUTOWAY + HMGBOARD)'
+          : epicSyncMode === 'autoway'
+            ? 'AUTOWAY'
+            : epicSyncMode === 'hmgboard'
+              ? 'HMGBOARD'
+              : `단일 에픽 (${epicKey})`;
+
+      toast.success(`에픽 동기화 시작 — ${modeLabel}`);
+
+      const summary = await executeEpicSync(
+        {
+          mode: epicSyncMode,
+          epicKey,
+          sourceProjectKey: sourceProj,
+        },
+        logger
+      );
+
+      if (summary.totalFailed === 0) {
+        toast.success(
+          `에픽 동기화 완료 — ${summary.totalSuccess}개 처리`
+        );
+      } else {
+        toast.warning(
+          `에픽 동기화 완료 (성공: ${summary.totalSuccess}, 실패: ${summary.totalFailed})`
+        );
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`에픽 동기화 실패: ${msg}`);
+    } finally {
+      setIsEpicSyncing(false);
     }
   };
 
@@ -846,6 +911,65 @@ export default function Home() {
                       담당자의 허용된 에픽 하위 티켓만 조회합니다
                     </p>
                   </div> */}
+                </div>
+
+                {/* Epic Sync Action */}
+                <div className="space-y-3 mt-6 pt-6 border-t">
+                  <label className="text-sm font-medium">에픽 동기화</label>
+                  <div className="flex gap-2">
+                    <Select
+                      value={epicSyncMode}
+                      onValueChange={(value) =>
+                        setEpicSyncMode(value as EpicSyncMode)
+                      }
+                    >
+                      <SelectTrigger className="flex-1">
+                        <SelectValue placeholder="범위를 선택하세요" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">전체</SelectItem>
+                        <SelectItem value="autoway">AUTOWAY</SelectItem>
+                        <SelectItem value="hmgboard">HMGBOARD</SelectItem>
+                        <SelectItem value="single">에픽 번호 입력</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      onClick={handleEpicSync}
+                      disabled={isEpicSyncing || isSyncing}
+                      className="min-w-[100px]"
+                    >
+                      <RefreshCw
+                        className={`mr-2 h-4 w-4 ${isEpicSyncing ? 'animate-spin' : ''}`}
+                      />
+                      {isEpicSyncing ? '동기화 중...' : '동기화'}
+                    </Button>
+                  </div>
+
+                  {epicSyncMode === 'single' && (
+                    <div className="space-y-2 pl-4 pb-3 border-l-2 border-muted">
+                      <label className="text-sm font-medium text-muted-foreground">
+                        {sourceProject} 에픽 번호
+                      </label>
+                      <Input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder={`번호 입력 (예: 3340 → ${sourceProject}-3340)`}
+                        value={epicSyncId}
+                        onChange={(e) =>
+                          setEpicSyncId(e.target.value.replace(/[^0-9]/g, ''))
+                        }
+                        maxLength={10}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        [GW]/[HB] prefix로 대상 자동 결정 • {sourceProject}-
+                        {epicSyncId || 'XXX'}
+                      </p>
+                    </div>
+                  )}
+
+                  <p className="text-xs text-muted-foreground">
+                    FEHG의 [GW]/[HB] 에픽을 AUTOWAY/HMGBOARD로 매칭/생성하고 상태를 동기화합니다.
+                  </p>
                 </div>
 
               </div>
