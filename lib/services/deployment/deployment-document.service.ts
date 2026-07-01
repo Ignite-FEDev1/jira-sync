@@ -19,24 +19,30 @@ export type ProjectKey = 'groupware' | 'hmg-board' | 'cpo';
 
 /**
  * JQL fixVersion 조건을 변환
- * 기존 fixVersion 조건을 모두 release/adhoc/hotfix OR 조건으로 치환
+ * 기존 fixVersion 조건을 모두 release/adhoc/hotfix IN 조건으로 치환
  * 배포 유형이 중간에 바뀔 수 있으므로 항상 3가지 유형을 모두 포함
+ * OR 대신 IN을 사용하는 이유: `labels = "BE" AND fixVersion = "X" OR ...` 처럼
+ * 다른 조건과 결합될 때 OR 우선순위 때문에 라벨 필터가 일부 fixVersion에만 적용되는 문제 회피
  */
 function transformFixVersionInJql(
   jqlQuery: string,
   newDate: string
 ): string {
-  const allTypesOr = `fixVersion = &quot;release_${newDate}&quot; or fixVersion = &quot;adhoc_${newDate}&quot; or fixVersion = &quot;hotfix_${newDate}&quot;`;
+  const allTypesIn = `fixVersion IN (&quot;release_${newDate}&quot;, &quot;hotfix_${newDate}&quot;, &quot;adhoc_${newDate}&quot;)`;
 
   let result = jqlQuery;
 
-  // OR 조건 패턴 치환 (2~3개 OR)
-  const orPattern = /(?:fixVersion = &quot;(?:release|hotfix|adhoc)_\d{6}&quot;\s*(?:or\s*)?){2,3}/g;
-  result = result.replace(orPattern, allTypesOr);
+  // IN 조건 패턴 치환 (release/hotfix/adhoc 1~3개)
+  const inPattern = /fixVersion\s+IN\s*\(\s*(?:&quot;(?:release|hotfix|adhoc)_\d{6}&quot;\s*,?\s*){1,3}\)/gi;
+  result = result.replace(inPattern, allTypesIn);
+
+  // (구버전 호환) OR 조건 패턴 치환 (2~3개 OR)
+  const orPattern = /(?:fixVersion\s*=\s*&quot;(?:release|hotfix|adhoc)_\d{6}&quot;\s*(?:or\s*)?){2,3}/gi;
+  result = result.replace(orPattern, allTypesIn);
 
   // 단일 fixVersion 패턴 치환
-  const singlePattern = /fixVersion = &quot;(release|hotfix|adhoc)_\d{6}&quot;/g;
-  result = result.replace(singlePattern, allTypesOr);
+  const singlePattern = /fixVersion\s*=\s*&quot;(?:release|hotfix|adhoc)_\d{6}&quot;/gi;
+  result = result.replace(singlePattern, allTypesIn);
 
   return result;
 }
