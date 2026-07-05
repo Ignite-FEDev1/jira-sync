@@ -1,7 +1,9 @@
 // 동기화 관련 타입 정의
 
 // 동기화 대상 프로젝트 (HB는 HMGBOARD로 이관됨)
-export type SyncTargetProject = 'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD';
+// KQ/HDD/AUTOWAY/HMGBOARD는 고정 분류 규칙(issuelinks/[GW]/[HB] 에픽 접두사)을 갖고,
+// 그 외 이름은 DB sync_profile 기반 일반 분류를 탄다
+export type SyncTargetProject = 'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | (string & {});
 
 // HMG 인스턴스 동기화 대상 (코드 분기에서 사용)
 export type HmgTargetProject = 'AUTOWAY' | 'HMGBOARD';

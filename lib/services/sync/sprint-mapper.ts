@@ -189,9 +189,7 @@ export function initSprintCache() {
 /**
  * 스프린트 캐시 프리로드 (선택적)
  */
-export async function preloadSprintCache(
-  projects: Array<'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'>
-): Promise<void> {
+export async function preloadSprintCache(projects: string[]): Promise<void> {
   const infos = await Promise.all(projects.map((p) => getBoardInfo(p)));
   await Promise.all(
     infos

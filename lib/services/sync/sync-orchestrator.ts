@@ -1,13 +1,22 @@
 // 동기화 오케스트레이터 - 전체 프로세스 조율
 
 import { JiraIssue } from '@/lib/types/jira';
-import { SyncOptions, SyncSummary, SyncResult, SyncLog } from './types';
+import { SyncOptions, SyncSummary, SyncResult, SyncLog, SyncTargetProject } from './types';
+
+// 고정 분류 규칙(issuelinks/[GW]/[HB] 에픽 접두사)을 갖는 대상 — 그 외는 DB 프로필 기반 일반 분류
+const FIXED_TARGETS = new Set<string>(['KQ', 'HDD', 'AUTOWAY', 'HMGBOARD']);
 import { SyncLogger } from './logger';
 import { IgniteSyncService } from './ignite-sync.service';
 import { HMGSyncService } from './hmg-sync.service';
 import { chunkArray } from './field-mapper';
 import { initSprintCache, preloadSprintCache } from './sprint-mapper';
-import { clearDbMappingCache, getSyncProfileInfo, getSourceFieldsFromDb } from './db-field-mapper';
+import {
+  clearDbMappingCache,
+  getSyncProfileInfo,
+  getSourceFieldsFromDb,
+  getAllowedEpicsFromDb,
+  SyncProfileInfo,
+} from './db-field-mapper';
 import { clearTransitionCache } from './transition-helper';
 import { clearEpicCache } from './epic-resolver';
 import { jira } from '@/lib/services/jira';
@@ -107,9 +116,7 @@ export class SyncOrchestrator {
       }
 
       // 2. 스프린트 캐시 프리로드 (병렬) - 모든 대상 프로젝트
-      const sprintProjects = targetProjects as Array<
-        'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'
-      >;
+      const sprintProjects = targetProjects;
       if (sprintProjects.length > 0) {
         this.logger.info('스프린트 정보 프리로드 중...');
         await preloadSprintCache(sprintProjects);
@@ -318,19 +325,38 @@ export class SyncOrchestrator {
    */
   private async classifyTicketsByTargetProject(
     fehgTickets: JiraIssue[],
-    targetProjects: Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD'>
-  ): Promise<Map<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD', JiraIssue[]>> {
-    const classification = new Map<
-      'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD',
-      JiraIssue[]
-    >();
+    targetProjects: SyncTargetProject[]
+  ): Promise<Map<SyncTargetProject, JiraIssue[]>> {
+    const classification = new Map<SyncTargetProject, JiraIssue[]>();
 
     // 초기화
     targetProjects.forEach((project) => classification.set(project, []));
 
+    // 고정 대상(KQ/HDD/AUTOWAY/HMGBOARD) 외의 대상은 DB 프로필 기반으로 분류 준비
+    const genericTargets: Array<{
+      target: SyncTargetProject;
+      profile: SyncProfileInfo;
+      allowedEpics: string[];
+    }> = [];
+    for (const target of targetProjects) {
+      if (FIXED_TARGETS.has(target)) continue;
+      const profile = await this.findHmgProfileByTarget(target);
+      if (!profile) {
+        this.logger.warning(
+          `${target}: HMG 동기화 프로필을 찾을 수 없어 분류에서 제외됩니다`
+        );
+        continue;
+      }
+      genericTargets.push({
+        target,
+        profile,
+        allowedEpics: await getAllowedEpicsFromDb(profile.id),
+      });
+    }
+
     // 1회 순회로 각 티켓의 대상 프로젝트 결정
     for (const ticket of fehgTickets) {
-      const targets: Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD'> = [];
+      const targets: SyncTargetProject[] = [];
 
       // 1. 연결된 티켓 확인 (issuelinks - KQ/HDD)
       if (ticket.fields.issuelinks) {
@@ -386,7 +412,27 @@ export class SyncOrchestrator {
         }
       }
 
-      // 4. 각 대상 프로젝트에 티켓 추가
+      // 4. 그 외 대상: DB 프로필 기반 일반 분류
+      //    link field에 대상 티켓 링크가 있거나 허용 에픽에 부합하면 대상
+      //    (sync_profile_allowed_epics가 비어있으면 모든 티켓이 대상)
+      for (const { target, profile, allowedEpics } of genericTargets) {
+        const rawLink = profile.linkField
+          ? ticket.fields[profile.linkField]
+          : undefined;
+        const hasTargetLink =
+          typeof rawLink === 'string' &&
+          new RegExp(`${profile.targetProjectKey}-\\d+`).test(rawLink);
+
+        const parentKey = ticket.fields.parent?.key ?? '';
+        const isAllowedEpic =
+          allowedEpics.length === 0 || allowedEpics.includes(parentKey);
+
+        if (hasTargetLink || isAllowedEpic) {
+          targets.push(target);
+        }
+      }
+
+      // 5. 각 대상 프로젝트에 티켓 추가
       targets.forEach((target) => {
         classification.get(target)?.push(ticket);
       });
@@ -409,24 +455,31 @@ export class SyncOrchestrator {
    */
   private async syncToProject(
     fehgTickets: JiraIssue[],
-    targetProject: 'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD',
+    targetProject: SyncTargetProject,
     assigneeAccountId: string,
     chunkSize: number,
     teamUsers?: SyncOptions['teamUsers'],
     syncProfileId?: string
   ): Promise<SyncResult[]> {
-    const isHmgInstance = targetProject === 'AUTOWAY' || targetProject === 'HMGBOARD';
-
     // syncProfileId가 없으면 소스/타겟 프로젝트 기준으로 DB에서 자동 검색
     let effectiveProfileId = syncProfileId;
     if (!effectiveProfileId) {
-      if (isHmgInstance) {
-        const prof = await this.findHmgProfileByTarget(targetProject);
-        if (prof) effectiveProfileId = prof.id;
+      const prof = await this.findHmgProfileByTarget(targetProject);
+      if (prof) {
+        effectiveProfileId = prof.id;
       } else {
         effectiveProfileId = await this.findProfileForTarget(targetProject);
       }
     }
+
+    // 대상 인스턴스 결정: 고정 HMG 대상이거나, 프로필의 target 인스턴스가 hmg인 경우
+    const profileInfo = effectiveProfileId
+      ? await getSyncProfileInfo(effectiveProfileId)
+      : null;
+    const isHmgInstance =
+      targetProject === 'AUTOWAY' ||
+      targetProject === 'HMGBOARD' ||
+      profileInfo?.targetInstance === 'hmg';
 
     this.logger.info(
       `━━━ ${targetProject} 동기화 시작${effectiveProfileId ? ' (DB 매핑)' : ''} ━━━`
@@ -676,7 +729,7 @@ export class SyncOrchestrator {
    */
   private hmgProfileCache: Map<string, Awaited<ReturnType<typeof getSyncProfileInfo>>> = new Map();
 
-  private async findHmgProfileByTarget(targetProjectKey: 'AUTOWAY' | 'HMGBOARD') {
+  private async findHmgProfileByTarget(targetProjectKey: string) {
     if (this.hmgProfileCache.has(targetProjectKey)) {
       return this.hmgProfileCache.get(targetProjectKey)!;
     }
