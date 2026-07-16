@@ -84,9 +84,10 @@ async function fetchGitlabMrs(
 
   // 방어적 로컬 재검증: GitLab API의 labels 필터가 라벨 이력 등의 이유로
   // 현재는 라벨이 없는 MR을 반환할 수 있어, 응답의 mr.labels로 한 번 더 확인
-  const filtered = labelFilter
+  const filtered = (labelFilter
     ? mrs.filter((mr) => matchesLabel(mr.labels ?? [], labelFilter))
-    : mrs;
+    : mrs
+  ).filter((mr) => mr.state !== 'closed');
 
   return filtered.map((mr) => ({
     gitlab_project_path: projectPath,
