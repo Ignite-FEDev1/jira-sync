@@ -1,0 +1,58 @@
+name: Meeting Reminder
+
+on:
+  schedule:
+    # 평일 업무시간(KST 08:00~19:00) 15분 간격
+    # KST 08:00~08:59 = UTC 전날 23:00~23:59 (일~목)
+    - cron: '*/15 23 * * 0-4'
+    # KST 09:00~18:59 = UTC 당일 00:00~09:59 (월~금)
+    - cron: '*/15 0-9 * * 1-5'
+  workflow_dispatch: # 수동 실행 가능
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation (키리스 GCP 인증)
+
+# 발송 시각까지 대기하는 실행이 있으므로 직렬화해서 이중 발송 방지
+concurrency:
+  group: meeting-reminder
+  cancel-in-progress: false
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Authenticate to Google Cloud
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/calendar.readonly
+
+      - name: Run meeting reminder
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.gcp-auth.outputs.access_token }}
+          GOOGLE_CALENDAR_IDS: ${{ secrets.GOOGLE_CALENDAR_IDS }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_MEETING_CHANNEL_ID: ${{ secrets.SLACK_MEETING_CHANNEL_ID }}
+          SLACK_MENTION_MAP: ${{ secrets.SLACK_MENTION_MAP }}
+          NEXT_PUBLIC_DB_URL: ${{ secrets.NEXT_PUBLIC_DB_URL }}
+          NEXT_PUBLIC_DB_ANON_KEY: ${{ secrets.NEXT_PUBLIC_DB_ANON_KEY }}
+          DB_SERVICE_ROLE_KEY: ${{ secrets.DB_SERVICE_ROLE_KEY }}
+        run: npx tsx scripts/meeting-reminder.ts

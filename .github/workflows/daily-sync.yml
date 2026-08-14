@@ -1,0 +1,36 @@
+name: Daily Jira Sync
+
+on:
+  schedule:
+    # 평일(월~금) 한국시간 오전 7시 30분 (UTC 전날 22:30: 일~목)
+    - cron: '30 22 * * 0-4'
+    # 평일(월~금) 한국시간 낮 12시 (UTC 당일 03:00: 월~금)
+    - cron: '0 3 * * 1-5'
+  workflow_dispatch: # 수동 실행 가능
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run daily sync
+        env:
+          BATCH_MODE: 'true'
+          NEXT_PUBLIC_DB_URL: ${{ secrets.NEXT_PUBLIC_DB_URL }}
+          NEXT_PUBLIC_DB_ANON_KEY: ${{ secrets.NEXT_PUBLIC_DB_ANON_KEY }}
+          DB_SERVICE_ROLE_KEY: ${{ secrets.DB_SERVICE_ROLE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: npx tsx scripts/daily-sync.ts

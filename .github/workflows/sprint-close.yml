@@ -1,0 +1,42 @@
+name: Sprint Closing Batch
+
+on:
+  schedule:
+    # 매월 28~31일 23:00 KST (UTC 14:00) 트리거
+    # 스크립트 내부에서 말일 여부를 체크하고, 말일이 아니면 즉시 종료
+    - cron: '0 14 28-31 * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'DRY RUN — Jira 변경 없이 이메일만 발송'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  sprint-close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run sprint close
+        env:
+          BATCH_MODE: 'true'
+          NEXT_PUBLIC_DB_URL: ${{ secrets.NEXT_PUBLIC_DB_URL }}
+          NEXT_PUBLIC_DB_ANON_KEY: ${{ secrets.NEXT_PUBLIC_DB_ANON_KEY }}
+          DB_SERVICE_ROLE_KEY: ${{ secrets.DB_SERVICE_ROLE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: npx tsx scripts/sprint-close.ts
