@@ -1,7 +1,13 @@
 'use client';
 
-import { useState } from 'react';
-import { Download, GitMerge, GitPullRequest, Loader2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import {
+  AlertCircle,
+  Download,
+  GitMerge,
+  GitPullRequest,
+  Loader2,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -84,9 +90,10 @@ async function fetchGitlabMrs(
 
   // 방어적 로컬 재검증: GitLab API의 labels 필터가 라벨 이력 등의 이유로
   // 현재는 라벨이 없는 MR을 반환할 수 있어, 응답의 mr.labels로 한 번 더 확인
-  const filtered = (labelFilter
-    ? mrs.filter((mr) => matchesLabel(mr.labels ?? [], labelFilter))
-    : mrs
+  const filtered = (
+    labelFilter
+      ? mrs.filter((mr) => matchesLabel(mr.labels ?? [], labelFilter))
+      : mrs
   ).filter((mr) => mr.state !== 'closed');
 
   return filtered.map((mr) => ({
@@ -102,6 +109,40 @@ async function fetchGitlabMrs(
   }));
 }
 
+interface GitlabApprovalsPayload {
+  approved_by: Array<{ user?: { name?: string } }>;
+}
+
+async function fetchMrApprovals(
+  origin: string,
+  projectPath: string,
+  mrIid: number,
+  gitlabToken: string
+): Promise<string[]> {
+  const res = await fetch(
+    `${origin}/api/v4/projects/${encodeURIComponent(projectPath)}/merge_requests/${mrIid}/approvals`,
+    { headers: { 'PRIVATE-TOKEN': gitlabToken } }
+  );
+  if (!res.ok) throw new Error(`approvals ${res.status}`);
+  const data = (await res.json()) as GitlabApprovalsPayload;
+  return data.approved_by
+    .map((a) => a.user?.name)
+    .filter((n): n is string => !!n);
+}
+
+/** templateGitlabProjects(전체 URL 목록)에서 mr의 gitlabProjectPath에 해당하는 origin을 역으로 찾는다 */
+function resolveOrigin(
+  projectPath: string,
+  templateGitlabProjects: string[]
+): string {
+  const match = templateGitlabProjects.find(
+    (url) => extractGitlabProjectPath(url) === projectPath
+  );
+  return extractGitlabOrigin(match ?? templateGitlabProjects[0] ?? '');
+}
+
+type ApprovalState = string[] | 'loading' | 'error';
+
 export function MrPanel({
   session,
   mrs,
@@ -113,6 +154,47 @@ export function MrPanel({
   onMrsImported,
 }: Props) {
   const [importing, setImporting] = useState(false);
+  const [approvals, setApprovals] = useState<Record<string, ApprovalState>>({});
+
+  const loadApprovals = async (mrsOverride?: DeployRoomMr[]) => {
+    if (!gitlabToken) return;
+    const targets = mrsOverride ?? mrs;
+    if (targets.length === 0) return;
+
+    setApprovals((prev) => {
+      const next = { ...prev };
+      targets.forEach((mr) => {
+        next[mr.id] = 'loading';
+      });
+      return next;
+    });
+
+    await Promise.all(
+      targets.map(async (mr) => {
+        try {
+          const origin = resolveOrigin(
+            mr.gitlabProjectPath,
+            templateGitlabProjects
+          );
+          const names = await fetchMrApprovals(
+            origin,
+            mr.gitlabProjectPath,
+            mr.mrIid,
+            gitlabToken
+          );
+          setApprovals((prev) => ({ ...prev, [mr.id]: names }));
+        } catch (error) {
+          console.warn(`승인자 조회 실패 (MR ${mr.mrIid}):`, error);
+          setApprovals((prev) => ({ ...prev, [mr.id]: 'error' }));
+        }
+      })
+    );
+  };
+
+  useEffect(() => {
+    loadApprovals();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mrs, gitlabToken]);
 
   const handleImport = async () => {
     if (templateGitlabProjects.length === 0) {
@@ -120,21 +202,28 @@ export function MrPanel({
       return;
     }
     if (!gitlabToken) {
-      toast.error('GitLab Token이 등록되지 않았습니다. 설정 > 사용자 관리에서 등록해주세요.');
+      toast.error(
+        'GitLab Token이 등록되지 않았습니다. 설정 > 사용자 관리에서 등록해주세요.'
+      );
       return;
     }
 
-    const labelFilter = getGitlabLabelFilter(
-      (session.deployType ?? 'regular') as DeployType,
-      session.deployDate
-    ) ?? '';
+    const labelFilter =
+      getGitlabLabelFilter(
+        (session.deployType ?? 'regular') as DeployType,
+        session.deployDate
+      ) ?? '';
 
     setImporting(true);
     try {
       const allMrs: ImportedMr[] = [];
       for (const projectUrl of templateGitlabProjects) {
         try {
-          const projectMrs = await fetchGitlabMrs(projectUrl, labelFilter, gitlabToken);
+          const projectMrs = await fetchGitlabMrs(
+            projectUrl,
+            labelFilter,
+            gitlabToken
+          );
           allMrs.push(...projectMrs);
         } catch (error) {
           toast.error(error instanceof Error ? error.message : String(error));
@@ -156,7 +245,11 @@ export function MrPanel({
       const saveRes = await fetch('/api/deploy-room/mrs', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId: session.id, mrs: allMrs, actorUserId }),
+        body: JSON.stringify({
+          sessionId: session.id,
+          mrs: allMrs,
+          actorUserId,
+        }),
       });
       const saveJson = await saveRes.json();
       if (!saveJson.success) throw new Error(saveJson.error);
@@ -207,7 +300,11 @@ export function MrPanel({
             </Button>
           )}
           <span className="text-xs text-slate-500">
-            전체 <span className="font-semibold text-slate-700 tabular-nums">{mrs.length}</span>건
+            전체{' '}
+            <span className="font-semibold text-slate-700 tabular-nums">
+              {mrs.length}
+            </span>
+            건
           </span>
         </div>
       </div>
@@ -222,8 +319,7 @@ export function MrPanel({
             <div
               className="grid gap-3 items-start"
               style={{
-                gridTemplateColumns:
-                  'repeat(auto-fill, minmax(min(360px, 100%), 1fr))',
+                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
               }}
             >
               {Object.entries(mrsByAssignee).map(([assignee, assigneeMrs]) => (
@@ -231,6 +327,7 @@ export function MrPanel({
                   key={assignee}
                   assignee={assignee}
                   mrs={assigneeMrs}
+                  approvals={approvals}
                   actorUserId={actorUserId}
                   onUpdated={onMrUpdated}
                 />
@@ -246,11 +343,18 @@ export function MrPanel({
 interface AssigneeGroupProps {
   assignee: string;
   mrs: DeployRoomMr[];
+  approvals: Record<string, ApprovalState>;
   actorUserId?: string;
   onUpdated: (mr: DeployRoomMr) => void;
 }
 
-function AssigneeGroup({ assignee, mrs, actorUserId, onUpdated }: AssigneeGroupProps) {
+function AssigneeGroup({
+  assignee,
+  mrs,
+  approvals,
+  actorUserId,
+  onUpdated,
+}: AssigneeGroupProps) {
   const color = getAssigneeColor(assignee);
   const merged = mrs.filter((m) => m.status === 'merged').length;
   const isAllMerged = merged > 0 && merged === mrs.length;
@@ -259,20 +363,22 @@ function AssigneeGroup({ assignee, mrs, actorUserId, onUpdated }: AssigneeGroupP
     <div
       className={`group/grp rounded-lg border border-slate-200 border-l-4 ${color.border} bg-white overflow-hidden shadow-[0_1px_0_rgba(15,23,42,0.04)] transition-shadow hover:shadow-[0_2px_8px_rgba(15,23,42,0.06)]`}
     >
-      <div className={`px-3 py-2 ${color.headerBg} flex items-center gap-2.5 border-b border-slate-100`}>
+      <div
+        className={`px-3 py-2 ${color.headerBg} flex items-center gap-2.5 border-b border-slate-100`}
+      >
         <div
           className={`h-7 w-7 rounded-full ${color.avatarBg} text-white text-xs font-bold flex items-center justify-center shrink-0 ring-2 ring-white`}
         >
           {getInitial(assignee)}
         </div>
-        <span className={`text-sm font-semibold ${color.nameFg} truncate flex-1 min-w-0`}>
+        <span
+          className={`text-sm font-semibold ${color.nameFg} truncate flex-1 min-w-0`}
+        >
           {normalizeName(assignee)}
         </span>
         <span
           className={`shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded-full tabular-nums ${
-            isAllMerged
-              ? 'bg-emerald-100 text-emerald-700'
-              : color.badge
+            isAllMerged ? 'bg-emerald-100 text-emerald-700' : color.badge
           }`}
           title={`${merged}건 머지 / 전체 ${mrs.length}건`}
         >
@@ -285,6 +391,7 @@ function AssigneeGroup({ assignee, mrs, actorUserId, onUpdated }: AssigneeGroupP
             key={mr.id}
             mr={mr}
             color={color}
+            approval={approvals[mr.id]}
             actorUserId={actorUserId}
             onUpdated={onUpdated}
           />
@@ -297,11 +404,12 @@ function AssigneeGroup({ assignee, mrs, actorUserId, onUpdated }: AssigneeGroupP
 interface MrCardProps {
   mr: DeployRoomMr;
   color: AssigneeColor;
+  approval?: ApprovalState;
   actorUserId?: string;
   onUpdated: (mr: DeployRoomMr) => void;
 }
 
-function MrCard({ mr, color, actorUserId, onUpdated }: MrCardProps) {
+function MrCard({ mr, color, approval, actorUserId, onUpdated }: MrCardProps) {
   const [saving, setSaving] = useState(false);
 
   const patch = async (body: Record<string, unknown>) => {
@@ -334,7 +442,10 @@ function MrCard({ mr, color, actorUserId, onUpdated }: MrCardProps) {
       }`}
     >
       <div className="flex items-center gap-2 min-w-0">
-        <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${color.avatarBg}`} aria-hidden />
+        <span
+          className={`h-1.5 w-1.5 rounded-full shrink-0 ${color.avatarBg}`}
+          aria-hidden
+        />
         <GitPullRequest className="h-3.5 w-3.5 shrink-0 text-slate-400" />
         <a
           href={mr.url}
@@ -344,6 +455,44 @@ function MrCard({ mr, color, actorUserId, onUpdated }: MrCardProps) {
         >
           {mr.title}
         </a>
+        <div
+          className="flex items-center gap-1 shrink-0"
+          title={
+            Array.isArray(approval)
+              ? approval.length > 0
+                ? `승인: ${approval.map((name) => normalizeName(name)).join(', ')}`
+                : '승인자 없음'
+              : approval === 'error'
+                ? '승인자 조회 실패'
+                : '승인자 조회중'
+          }
+        >
+          {approval === 'loading' ? (
+            <span className="h-4 w-4 rounded-full bg-slate-100 flex items-center justify-center ring-1 ring-white">
+              <Loader2 className="h-2.5 w-2.5 animate-spin text-slate-400" />
+            </span>
+          ) : approval === 'error' ? (
+            <span className="h-4 w-4 rounded-full bg-rose-100 text-rose-500 flex items-center justify-center ring-1 ring-white">
+              <AlertCircle className="h-2.5 w-2.5" />
+            </span>
+          ) : Array.isArray(approval) && approval.length > 0 ? (
+            <div className="flex items-center -space-x-1">
+              {approval.slice(0, 3).map((name) => (
+                <span
+                  key={name}
+                  className="h-4 w-4 rounded-full bg-slate-300 text-white text-[9px] font-bold flex items-center justify-center ring-1 ring-white"
+                >
+                  {getInitial(name)}
+                </span>
+              ))}
+              {approval.length > 3 && (
+                <span className="text-[10px] text-slate-400 pl-1.5">
+                  +{approval.length - 3}
+                </span>
+              )}
+            </div>
+          ) : null}
+        </div>
         <label className="flex items-center gap-1 shrink-0 cursor-pointer">
           <input
             type="checkbox"
@@ -351,12 +500,13 @@ function MrCard({ mr, color, actorUserId, onUpdated }: MrCardProps) {
             checked={isMerged}
             disabled={saving}
             onChange={(e) => {
-              const next: DeployRoomMrStatus = e.target.checked ? 'merged' : 'pending';
+              const next: DeployRoomMrStatus = e.target.checked
+                ? 'merged'
+                : 'pending';
               onUpdated({ ...mr, status: next });
               patch({ status: next });
             }}
           />
-          <span className="text-[11px] text-slate-400 select-none">머지완료</span>
         </label>
       </div>
     </li>
