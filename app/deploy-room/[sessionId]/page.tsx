@@ -22,13 +22,18 @@ import type {
 
 import { AssigneeStatusGrid } from './_components/assignee-status-grid';
 import { ConfluenceTasksPanel } from './_components/confluence-tasks-panel';
+import { MonitoringOrderPanel } from './_components/monitoring-order-panel';
 import { MrPanel } from './_components/mr-panel';
 import { MyChecklistPanel } from './_components/my-checklist-panel';
 import { OverviewChecklistPanel } from './_components/overview-checklist-panel';
 import { PageHeader } from './_components/page-header';
 import { SessionMetaHeader } from './_components/session-meta-header';
 import { TimelinePanel } from './_components/timeline-panel';
-import { cycleStatus, findUserStatus, getAggregate } from './_components/aggregate';
+import {
+  cycleStatus,
+  findUserStatus,
+  getAggregate,
+} from './_components/aggregate';
 import { useUpdateUserStatus } from './_components/use-user-status';
 
 interface TeamInfo {
@@ -245,7 +250,9 @@ export default function DeployRoomDetailPage() {
       ? current.filter((n) => n !== name)
       : [...current, name];
 
-    setSession((prev) => (prev ? { ...prev, inactiveParticipants: next } : prev));
+    setSession((prev) =>
+      prev ? { ...prev, inactiveParticipants: next } : prev
+    );
 
     try {
       const res = await fetch(`/api/deploy-room/sessions/${sessionId}`, {
@@ -264,6 +271,35 @@ export default function DeployRoomDetailPage() {
       );
     }
   };
+
+  // 운영 모니터링 순서 랜덤 지정
+  const handleChangeMonitoringOrder = useCallback(
+    async (next: string[]) => {
+      const previous = session?.monitoringOrder ?? [];
+      setSession((prev) => (prev ? { ...prev, monitoringOrder: next } : prev));
+
+      try {
+        const res = await fetch(`/api/deploy-room/sessions/${sessionId}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            monitoringOrder: next,
+            actorUserId: currentUser?.id,
+          }),
+        });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error);
+      } catch (error) {
+        setSession((prev) =>
+          prev ? { ...prev, monitoringOrder: previous } : prev
+        );
+        toast.error(
+          `모니터링 순서 저장 실패: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    },
+    [sessionId, session?.monitoringOrder, currentUser?.id]
+  );
 
   // ---- 파생값 (memoized) ----
 
@@ -294,6 +330,14 @@ export default function DeployRoomDetailPage() {
     [allPresenceKeys, inactiveParticipants]
   );
 
+  // 모니터링 순서 대상 — 'MR 담당자 미지정' 같은 가상 키를 빼고 실제 팀원만 남긴다
+  const monitoringParticipants = useMemo(() => {
+    if (teamInfo.members.length === 0) return activeParticipants;
+    return activeParticipants.filter((p) =>
+      teamInfo.members.some((m) => namesMatch(p, m))
+    );
+  }, [activeParticipants, teamInfo.members]);
+
   const getParticipantsForItem = useCallback(
     (assignee: string): string[] => {
       const leader = teamInfo.leaderName;
@@ -310,8 +354,11 @@ export default function DeployRoomDetailPage() {
     () =>
       checklist.filter(
         (item) =>
-          getAggregate(item, userStatuses, getParticipantsForItem(item.assignee))
-            .status === 'done'
+          getAggregate(
+            item,
+            userStatuses,
+            getParticipantsForItem(item.assignee)
+          ).status === 'done'
       ).length,
     [checklist, userStatuses, getParticipantsForItem]
   );
@@ -334,7 +381,9 @@ export default function DeployRoomDetailPage() {
       <main className="min-h-screen bg-slate-50">
         <PageHeader />
         <div className="container mx-auto px-6 py-12 text-center">
-          <p className="text-sm text-muted-foreground">해당 배포방을 찾을 수 없습니다.</p>
+          <p className="text-sm text-muted-foreground">
+            해당 배포방을 찾을 수 없습니다.
+          </p>
           <Link href="/deploy-room" className="inline-block mt-4">
             <Button variant="outline">목록으로</Button>
           </Link>
@@ -345,7 +394,9 @@ export default function DeployRoomDetailPage() {
 
   const myName = currentUser?.name ?? '';
   const isLeader =
-    !!teamInfo.leaderId && !!currentUser && teamInfo.leaderId === currentUser.id;
+    !!teamInfo.leaderId &&
+    !!currentUser &&
+    teamInfo.leaderId === currentUser.id;
 
   return (
     <main className="min-h-screen bg-slate-50">
@@ -365,6 +416,13 @@ export default function DeployRoomDetailPage() {
           userStatuses={userStatuses}
           checklist={checklist}
           onToggle={handleToggleParticipant}
+        />
+
+        <MonitoringOrderPanel
+          order={session.monitoringOrder}
+          participants={monitoringParticipants}
+          pinnedLast={teamInfo.leaderName}
+          onChange={handleChangeMonitoringOrder}
         />
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -396,7 +454,9 @@ export default function DeployRoomDetailPage() {
           gitlabToken={teamInfo.gitlabToken}
           actorUserId={currentUser?.id}
           onMrUpdated={(updated) =>
-            setMrs((prev) => prev.map((m) => (m.id === updated.id ? updated : m)))
+            setMrs((prev) =>
+              prev.map((m) => (m.id === updated.id ? updated : m))
+            )
           }
           onMrsImported={refreshMrs}
         />

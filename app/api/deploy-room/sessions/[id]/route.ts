@@ -4,6 +4,7 @@ import {
   getChecklistItems,
   getSession,
   updateInactiveParticipants,
+  updateMonitoringOrder,
   updateSessionStatus,
 } from '@/lib/services/deploy-room/session.service';
 import { getTemplateById } from '@/lib/services/deploy-room/template.service';
@@ -12,7 +13,10 @@ import { dbServer } from '@/lib/db';
 import type { DeployRoomSessionStatus } from '@/lib/types/deploy-room';
 
 /** 팀 멤버 중 시나리오 teamMembers에 없는 사람을 inactive로 반환 */
-function deriveInactive(teamMembers: string[], templateMembers: string[]): string[] {
+function deriveInactive(
+  teamMembers: string[],
+  templateMembers: string[]
+): string[] {
   const templateSet = new Set(templateMembers.map(normalizeName));
   return teamMembers.filter((n) => !templateSet.has(normalizeName(n)));
 }
@@ -34,9 +38,7 @@ export async function GET(
     // 클라이언트 waterfall 제거: checklist + team-info + template을 한 응답에 묶음
     const [checklist, teamInfo, template] = await Promise.all([
       getChecklistItems(id),
-      session.teamId
-        ? loadTeamInfo(session.teamId)
-        : Promise.resolve(null),
+      session.teamId ? loadTeamInfo(session.teamId) : Promise.resolve(null),
       session.templateId
         ? getTemplateById(session.templateId).catch(() => null)
         : Promise.resolve(null),
@@ -79,9 +81,17 @@ export async function GET(
 
 async function loadTeamInfo(teamId: string) {
   const [usersResult, teamResult, tokenResult] = await Promise.all([
-    dbServer.from('users').select('id, name').eq('team_id', teamId).order('name'),
+    dbServer
+      .from('users')
+      .select('id, name')
+      .eq('team_id', teamId)
+      .order('name'),
     dbServer.from('teams').select('leader_id').eq('id', teamId).single(),
-    dbServer.from('users').select('gitlab_token').neq('gitlab_token', '').limit(1),
+    dbServer
+      .from('users')
+      .select('gitlab_token')
+      .neq('gitlab_token', '')
+      .limit(1),
   ]);
   return {
     members:
@@ -89,9 +99,12 @@ async function loadTeamInfo(teamId: string) {
         id: u.id,
         name: u.name,
       })) ?? [],
-    leaderId: (teamResult.data as { leader_id: string | null } | null)?.leader_id ?? null,
+    leaderId:
+      (teamResult.data as { leader_id: string | null } | null)?.leader_id ??
+      null,
     gitlabToken:
-      (tokenResult.data as { gitlab_token: string }[] | null)?.[0]?.gitlab_token ?? '',
+      (tokenResult.data as { gitlab_token: string }[] | null)?.[0]
+        ?.gitlab_token ?? '',
   };
 }
 
@@ -123,22 +136,43 @@ export async function PATCH(
     const body = (await request.json()) as {
       status?: DeployRoomSessionStatus;
       inactiveParticipants?: string[];
+      monitoringOrder?: string[];
       actorUserId?: string;
     };
 
     if (body.inactiveParticipants !== undefined) {
-      const session = await updateInactiveParticipants(id, body.inactiveParticipants);
+      const session = await updateInactiveParticipants(
+        id,
+        body.inactiveParticipants
+      );
+      return NextResponse.json({ success: true, session });
+    }
+
+    if (body.monitoringOrder !== undefined) {
+      const session = await updateMonitoringOrder(
+        id,
+        body.monitoringOrder,
+        body.actorUserId
+      );
       return NextResponse.json({ success: true, session });
     }
 
     if (!body.status) {
       return NextResponse.json(
-        { success: false, error: 'status 또는 inactiveParticipants 필요' },
+        {
+          success: false,
+          error:
+            'status, inactiveParticipants, monitoringOrder 중 하나가 필요합니다',
+        },
         { status: 400 }
       );
     }
 
-    const session = await updateSessionStatus(id, body.status, body.actorUserId);
+    const session = await updateSessionStatus(
+      id,
+      body.status,
+      body.actorUserId
+    );
     return NextResponse.json({ success: true, session });
   } catch (error) {
     return NextResponse.json(

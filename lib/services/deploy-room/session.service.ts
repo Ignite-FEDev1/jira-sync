@@ -39,7 +39,9 @@ export async function listSessions(): Promise<DeployRoomSession[]> {
  * 세션 목록 + 진행률(완료 항목수 / 전체 항목수) 일괄 계산.
  * 정책은 상세 페이지의 getAggregate와 동일 (assignee별 expected participants 모두 done 이어야 완료).
  */
-export async function listSessionsWithProgress(): Promise<DeployRoomSessionWithProgress[]> {
+export async function listSessionsWithProgress(): Promise<
+  DeployRoomSessionWithProgress[]
+> {
   const sessions = await listSessions();
   if (sessions.length === 0) return [];
 
@@ -48,28 +50,37 @@ export async function listSessionsWithProgress(): Promise<DeployRoomSessionWithP
     new Set(sessions.map((s) => s.teamId).filter((x): x is string => !!x))
   );
 
-  const [checklistResult, statusesResult, usersResult, teamsResult] = await Promise.all([
-    dbServer
-      .from('deploy_room_checklist_items')
-      .select('id, session_id, assignee')
-      .in('session_id', sessionIds),
-    dbServer
-      .from('deploy_room_checklist_user_status')
-      .select('checklist_item_id, user_name, status, updated_at')
-      .in('session_id', sessionIds),
-    teamIds.length > 0
-      ? dbServer.from('users').select('id, name, team_id').in('team_id', teamIds)
-      : Promise.resolve({ data: [], error: null }),
-    teamIds.length > 0
-      ? dbServer.from('teams').select('id, leader_id').in('id', teamIds)
-      : Promise.resolve({ data: [], error: null }),
-  ]);
+  const [checklistResult, statusesResult, usersResult, teamsResult] =
+    await Promise.all([
+      dbServer
+        .from('deploy_room_checklist_items')
+        .select('id, session_id, assignee')
+        .in('session_id', sessionIds),
+      dbServer
+        .from('deploy_room_checklist_user_status')
+        .select('checklist_item_id, user_name, status, updated_at')
+        .in('session_id', sessionIds),
+      teamIds.length > 0
+        ? dbServer
+            .from('users')
+            .select('id, name, team_id')
+            .in('team_id', teamIds)
+        : Promise.resolve({ data: [], error: null }),
+      teamIds.length > 0
+        ? dbServer.from('teams').select('id, leader_id').in('id', teamIds)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
 
   if (checklistResult.error) throw new Error(checklistResult.error.message);
   if (statusesResult.error) throw new Error(statusesResult.error.message);
 
   type ItemRow = { id: string; session_id: string; assignee: string };
-  type StatusRow = { checklist_item_id: string; user_name: string; status: string; updated_at: string };
+  type StatusRow = {
+    checklist_item_id: string;
+    user_name: string;
+    status: string;
+    updated_at: string;
+  };
   type UserRow = { id: string; name: string; team_id: string };
   type TeamRow = { id: string; leader_id: string | null };
 
@@ -81,7 +92,8 @@ export async function listSessionsWithProgress(): Promise<DeployRoomSessionWithP
 
   const statusesByItem = new Map<string, StatusRow[]>();
   for (const s of (statusesResult.data ?? []) as StatusRow[]) {
-    if (!statusesByItem.has(s.checklist_item_id)) statusesByItem.set(s.checklist_item_id, []);
+    if (!statusesByItem.has(s.checklist_item_id))
+      statusesByItem.set(s.checklist_item_id, []);
     statusesByItem.get(s.checklist_item_id)!.push(s);
   }
 
@@ -103,12 +115,18 @@ export async function listSessionsWithProgress(): Promise<DeployRoomSessionWithP
       return { ...session, doneCount: 0, totalCount: 0 };
     }
 
-    const teamUsers = session.teamId ? usersByTeam.get(session.teamId) ?? [] : [];
-    const inactiveSet = new Set((session.inactiveParticipants ?? []).map(normalizeName));
+    const teamUsers = session.teamId
+      ? (usersByTeam.get(session.teamId) ?? [])
+      : [];
+    const inactiveSet = new Set(
+      (session.inactiveParticipants ?? []).map(normalizeName)
+    );
     const allMembers = teamUsers.map((u) => normalizeName(u.name));
     const activeMembers = allMembers.filter((n) => !inactiveSet.has(n));
 
-    const leaderId = session.teamId ? teamLeaders.get(session.teamId) ?? null : null;
+    const leaderId = session.teamId
+      ? (teamLeaders.get(session.teamId) ?? null)
+      : null;
     const leader = teamUsers.find((u) => u.id === leaderId);
     const leaderName = leader ? normalizeName(leader.name) : null;
 
@@ -129,7 +147,8 @@ export async function listSessionsWithProgress(): Promise<DeployRoomSessionWithP
           .filter((s) => normalizeName(s.user_name) === p)
           .sort(
             (a, b) =>
-              new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+              new Date(b.updated_at).getTime() -
+              new Date(a.updated_at).getTime()
           )[0];
         return latest?.status === 'done';
       });
@@ -287,6 +306,37 @@ export async function updateInactiveParticipants(
   if (error || !data) {
     throw new Error(`참여자 설정 변경 실패: ${error?.message ?? 'unknown'}`);
   }
+  return toSession(data as SessionRow);
+}
+
+/** 운영 모니터링 순서(랜덤 지정 결과) 저장 */
+export async function updateMonitoringOrder(
+  sessionId: string,
+  monitoringOrder: string[],
+  actorUserId?: string
+): Promise<DeployRoomSession> {
+  const { data, error } = await dbServer
+    .from('deploy_room_sessions')
+    .update({
+      monitoring_order: monitoringOrder,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', sessionId)
+    .select()
+    .single();
+
+  if (error || !data) {
+    throw new Error(`모니터링 순서 변경 실패: ${error?.message ?? 'unknown'}`);
+  }
+
+  await recordTimeline({
+    sessionId,
+    actorUserId,
+    action: 'monitoring.shuffle',
+    target: monitoringOrder.map(normalizeName).join(' → '),
+    payload: null,
+  });
+
   return toSession(data as SessionRow);
 }
 

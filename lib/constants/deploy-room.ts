@@ -21,7 +21,12 @@ export interface DeployProject {
 export const DEPLOY_PROJECTS: readonly DeployProject[] = [
   { id: 'groupware', name: 'Groupware', shortName: 'GW', enabled: true },
   { id: 'cpo', name: 'CPO', shortName: 'CPO', enabled: false },
-  { id: 'hmg-board', name: 'HMG Board', shortName: 'HMG Board', enabled: false },
+  {
+    id: 'hmg-board',
+    name: 'HMG Board',
+    shortName: 'HMG Board',
+    enabled: false,
+  },
 ] as const;
 
 export const DEPLOY_TYPES: readonly { id: DeployType; name: string }[] = [
@@ -49,7 +54,10 @@ export const DEFAULT_CHECKLIST_WITH_ASSIGNEE: {
   { title: '배포 후 할 일 확인', assignee: 'all' },
   { title: '배포 태그 발행', assignee: 'leader' },
   { title: '배포 후 운영계 모니터링', assignee: 'all' },
-  { title: 'main → stage(stage2), dev, release 현행화/배포', assignee: 'member' },
+  {
+    title: 'main → stage(stage2), dev, release 현행화/배포',
+    assignee: 'member',
+  },
 ];
 
 // ---------------- UI labels & styles ----------------
@@ -61,14 +69,20 @@ export const SESSION_STATUS_LABELS: Record<DeployRoomSessionStatus, string> = {
   rolled_back: '롤백됨',
 };
 
-export const SESSION_STATUS_LIST_STYLES: Record<DeployRoomSessionStatus, string> = {
+export const SESSION_STATUS_LIST_STYLES: Record<
+  DeployRoomSessionStatus,
+  string
+> = {
   preparing: 'bg-slate-100 text-slate-700',
   in_progress: 'bg-blue-100 text-blue-700',
   completed: 'bg-emerald-100 text-emerald-700',
   rolled_back: 'bg-amber-100 text-amber-700',
 };
 
-export const SESSION_STATUS_DETAIL_STYLES: Record<DeployRoomSessionStatus, string> = {
+export const SESSION_STATUS_DETAIL_STYLES: Record<
+  DeployRoomSessionStatus,
+  string
+> = {
   preparing: 'bg-slate-100 text-slate-600 ring-1 ring-slate-200',
   in_progress: 'bg-blue-50 text-blue-700 ring-1 ring-blue-200',
   completed: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
@@ -81,7 +95,10 @@ export const USER_STATUS_LABELS: Record<ChecklistItemStatus, string> = {
   done: '진행완료',
 };
 
-export const DEPLOY_TYPE_CHIP: Record<string, { label: string; style: string }> = {
+export const DEPLOY_TYPE_CHIP: Record<
+  string,
+  { label: string; style: string }
+> = {
   regular: { label: '정기', style: 'bg-blue-100 text-blue-700' },
   adhoc: { label: '비정기', style: 'bg-violet-100 text-violet-700' },
   hotfix: { label: '핫픽스', style: 'bg-rose-100 text-rose-700' },
@@ -99,7 +116,12 @@ export const TIMELINE_ACTION_LABELS: Record<string, string> = {
   'mr.notes': 'MR 메모 변경',
   'gitlab.import.success': 'GitLab import 완료',
   'gitlab.import.failed': 'GitLab import 실패',
+  'monitoring.shuffle': '모니터링 순서 랜덤 지정',
 };
+
+/** 슬랙에 그대로 붙여 넣는 모니터링 순서 문구의 머리말 */
+export const MONITORING_ORDER_HEADLINE = '운영모니터링 순서:';
+export const MONITORING_ORDER_PREFIX = '배포후할일 마친 후';
 
 export const MR_STATUS_LABELS: Record<DeployRoomMrStatus, string> = {
   pending: '대기',
@@ -146,5 +168,7 @@ export function extractGitlabProjectPath(projectUrl: string): string {
 
 /** GitLab 프로젝트 URL에서 origin (https://host) 추출 */
 export function extractGitlabOrigin(projectUrl: string): string {
-  return projectUrl.match(/^https?:\/\/[^/]+/)?.[0] ?? 'https://gitlab.hmc.co.kr';
+  return (
+    projectUrl.match(/^https?:\/\/[^/]+/)?.[0] ?? 'https://gitlab.hmc.co.kr'
+  );
 }
