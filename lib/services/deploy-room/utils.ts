@@ -1,14 +1,67 @@
 // 배포방 클라이언트/서버 공용 유틸리티
 
+import {
+  MONITORING_ORDER_HEADLINE,
+  MONITORING_ORDER_PREFIX,
+} from '@/lib/constants/deploy-room';
+
 const ASSIGNEE_COLORS = [
-  { border: 'border-l-indigo-400',  headerBg: 'bg-indigo-50',  avatarBg: 'bg-indigo-500',  nameFg: 'text-indigo-800',  badge: 'bg-indigo-100 text-indigo-700' },
-  { border: 'border-l-emerald-400', headerBg: 'bg-emerald-50', avatarBg: 'bg-emerald-500', nameFg: 'text-emerald-800', badge: 'bg-emerald-100 text-emerald-700' },
-  { border: 'border-l-violet-400',  headerBg: 'bg-violet-50',  avatarBg: 'bg-violet-500',  nameFg: 'text-violet-800',  badge: 'bg-violet-100 text-violet-700' },
-  { border: 'border-l-amber-400',   headerBg: 'bg-amber-50',   avatarBg: 'bg-amber-500',   nameFg: 'text-amber-800',   badge: 'bg-amber-100 text-amber-700' },
-  { border: 'border-l-cyan-400',    headerBg: 'bg-cyan-50',    avatarBg: 'bg-cyan-500',    nameFg: 'text-cyan-800',    badge: 'bg-cyan-100 text-cyan-700' },
-  { border: 'border-l-rose-400',    headerBg: 'bg-rose-50',    avatarBg: 'bg-rose-500',    nameFg: 'text-rose-800',    badge: 'bg-rose-100 text-rose-700' },
-  { border: 'border-l-teal-400',    headerBg: 'bg-teal-50',    avatarBg: 'bg-teal-500',    nameFg: 'text-teal-800',    badge: 'bg-teal-100 text-teal-700' },
-  { border: 'border-l-orange-400',  headerBg: 'bg-orange-50',  avatarBg: 'bg-orange-500',  nameFg: 'text-orange-800',  badge: 'bg-orange-100 text-orange-700' },
+  {
+    border: 'border-l-indigo-400',
+    headerBg: 'bg-indigo-50',
+    avatarBg: 'bg-indigo-500',
+    nameFg: 'text-indigo-800',
+    badge: 'bg-indigo-100 text-indigo-700',
+  },
+  {
+    border: 'border-l-emerald-400',
+    headerBg: 'bg-emerald-50',
+    avatarBg: 'bg-emerald-500',
+    nameFg: 'text-emerald-800',
+    badge: 'bg-emerald-100 text-emerald-700',
+  },
+  {
+    border: 'border-l-violet-400',
+    headerBg: 'bg-violet-50',
+    avatarBg: 'bg-violet-500',
+    nameFg: 'text-violet-800',
+    badge: 'bg-violet-100 text-violet-700',
+  },
+  {
+    border: 'border-l-amber-400',
+    headerBg: 'bg-amber-50',
+    avatarBg: 'bg-amber-500',
+    nameFg: 'text-amber-800',
+    badge: 'bg-amber-100 text-amber-700',
+  },
+  {
+    border: 'border-l-cyan-400',
+    headerBg: 'bg-cyan-50',
+    avatarBg: 'bg-cyan-500',
+    nameFg: 'text-cyan-800',
+    badge: 'bg-cyan-100 text-cyan-700',
+  },
+  {
+    border: 'border-l-rose-400',
+    headerBg: 'bg-rose-50',
+    avatarBg: 'bg-rose-500',
+    nameFg: 'text-rose-800',
+    badge: 'bg-rose-100 text-rose-700',
+  },
+  {
+    border: 'border-l-teal-400',
+    headerBg: 'bg-teal-50',
+    avatarBg: 'bg-teal-500',
+    nameFg: 'text-teal-800',
+    badge: 'bg-teal-100 text-teal-700',
+  },
+  {
+    border: 'border-l-orange-400',
+    headerBg: 'bg-orange-50',
+    avatarBg: 'bg-orange-500',
+    nameFg: 'text-orange-800',
+    badge: 'bg-orange-100 text-orange-700',
+  },
 ] as const;
 
 export type AssigneeColor = (typeof ASSIGNEE_COLORS)[number];
@@ -35,6 +88,26 @@ export function getAssigneeColor(name: string): AssigneeColor {
     hash = name.charCodeAt(i) + ((hash << 5) - hash);
   }
   return ASSIGNEE_COLORS[Math.abs(hash) % ASSIGNEE_COLORS.length];
+}
+
+/** Fisher–Yates 셔플. 원본을 건드리지 않고 새 배열을 반환한다. */
+export function shuffle<T>(items: readonly T[]): T[] {
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+/**
+ * 슬랙에 붙여 넣을 모니터링 순서 문구를 만든다.
+ * 예) 운영모니터링 순서:
+ *     배포후할일 마친 후 -> 손현지 -> 한준호
+ */
+export function formatMonitoringOrderText(names: readonly string[]): string {
+  const chain = [MONITORING_ORDER_PREFIX, ...names.map(normalizeName)];
+  return `${MONITORING_ORDER_HEADLINE}\n${chain.join(' -> ')}`;
 }
 
 export function formatTime(iso: string): string {

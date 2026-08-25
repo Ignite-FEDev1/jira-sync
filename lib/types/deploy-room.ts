@@ -39,6 +39,7 @@ export interface DeployRoomSession {
   confluencePageUrl: string | null;
   confluenceTasks: ConfluenceDeployTasks | null;
   inactiveParticipants: string[];
+  monitoringOrder: string[];
   status: DeployRoomSessionStatus;
   createdBy: string | null;
   createdAt: string;
@@ -115,7 +116,8 @@ export type DeployRoomTimelineAction =
   | 'mr.owner'
   | 'mr.notes'
   | 'gitlab.import.success'
-  | 'gitlab.import.failed';
+  | 'gitlab.import.failed'
+  | 'monitoring.shuffle';
 
 export interface DeployRoomTimelineEvent {
   id: string;

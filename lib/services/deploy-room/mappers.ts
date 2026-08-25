@@ -25,6 +25,7 @@ export type SessionRow = {
   confluence_page_url: string | null;
   confluence_tasks?: ConfluenceDeployTasks | null;
   inactive_participants: string[] | null;
+  monitoring_order?: string[] | null;
   status: string;
   created_by: string | null;
   created_at: string;
@@ -42,6 +43,7 @@ export function toSession(row: SessionRow): DeployRoomSession {
     confluencePageUrl: row.confluence_page_url,
     confluenceTasks: row.confluence_tasks ?? null,
     inactiveParticipants: row.inactive_participants ?? [],
+    monitoringOrder: row.monitoring_order ?? [],
     status: row.status as DeployRoomSessionStatus,
     createdBy: row.created_by,
     createdAt: row.created_at,
