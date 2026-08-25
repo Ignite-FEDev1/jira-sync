@@ -4,7 +4,8 @@
  * 앞으로 LOOKAHEAD_MIN 분 내 시작하는 회의를 조회하고,
  * 리마인드 시각(시작 REMIND_BEFORE_MIN 분 전)이 가까운 회의는
  * 그 시각까지 프로세스가 대기했다가 정시에 직접 발송한다.
- * 루트 메시지([회의명] + Meet 링크) 발송 후 스레드 답글로 참석자 명단을 단다.
+ * 루트 메시지([회의명] + 회의 참여 링크) 발송 후 스레드 답글로 참석자 명단을 단다.
+ * 참석자가 전원 팀원인 내부 회의는 캘린더의 Meet 링크 대신 팀 Zoom 링크를 안내한다.
  *
  * - 발송 이력은 meeting_reminders 테이블로 dedup (발송 완료 시점에 기록)
  * - 발송 직전 이벤트를 재조회해서 취소/시간 변경이면 발송하지 않음
@@ -25,6 +26,8 @@
  *   SLACK_BOT_TOKEN      — xoxb- 봇 토큰 (chat:write, 채널에 봇 초대 필요)
  *   SLACK_MEETING_CHANNEL_ID — 발송 채널 ID
  *   NEXT_PUBLIC_DB_URL, DB_SERVICE_ROLE_KEY — 발송 이력 저장
+ *   ZOOM_MEETING_URL     — (선택) 팀 상시 Zoom 회의실 URL. 내부 회의에서 Meet 링크 대신 안내한다.
+ *                          비워 두면 모든 회의가 캘린더의 Meet 링크를 그대로 쓴다.
  */
 
 import { createSign } from 'node:crypto';
@@ -72,6 +75,10 @@ function parseSlackMentions(): Record<string, string> {
 
 // 발송 조건: 참석자 중 팀원이 2명 이상인 회의만 (개인 약속·타팀 단독 회의 제외)
 const TEAM_EMAILS = new Set(Object.keys(SLACK_MENTIONS));
+
+// 팀 내부 회의는 캘린더에 Meet 링크가 잡혀 있어도 실제로는 Zoom으로 진행한다.
+// 설정하지 않으면 기존대로 캘린더의 Meet 링크를 안내한다.
+const ZOOM_MEETING_URL = process.env.ZOOM_MEETING_URL?.trim() || null;
 
 // 제목에 아래 문구가 포함된 일정은 발송 제외
 const EXCLUDE_KEYWORDS = ['회식'];
@@ -220,6 +227,30 @@ function getMeetLink(event: CalendarEvent): string | null {
   return video?.uri ?? null;
 }
 
+/**
+ * 사람 참석자가 전원 팀원이면 내부 회의로 본다.
+ * 이메일이 없는 참석자는 신원을 확인할 수 없으므로 외부로 간주한다(Meet 링크 유지).
+ */
+function isInternalMeeting(event: CalendarEvent): boolean {
+  const people = (event.attendees ?? []).filter((a) => !a.resource);
+  if (!people.length) return false;
+  return people.every((a) => !!a.email && TEAM_EMAILS.has(a.email));
+}
+
+/**
+ * 회의 참여 링크와 표시 이름.
+ * 내부 회의는 캘린더에 Meet 링크가 잡혀 있어도 실제로는 Zoom으로 모이므로 Zoom 링크로 바꿔 안내한다.
+ * 화상 링크가 아예 없는 일정은 대면 회의일 수 있으니 링크를 새로 만들어 붙이지 않는다.
+ */
+function getConferenceLink(event: CalendarEvent): { url: string; label: string } | null {
+  const meetLink = getMeetLink(event);
+  if (!meetLink) return null;
+  if (ZOOM_MEETING_URL && isInternalMeeting(event)) {
+    return { url: ZOOM_MEETING_URL, label: 'Zoom 참여' };
+  }
+  return { url: meetLink, label: 'Google Meet 참여' };
+}
+
 const kstTime = new Intl.DateTimeFormat('ko-KR', {
   timeZone: 'Asia/Seoul',
   hour: '2-digit',
@@ -234,8 +265,8 @@ function buildRootMessage(event: CalendarEvent, start: Date, end: Date | null): 
   const lines = [
     `:spiral_calendar_pad: *[${event.summary ?? '(제목 없음)'}]*  ${range}`,
   ];
-  const meetLink = getMeetLink(event);
-  if (meetLink) lines.push(`:movie_camera: <${meetLink}|Google Meet 참여>`);
+  const conference = getConferenceLink(event);
+  if (conference) lines.push(`:movie_camera: <${conference.url}|${conference.label}>`);
   return lines.join('\n');
 }
 
@@ -377,6 +408,7 @@ async function main() {
     const attendeesText = await buildAttendeesMessage(slackToken, fresh);
 
     console.log(`발송: ${label}${attendeesText ? ' (+참석자 스레드)' : ''}`);
+    if (DRY_RUN) console.log(rootText);
     if (!DRY_RUN) {
       const root = await slackApi(slackToken, 'chat.postMessage', {
         channel: channelId,
