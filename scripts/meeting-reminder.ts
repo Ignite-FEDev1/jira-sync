@@ -31,6 +31,7 @@
  */
 
 import { createSign } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { dbServer } from '@/lib/db';
 
 const LOOKAHEAD_MIN = 120;
@@ -83,7 +84,7 @@ const ZOOM_MEETING_URL = process.env.ZOOM_MEETING_URL?.trim() || null;
 // 제목에 아래 문구가 포함된 일정은 발송 제외
 const EXCLUDE_KEYWORDS = ['회식'];
 
-interface Attendee {
+export interface Attendee {
   email?: string;
   displayName?: string;
   responseStatus?: string;
@@ -92,7 +93,7 @@ interface Attendee {
   self?: boolean;
 }
 
-interface CalendarEvent {
+export interface CalendarEvent {
   id: string;
   status: string;
   summary?: string;
@@ -230,11 +231,15 @@ function getMeetLink(event: CalendarEvent): string | null {
 /**
  * 사람 참석자가 전원 팀원이면 내부 회의로 본다.
  * 이메일이 없는 참석자는 신원을 확인할 수 없으므로 외부로 간주한다(Meet 링크 유지).
+ * teamEmails는 테스트에서 주입하며, 실행 시에는 기본값(SLACK_MENTION_MAP 기반)을 쓴다.
  */
-function isInternalMeeting(event: CalendarEvent): boolean {
+export function isInternalMeeting(
+  event: CalendarEvent,
+  teamEmails: Set<string> = TEAM_EMAILS
+): boolean {
   const people = (event.attendees ?? []).filter((a) => !a.resource);
   if (!people.length) return false;
-  return people.every((a) => !!a.email && TEAM_EMAILS.has(a.email));
+  return people.every((a) => !!a.email && teamEmails.has(a.email));
 }
 
 /**
@@ -242,11 +247,17 @@ function isInternalMeeting(event: CalendarEvent): boolean {
  * 내부 회의는 캘린더에 Meet 링크가 잡혀 있어도 실제로는 Zoom으로 모이므로 Zoom 링크로 바꿔 안내한다.
  * 화상 링크가 아예 없는 일정은 대면 회의일 수 있으니 링크를 새로 만들어 붙이지 않는다.
  */
-function getConferenceLink(event: CalendarEvent): { url: string; label: string } | null {
+export function getConferenceLink(
+  event: CalendarEvent,
+  options: { zoomUrl?: string | null; teamEmails?: Set<string> } = {}
+): { url: string; label: string } | null {
+  const zoomUrl = options.zoomUrl !== undefined ? options.zoomUrl : ZOOM_MEETING_URL;
+  const teamEmails = options.teamEmails ?? TEAM_EMAILS;
+
   const meetLink = getMeetLink(event);
   if (!meetLink) return null;
-  if (ZOOM_MEETING_URL && isInternalMeeting(event)) {
-    return { url: ZOOM_MEETING_URL, label: 'Zoom 참여' };
+  if (zoomUrl && isInternalMeeting(event, teamEmails)) {
+    return { url: zoomUrl, label: 'Zoom 참여' };
   }
   return { url: meetLink, label: 'Google Meet 참여' };
 }
@@ -437,7 +448,13 @@ async function main() {
   console.log('완료');
 }
 
-main().catch((error) => {
-  console.error('실패:', error instanceof Error ? error.message : error);
-  process.exit(1);
-});
+// 테스트에서 import할 때는 실행하지 않는다 (직접 실행일 때만 발송)
+const isDirectRun =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error('실패:', error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}
