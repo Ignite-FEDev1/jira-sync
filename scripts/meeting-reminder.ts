@@ -28,6 +28,8 @@
  *   NEXT_PUBLIC_DB_URL, DB_SERVICE_ROLE_KEY — 발송 이력 저장
  *   ZOOM_MEETING_URL     — (선택) 팀 상시 Zoom 회의실 URL. 내부 회의에서 Meet 링크 대신 안내한다.
  *                          비워 두면 모든 회의가 캘린더의 Meet 링크를 그대로 쓴다.
+ *   MEETING_TEAM_NAME    — (선택) 팀원 판정 기준 팀 이름. 기본 'FE1'.
+ *                          users 테이블에서 이 팀의 ignite_jira_email을 팀원으로 본다.
  */
 
 import { createSign } from 'node:crypto';
@@ -74,8 +76,12 @@ function parseSlackMentions(): Record<string, string> {
   return Object.fromEntries(entries.map(([email, id]) => [email, String(id)]));
 }
 
-// 발송 조건: 참석자 중 팀원이 2명 이상인 회의만 (개인 약속·타팀 단독 회의 제외)
+// 팀원 판정 폴백. 평소에는 users 테이블에서 읽고(loadTeamEmails),
+// 조회가 실패했을 때만 이 값으로 물러선다.
 const TEAM_EMAILS = new Set(Object.keys(SLACK_MENTIONS));
+
+// 팀원 판정 대상 팀 (users.team_id → teams.name)
+const TEAM_NAME = process.env.MEETING_TEAM_NAME?.trim() || 'FE1';
 
 // 팀 내부 회의는 캘린더에 Meet 링크가 잡혀 있어도 실제로는 Zoom으로 진행한다.
 // 설정하지 않으면 기존대로 캘린더의 Meet 링크를 안내한다.
@@ -242,6 +248,17 @@ export function isInternalMeeting(
   return people.every((a) => !!a.email && teamEmails.has(a.email));
 }
 
+/** 내부 회의 판정을 깨뜨린 참석자들. 왜 Meet으로 나갔는지 로그에 남기기 위한 것. */
+export function getNonTeamAttendees(
+  event: CalendarEvent,
+  teamEmails: Set<string> = TEAM_EMAILS
+): string[] {
+  return (event.attendees ?? [])
+    .filter((a) => !a.resource)
+    .filter((a) => !a.email || !teamEmails.has(a.email))
+    .map((a) => a.email || a.displayName || '(이름 없는 참석자)');
+}
+
 /**
  * 회의 참여 링크와 표시 이름.
  * 내부 회의는 캘린더에 Meet 링크가 잡혀 있어도 실제로는 Zoom으로 모이므로 Zoom 링크로 바꿔 안내한다.
@@ -269,15 +286,32 @@ const kstTime = new Intl.DateTimeFormat('ko-KR', {
   hour12: false,
 });
 
-function buildRootMessage(event: CalendarEvent, start: Date, end: Date | null): string {
+function buildRootMessage(
+  event: CalendarEvent,
+  start: Date,
+  end: Date | null,
+  teamEmails: Set<string> = TEAM_EMAILS
+): string {
   const range = end
     ? `${kstTime.format(start)} ~ ${kstTime.format(end)}`
     : kstTime.format(start);
   const lines = [
     `:spiral_calendar_pad: *[${event.summary ?? '(제목 없음)'}]*  ${range}`,
   ];
-  const conference = getConferenceLink(event);
-  if (conference) lines.push(`:movie_camera: <${conference.url}|${conference.label}>`);
+  const conference = getConferenceLink(event, { teamEmails });
+  if (conference) {
+    lines.push(`:movie_camera: <${conference.url}|${conference.label}>`);
+    // Zoom을 쓰기로 해놓고 Meet이 나갔다면 누구 때문인지 남긴다 (조용히 넘어가지 않도록)
+    if (ZOOM_MEETING_URL && conference.label !== 'Zoom 참여') {
+      const outsiders = getNonTeamAttendees(event, teamEmails);
+      if (outsiders.length) {
+        console.warn(
+          `내부 회의 아님 → Meet 링크 유지: ${event.summary ?? event.id} ` +
+            `(팀원으로 확인되지 않은 참석자: ${outsiders.join(', ')})`
+        );
+      }
+    }
+  }
   return lines.join('\n');
 }
 
@@ -322,6 +356,59 @@ async function buildAttendeesMessage(
   return `:busts_in_silhouette: *참석자 ${people.length}명* — ${names.join(', ')}`;
 }
 
+/**
+ * 팀원 이메일 목록. users 테이블이 1순위 기준이다.
+ * (SLACK_MENTION_MAP은 멘션 표시용이라, 거기에 팀원 판정까지 맡기면
+ *  맵에 한 명 빠졌을 때 명단은 멀쩡한데 내부 회의 판정만 조용히 깨진다.)
+ * 조회가 실패하면 맵으로 물러서되 반드시 경고를 남긴다.
+ */
+export async function loadTeamEmails(): Promise<Set<string>> {
+  const fallback = new Set(Object.keys(SLACK_MENTIONS));
+
+  const { data: team, error: teamError } = await dbServer
+    .from('teams')
+    .select('id')
+    .eq('name', TEAM_NAME)
+    .maybeSingle();
+
+  if (teamError || !team) {
+    console.warn(
+      `팀 '${TEAM_NAME}' 조회 실패 → SLACK_MENTION_MAP 기준으로 대체합니다 ` +
+        `(${teamError?.message ?? '해당 이름의 팀 없음'})`
+    );
+    return fallback;
+  }
+
+  const { data: users, error: usersError } = await dbServer
+    .from('users')
+    .select('name, ignite_jira_email')
+    .eq('team_id', (team as { id: string }).id);
+
+  const rows = (users ?? []) as { name: string; ignite_jira_email: string | null }[];
+  if (usersError || rows.length === 0) {
+    console.warn(
+      `팀원 목록 조회 실패 → SLACK_MENTION_MAP 기준으로 대체합니다 ` +
+        `(${usersError?.message ?? '팀원 없음'})`
+    );
+    return fallback;
+  }
+
+  const missing = rows.filter((u) => !u.ignite_jira_email).map((u) => u.name);
+  if (missing.length) {
+    console.warn(
+      `이메일이 비어 있어 팀원으로 인식되지 않는 사람: ${missing.join(', ')} ` +
+        `— users 테이블의 ignite_jira_email을 채워야 내부 회의로 판정됩니다.`
+    );
+  }
+
+  const emails = rows
+    .map((u) => u.ignite_jira_email)
+    .filter((e): e is string => !!e);
+
+  console.log(`팀원 판정 기준: users 테이블 '${TEAM_NAME}' ${emails.length}명`);
+  return new Set(emails);
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
@@ -354,6 +441,13 @@ async function main() {
   const merged = Array.from(eventById.values());
   console.log(`병합된 일정: ${merged.length}건 (앞으로 ${LOOKAHEAD_MIN}분, 캘린더 ${calendarIds.length}개)`);
 
+  const teamEmails = await loadTeamEmails();
+  if (!ZOOM_MEETING_URL) {
+    console.warn(
+      'ZOOM_MEETING_URL이 비어 있습니다 — 내부 회의도 캘린더의 Meet 링크로 안내합니다.'
+    );
+  }
+
   const eventIds = merged.map(({ event }) => event.id);
   const { data: rowsData, error: rowsError } = eventIds.length
     ? await dbServer.from('meeting_reminders').select('event_id').in('event_id', eventIds)
@@ -369,7 +463,7 @@ async function main() {
     .filter(({ event: e }) => e.visibility !== 'private' && e.visibility !== 'confidential')
     .filter(
       ({ event: e }) =>
-        (e.attendees ?? []).filter((a) => a.email && TEAM_EMAILS.has(a.email)).length >= 2
+        (e.attendees ?? []).filter((a) => a.email && teamEmails.has(a.email)).length >= 2
     )
     .filter(({ event: e }) => !EXCLUDE_KEYWORDS.some((k) => (e.summary ?? '').includes(k)))
     .filter(({ event: e }) => !sentIds.has(e.id))
@@ -415,7 +509,7 @@ async function main() {
     }
 
     const end = fresh.end?.dateTime ? new Date(fresh.end.dateTime) : null;
-    const rootText = buildRootMessage(fresh, start, end);
+    const rootText = buildRootMessage(fresh, start, end, teamEmails);
     const attendeesText = await buildAttendeesMessage(slackToken, fresh);
 
     console.log(`발송: ${label}${attendeesText ? ' (+참석자 스레드)' : ''}`);

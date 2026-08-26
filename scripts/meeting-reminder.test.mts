@@ -13,7 +13,8 @@ import test from 'node:test';
 // 모듈 로드 시점에 SLACK_MENTION_MAP을 읽으므로 import보다 먼저 채운다.
 process.env.SLACK_MENTION_MAP ??= '{"placeholder@example.com":"U000"}';
 
-const { getConferenceLink, isInternalMeeting } = await import('./meeting-reminder');
+const { getConferenceLink, getNonTeamAttendees, isInternalMeeting } =
+  await import('./meeting-reminder');
 type CalendarEvent = Parameters<typeof isInternalMeeting>[0];
 
 const ZOOM = 'https://us06web.zoom.us/j/0000000000?pwd=test';
@@ -122,4 +123,23 @@ test('conferenceData의 video 링크도 Meet 링크로 인식한다', () => {
 test('참석자가 없는 일정은 내부 회의로 보지 않는다', () => {
   const event = fe1Daily({ attendees: [] });
   assert.equal(isInternalMeeting(event, TEAM), false);
+});
+
+test('판정을 깨뜨린 참석자를 집어낸다 (로그로 남길 대상)', () => {
+  const event = fe1Daily({
+    attendees: [
+      ...fe1Daily().attendees!,
+      { email: 'guest@partner.co.kr' },
+      { displayName: '이름만 있는 참석자' },
+      { email: 'room-4f@resource.calendar.google.com', resource: true },
+    ],
+  });
+  assert.deepEqual(getNonTeamAttendees(event, TEAM), [
+    'guest@partner.co.kr',
+    '이름만 있는 참석자',
+  ]);
+});
+
+test('전원 팀원이면 집어낼 참석자가 없다', () => {
+  assert.deepEqual(getNonTeamAttendees(fe1Daily(), TEAM), []);
 });
