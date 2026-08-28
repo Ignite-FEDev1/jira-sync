@@ -20,6 +20,9 @@ type CalendarEvent = Parameters<typeof isInternalMeeting>[0];
 const ZOOM = 'https://us06web.zoom.us/j/0000000000?pwd=test';
 const MEET = 'https://meet.google.com/abc-defg-hij';
 
+/** 캘린더에 참석자로 들어오는 팀 구글 그룹 주소 */
+const GROUP = 'fedev1@ignite.co.kr';
+
 /** 실제 FE1 팀원 7명 (users 테이블 기준) */
 const TEAM = new Set([
   'jaydie@ignite.co.kr',
@@ -52,7 +55,10 @@ function fe1Daily(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
 }
 
 test('FE1 데일리는 Zoom 링크로 안내한다', () => {
-  const link = getConferenceLink(fe1Daily(), { zoomUrl: ZOOM, teamEmails: TEAM });
+  const link = getConferenceLink(fe1Daily(), {
+    zoomUrl: ZOOM,
+    teamEmails: TEAM,
+  });
   assert.deepEqual(link, { url: ZOOM, label: 'Zoom 참여' });
 });
 
@@ -69,10 +75,7 @@ test('멘션맵에 박성찬이 빠져 있으면 Meet으로 나간다 (어제 �
 
 test('외부인이 한 명이라도 있으면 Meet을 유지한다', () => {
   const event = fe1Daily({
-    attendees: [
-      ...fe1Daily().attendees!,
-      { email: 'guest@partner.co.kr' },
-    ],
+    attendees: [...fe1Daily().attendees!, { email: 'guest@partner.co.kr' }],
   });
   const link = getConferenceLink(event, { zoomUrl: ZOOM, teamEmails: TEAM });
   assert.deepEqual(link, { url: MEET, label: 'Google Meet 참여' });
@@ -80,7 +83,10 @@ test('외부인이 한 명이라도 있으면 Meet을 유지한다', () => {
 
 test('이메일 없는 참석자가 있으면 신원을 확인할 수 없으므로 Meet을 유지한다', () => {
   const event = fe1Daily({
-    attendees: [...fe1Daily().attendees!, { displayName: '이름만 있는 참석자' }],
+    attendees: [
+      ...fe1Daily().attendees!,
+      { displayName: '이름만 있는 참석자' },
+    ],
   });
   assert.equal(isInternalMeeting(event, TEAM), false);
 });
@@ -97,13 +103,19 @@ test('회의실 같은 리소스 참석자는 판정에서 제외한다', () => 
 });
 
 test('ZOOM_MEETING_URL이 비어 있으면 Meet으로 나간다', () => {
-  const link = getConferenceLink(fe1Daily(), { zoomUrl: null, teamEmails: TEAM });
+  const link = getConferenceLink(fe1Daily(), {
+    zoomUrl: null,
+    teamEmails: TEAM,
+  });
   assert.deepEqual(link, { url: MEET, label: 'Google Meet 참여' });
 });
 
 test('화상 링크가 없는 대면 회의는 링크를 붙이지 않는다', () => {
   const event = fe1Daily({ hangoutLink: undefined });
-  assert.equal(getConferenceLink(event, { zoomUrl: ZOOM, teamEmails: TEAM }), null);
+  assert.equal(
+    getConferenceLink(event, { zoomUrl: ZOOM, teamEmails: TEAM }),
+    null
+  );
 });
 
 test('conferenceData의 video 링크도 Meet 링크로 인식한다', () => {
@@ -123,6 +135,48 @@ test('conferenceData의 video 링크도 Meet 링크로 인식한다', () => {
 test('참석자가 없는 일정은 내부 회의로 보지 않는다', () => {
   const event = fe1Daily({ attendees: [] });
   assert.equal(isInternalMeeting(event, TEAM), false);
+});
+
+test('참석자가 팀 그룹으로 초대된 회의도 Zoom 링크로 안내한다', () => {
+  // 캘린더에 팀원 개개인 대신 "FE 개발1팀" 그룹이 들어오는 일정
+  const teamWithGroup = new Set([...TEAM, GROUP]);
+  const event = fe1Daily({
+    attendees: [
+      { email: 'jaydie@ignite.co.kr', organizer: true },
+      { email: GROUP, displayName: 'FE 개발1팀' },
+      { email: 'ssj@ignite.co.kr' },
+    ],
+  });
+
+  const link = getConferenceLink(event, {
+    zoomUrl: ZOOM,
+    teamEmails: teamWithGroup,
+  });
+  assert.deepEqual(link, { url: ZOOM, label: 'Zoom 참여' });
+});
+
+test('그룹 주소가 등록되지 않으면 Meet으로 떨어진다 (8/28 증상 재현)', () => {
+  const event = fe1Daily({
+    attendees: [
+      { email: 'jaydie@ignite.co.kr', organizer: true },
+      { email: GROUP, displayName: 'FE 개발1팀' },
+      { email: 'ssj@ignite.co.kr' },
+    ],
+  });
+
+  const link = getConferenceLink(event, { zoomUrl: ZOOM, teamEmails: TEAM });
+  assert.deepEqual(link, { url: MEET, label: 'Google Meet 참여' });
+  assert.deepEqual(getNonTeamAttendees(event, TEAM), [GROUP]);
+});
+
+test('이메일 대소문자가 달라도 팀원으로 인정한다', () => {
+  const event = fe1Daily({
+    attendees: [
+      { email: 'JAYDIE@ignite.co.kr', organizer: true },
+      { email: 'SSJ@Ignite.co.kr' },
+    ],
+  });
+  assert.equal(isInternalMeeting(event, TEAM), true);
 });
 
 test('판정을 깨뜨린 참석자를 집어낸다 (로그로 남길 대상)', () => {

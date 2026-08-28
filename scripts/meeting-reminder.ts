@@ -30,6 +30,8 @@
  *                          비워 두면 모든 회의가 캘린더의 Meet 링크를 그대로 쓴다.
  *   MEETING_TEAM_NAME    — (선택) 팀원 판정 기준 팀 이름. 기본 'FE1'.
  *                          users 테이블에서 이 팀의 ignite_jira_email을 팀원으로 본다.
+ *   MEETING_TEAM_GROUP_EMAILS — (선택) 팀 구글 그룹 주소, 콤마 구분. 기본 'fedev1@ignite.co.kr'.
+ *                          캘린더에 팀원 개개인 대신 그룹이 초대된 일정을 내부 회의로 인정한다.
  */
 
 import { createSign } from 'node:crypto';
@@ -65,23 +67,43 @@ function parseSlackMentions(): Record<string, string> {
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('SLACK_MENTION_MAP은 {"email":"Uxxxx"} 형태의 객체여야 합니다.');
+    throw new Error(
+      'SLACK_MENTION_MAP은 {"email":"Uxxxx"} 형태의 객체여야 합니다.'
+    );
   }
 
   const entries = Object.entries(parsed as Record<string, unknown>);
   if (entries.length === 0) {
-    throw new Error('SLACK_MENTION_MAP이 비어 있습니다. 팀원 매핑을 최소 1개 이상 설정하세요.');
+    throw new Error(
+      'SLACK_MENTION_MAP이 비어 있습니다. 팀원 매핑을 최소 1개 이상 설정하세요.'
+    );
   }
 
   return Object.fromEntries(entries.map(([email, id]) => [email, String(id)]));
 }
 
-// 팀원 판정 폴백. 평소에는 users 테이블에서 읽고(loadTeamEmails),
-// 조회가 실패했을 때만 이 값으로 물러선다.
-const TEAM_EMAILS = new Set(Object.keys(SLACK_MENTIONS));
-
 // 팀원 판정 대상 팀 (users.team_id → teams.name)
 const TEAM_NAME = process.env.MEETING_TEAM_NAME?.trim() || 'FE1';
+
+/**
+ * 팀 그룹(구글 그룹) 주소. 캘린더에 팀원 개개인 대신 그룹이 참석자로 들어오는 일정이 있어
+ * 팀원 집합에 함께 넣는다. 넣지 않으면 그룹이 외부 참석자로 잡혀 내부 회의 판정이 깨진다.
+ * 콤마로 여러 개 지정할 수 있다.
+ */
+const TEAM_GROUP_EMAILS = (
+  process.env.MEETING_TEAM_GROUP_EMAILS ?? 'fedev1@ignite.co.kr'
+)
+  .split(',')
+  .map((email) => email.trim().toLowerCase())
+  .filter(Boolean);
+
+// 팀원 판정 폴백. 평소에는 users 테이블에서 읽고(loadTeamEmails),
+// 조회가 실패했을 때만 이 값으로 물러선다.
+const TEAM_EMAILS = new Set(
+  [...Object.keys(SLACK_MENTIONS), ...TEAM_GROUP_EMAILS].map((email) =>
+    email.toLowerCase()
+  )
+);
 
 // 팀 내부 회의는 캘린더에 Meet 링크가 잡혀 있어도 실제로는 Zoom으로 진행한다.
 // 설정하지 않으면 기존대로 캘린더의 Meet 링크를 안내한다.
@@ -124,7 +146,10 @@ function requireEnv(name: string): string {
 
 // --- Google 인증 (서비스 계정 JWT → access token, 의존성 없이 RS256 직접 서명) ---
 
-function parseServiceAccountKey(raw: string): { client_email: string; private_key: string } {
+function parseServiceAccountKey(raw: string): {
+  client_email: string;
+  private_key: string;
+} {
   const json = raw.trim().startsWith('{')
     ? raw
     : Buffer.from(raw, 'base64').toString('utf8');
@@ -234,10 +259,15 @@ function getMeetLink(event: CalendarEvent): string | null {
   return video?.uri ?? null;
 }
 
+/** 참석자가 팀원인지. 팀 그룹 주소도 팀원으로 본다. 이메일 대소문자는 무시한다. */
+function isTeamAttendee(attendee: Attendee, teamEmails: Set<string>): boolean {
+  return !!attendee.email && teamEmails.has(attendee.email.toLowerCase());
+}
+
 /**
  * 사람 참석자가 전원 팀원이면 내부 회의로 본다.
  * 이메일이 없는 참석자는 신원을 확인할 수 없으므로 외부로 간주한다(Meet 링크 유지).
- * teamEmails는 테스트에서 주입하며, 실행 시에는 기본값(SLACK_MENTION_MAP 기반)을 쓴다.
+ * teamEmails는 테스트에서 주입하며, 실행 시에는 기본값(users 테이블 + 팀 그룹)을 쓴다.
  */
 export function isInternalMeeting(
   event: CalendarEvent,
@@ -245,7 +275,7 @@ export function isInternalMeeting(
 ): boolean {
   const people = (event.attendees ?? []).filter((a) => !a.resource);
   if (!people.length) return false;
-  return people.every((a) => !!a.email && teamEmails.has(a.email));
+  return people.every((a) => isTeamAttendee(a, teamEmails));
 }
 
 /** 내부 회의 판정을 깨뜨린 참석자들. 왜 Meet으로 나갔는지 로그에 남기기 위한 것. */
@@ -255,7 +285,7 @@ export function getNonTeamAttendees(
 ): string[] {
   return (event.attendees ?? [])
     .filter((a) => !a.resource)
-    .filter((a) => !a.email || !teamEmails.has(a.email))
+    .filter((a) => !isTeamAttendee(a, teamEmails))
     .map((a) => a.email || a.displayName || '(이름 없는 참석자)');
 }
 
@@ -268,7 +298,8 @@ export function getConferenceLink(
   event: CalendarEvent,
   options: { zoomUrl?: string | null; teamEmails?: Set<string> } = {}
 ): { url: string; label: string } | null {
-  const zoomUrl = options.zoomUrl !== undefined ? options.zoomUrl : ZOOM_MEETING_URL;
+  const zoomUrl =
+    options.zoomUrl !== undefined ? options.zoomUrl : ZOOM_MEETING_URL;
   const teamEmails = options.teamEmails ?? TEAM_EMAILS;
 
   const meetLink = getMeetLink(event);
@@ -318,7 +349,10 @@ function buildRootMessage(
 /** users.lookupByEmail 결과 캐시 (미발견/스코프 없음이면 null) */
 const slackIdCache = new Map<string, string | null>();
 
-async function resolveSlackId(slackToken: string, email: string): Promise<string | null> {
+async function resolveSlackId(
+  slackToken: string,
+  email: string
+): Promise<string | null> {
   if (SLACK_MENTIONS[email]) return SLACK_MENTIONS[email];
   if (slackIdCache.has(email)) return slackIdCache.get(email)!;
   let id: string | null = null;
@@ -352,7 +386,9 @@ async function buildAttendeesMessage(
 ): Promise<string | null> {
   const people = (event.attendees ?? []).filter((a) => !a.resource);
   if (!people.length) return null;
-  const names = await Promise.all(people.map((a) => attendeeName(slackToken, a)));
+  const names = await Promise.all(
+    people.map((a) => attendeeName(slackToken, a))
+  );
   return `:busts_in_silhouette: *참석자 ${people.length}명* — ${names.join(', ')}`;
 }
 
@@ -363,7 +399,10 @@ async function buildAttendeesMessage(
  * 조회가 실패하면 맵으로 물러서되 반드시 경고를 남긴다.
  */
 export async function loadTeamEmails(): Promise<Set<string>> {
-  const fallback = new Set(Object.keys(SLACK_MENTIONS));
+  // 어느 경로로 끝나든 팀 그룹 주소는 항상 팀원으로 인정한다
+  const toSet = (emails: string[]) =>
+    new Set([...emails, ...TEAM_GROUP_EMAILS].map((e) => e.toLowerCase()));
+  const fallback = toSet(Object.keys(SLACK_MENTIONS));
 
   const { data: team, error: teamError } = await dbServer
     .from('teams')
@@ -384,7 +423,10 @@ export async function loadTeamEmails(): Promise<Set<string>> {
     .select('name, ignite_jira_email')
     .eq('team_id', (team as { id: string }).id);
 
-  const rows = (users ?? []) as { name: string; ignite_jira_email: string | null }[];
+  const rows = (users ?? []) as {
+    name: string;
+    ignite_jira_email: string | null;
+  }[];
   if (usersError || rows.length === 0) {
     console.warn(
       `팀원 목록 조회 실패 → SLACK_MENTION_MAP 기준으로 대체합니다 ` +
@@ -405,8 +447,13 @@ export async function loadTeamEmails(): Promise<Set<string>> {
     .map((u) => u.ignite_jira_email)
     .filter((e): e is string => !!e);
 
-  console.log(`팀원 판정 기준: users 테이블 '${TEAM_NAME}' ${emails.length}명`);
-  return new Set(emails);
+  console.log(
+    `팀원 판정 기준: users 테이블 '${TEAM_NAME}' ${emails.length}명` +
+      (TEAM_GROUP_EMAILS.length
+        ? ` + 팀 그룹 ${TEAM_GROUP_EMAILS.join(', ')}`
+        : '')
+  );
+  return toSet(emails);
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -414,7 +461,10 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function main() {
   const calendarIdsRaw =
     process.env.GOOGLE_CALENDAR_IDS || requireEnv('GOOGLE_CALENDAR_ID');
-  const calendarIds = calendarIdsRaw.split(',').map((s) => s.trim()).filter(Boolean);
+  const calendarIds = calendarIdsRaw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const slackToken = requireEnv('SLACK_BOT_TOKEN');
   const channelId = requireEnv('SLACK_MEETING_CHANNEL_ID');
   requireEnv('NEXT_PUBLIC_DB_URL');
@@ -426,20 +476,28 @@ async function main() {
   // 팀원별 개인 캘린더를 모두 조회해서 이벤트 ID로 병합
   // (같은 회의는 모든 참석자 캘린더에 같은 ID로 존재 → 자연 dedup)
   // 아직 공유 안 된 캘린더는 조회 실패해도 경고만 남기고 계속 진행
-  const eventById = new Map<string, { event: CalendarEvent; calendarId: string }>();
+  const eventById = new Map<
+    string,
+    { event: CalendarEvent; calendarId: string }
+  >();
   for (const calId of calendarIds) {
     try {
       const items = await fetchUpcomingEvents(accessToken, calId);
       for (const e of items) {
-        if (!eventById.has(e.id)) eventById.set(e.id, { event: e, calendarId: calId });
+        if (!eventById.has(e.id))
+          eventById.set(e.id, { event: e, calendarId: calId });
       }
       console.log(`${calId}: ${items.length}건`);
     } catch (e) {
-      console.warn(`${calId}: 조회 실패 (캘린더 미공유?) — ${e instanceof Error ? e.message.slice(0, 120) : e}`);
+      console.warn(
+        `${calId}: 조회 실패 (캘린더 미공유?) — ${e instanceof Error ? e.message.slice(0, 120) : e}`
+      );
     }
   }
   const merged = Array.from(eventById.values());
-  console.log(`병합된 일정: ${merged.length}건 (앞으로 ${LOOKAHEAD_MIN}분, 캘린더 ${calendarIds.length}개)`);
+  console.log(
+    `병합된 일정: ${merged.length}건 (앞으로 ${LOOKAHEAD_MIN}분, 캘린더 ${calendarIds.length}개)`
+  );
 
   const teamEmails = await loadTeamEmails();
   if (!ZOOM_MEETING_URL) {
@@ -450,22 +508,34 @@ async function main() {
 
   const eventIds = merged.map(({ event }) => event.id);
   const { data: rowsData, error: rowsError } = eventIds.length
-    ? await dbServer.from('meeting_reminders').select('event_id').in('event_id', eventIds)
+    ? await dbServer
+        .from('meeting_reminders')
+        .select('event_id')
+        .in('event_id', eventIds)
     : { data: [], error: null };
   if (rowsError) throw new Error(`발송 이력 조회 실패: ${rowsError.message}`);
-  const sentIds = new Set((rowsData as { event_id: string }[]).map((r) => r.event_id));
+  const sentIds = new Set(
+    (rowsData as { event_id: string }[]).map((r) => r.event_id)
+  );
 
   const now = Date.now();
   const candidates = merged
     .filter(({ event: e }) => e.status !== 'cancelled')
     .filter(({ event: e }) => e.start?.dateTime) // 종일 일정 제외
     // 개인 캘린더의 사적 일정 보호: 비공개 일정 제외, 팀원 2명 이상 참석 회의만 발송
-    .filter(({ event: e }) => e.visibility !== 'private' && e.visibility !== 'confidential')
     .filter(
       ({ event: e }) =>
-        (e.attendees ?? []).filter((a) => a.email && teamEmails.has(a.email)).length >= 2
+        e.visibility !== 'private' && e.visibility !== 'confidential'
     )
-    .filter(({ event: e }) => !EXCLUDE_KEYWORDS.some((k) => (e.summary ?? '').includes(k)))
+    .filter(
+      ({ event: e }) =>
+        (e.attendees ?? []).filter((a) => a.email && teamEmails.has(a.email))
+          .length >= 2
+    )
+    .filter(
+      ({ event: e }) =>
+        !EXCLUDE_KEYWORDS.some((k) => (e.summary ?? '').includes(k))
+    )
     .filter(({ event: e }) => !sentIds.has(e.id))
     .map(({ event: e, calendarId }) => {
       const start = new Date(e.start!.dateTime!);
