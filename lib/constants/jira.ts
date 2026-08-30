@@ -373,6 +373,20 @@ export const FEHG_TRANSITIONS = {
   DONE: '31',
 } as const;
 
+// FEHG status ID (STATUS_TARGET_MAPPING / STATUS_WORKFLOW의 키로 쓰이는 값)
+export const FEHG_STATUS_IDS = {
+  TODO: '10373',
+  IN_PROGRESS: '10374',
+  DONE: '10375',
+} as const;
+
+// HMG(AUTOWAY/HMGBOARD) status ID — 종료 여부 판정용
+export const HMG_STATUS_IDS = {
+  OPEN: '1',
+  IN_PROGRESS: '3',
+  CLOSED: '6',
+} as const;
+
 // 헬퍼 함수
 export const JiraProjectHelpers = {
   /**
