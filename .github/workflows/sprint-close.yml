@@ -38,5 +38,9 @@ jobs:
           NEXT_PUBLIC_DB_ANON_KEY: ${{ secrets.NEXT_PUBLIC_DB_ANON_KEY }}
           DB_SERVICE_ROLE_KEY: ${{ secrets.DB_SERVICE_ROLE_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SLACK_ALERT_WEBHOOK_URL: ${{ secrets.SLACK_ALERT_WEBHOOK_URL }}
+          # github.event.inputs.*는 항상 문자열이라 체크 해제 시 "false"가 들어온다.
+          # 스크립트는 !!process.env.DRY_RUN로 판정하므로 "false"도 truthy가 되어
+          # 수동 실행이 항상 DRY RUN으로 돌아버린다. 명시적으로 빈 문자열로 접는다.
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && 'true' || '' }}
         run: npx tsx scripts/sprint-close.ts

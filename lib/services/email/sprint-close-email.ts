@@ -14,6 +14,20 @@ export interface SprintCloseResult {
   cloned: { originalKey: string; originalSummary: string; newKey: string; newSummary?: string; assigneeName: string | null }[];
   // 처리 중 오류 발생한 티켓
   errors: { key: string; summary: string; error: string }[];
+  /**
+   * 실패는 아니지만 사람이 판단해야 하는 건.
+   * 예: 원본은 완료됐는데 짝꿍 KQ가 "Verify in QA"라 상태를 건드리지 않은 경우.
+   * 오류 섹션에 섞으면 실제 장애 신호가 묻히므로 등급을 분리한다.
+   *
+   * assigneeName: 담당자별 내역과 같은 기준으로 묶기 위한 값.
+   * 이 항목은 결국 담당자가 마무리해야 하므로 누구 몫인지가 보여야 한다.
+   */
+  notices?: {
+    key: string;
+    summary: string;
+    notice: string;
+    assigneeName: string | null;
+  }[];
 }
 
 export function buildSprintCloseEmailHtml(
@@ -125,10 +139,12 @@ export function buildSprintCloseEmailHtml(
     `<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${color};margin-right:5px;vertical-align:middle;position:relative;top:-1px;"></span>`;
 
   const errCount = result.errors.length;
+  const noticeCount = result.notices?.length ?? 0;
   const summaryBar = `
     <div style="background:#f8fafc;border-bottom:1px solid #e5e7eb;padding:10px 22px;font-size:12px;color:#6b7280;">
       <span style="margin-right:16px;">${dot('#6b7280')}<span style="color:#374151;font-weight:600;">이월 ${result.moved.length}건</span></span>
       <span style="margin-right:16px;">${dot('#3b82f6')}<span style="color:#3b82f6;font-weight:600;">신규 ${result.cloned.length}건</span></span>
+      ${noticeCount > 0 ? `<span style="margin-right:16px;color:#b45309;font-weight:600;">확인 필요 ${noticeCount}건</span>` : ''}
       <span style="${errCount > 0 ? 'color:#dc2626;font-weight:600;' : ''}">오류 ${errCount > 0 ? `${errCount}건` : '없음'}</span>
     </div>`;
 
@@ -227,6 +243,57 @@ export function buildSprintCloseEmailHtml(
       </div>`;
   }
 
+  // ── 확인 필요 섹션 ──────────────────────────────────────────
+  // 배치가 의도적으로 손대지 않은 건. 실패가 아니므로 오류와 색·문구를 분리한다.
+
+  let noticeSection = '';
+  const notices = result.notices ?? [];
+  if (notices.length > 0) {
+    // 담당자별로 묶는다 — 결국 담당자가 마무리해야 하는 항목이라
+    // "내 것이 있나"를 위 담당자별 내역과 같은 방식으로 찾을 수 있어야 한다.
+    const byAssignee = new Map<string, typeof notices>();
+    for (const n of notices) {
+      const k = n.assigneeName ?? '미배정';
+      if (!byAssignee.has(k)) byAssignee.set(k, []);
+      byAssignee.get(k)!.push(n);
+    }
+    // 미배정은 항상 마지막
+    const names = [...byAssignee.keys()].sort((a, b) => {
+      if (a === '미배정') return 1;
+      if (b === '미배정') return -1;
+      return a.localeCompare(b, 'ko');
+    });
+
+    const groups = names
+      .map((name) => {
+        const items = byAssignee.get(name)!;
+        const rows = items
+          .map(
+            (t) =>
+              `<div style="padding:4px 0 4px 10px;font-size:13px;">` +
+              `${link(t.key)}<div style="color:#92400e;font-size:12px;line-height:1.55;margin-top:2px;">${t.notice}</div>` +
+              `</div>`
+          )
+          .join('');
+        // 위 담당자별 내역과 같은 시각 문법 (점 + 이름 + 건수)
+        return (
+          `<div style="margin-top:10px;">` +
+          `<div style="font-size:12px;font-weight:700;color:#78350f;">` +
+          `${dot('#d97706')}${name}` +
+          `<span style="font-weight:400;color:#a16207;margin-left:6px;">${items.length}건</span>` +
+          `</div>${rows}</div>`
+        );
+      })
+      .join('');
+
+    noticeSection = `
+      <div style="padding:12px 22px;border-top:1px solid #fcd34d;background:#fffbeb;">
+        <div style="font-weight:700;font-size:12px;color:#92400e;">확인 필요 (${notices.length}개)</div>
+        <div style="font-size:11px;color:#a16207;margin-top:2px;">배치가 일부러 건드리지 않은 항목입니다. 실패는 아니지만 담당자가 마무리해야 합니다.</div>
+        ${groups}
+      </div>`;
+  }
+
   // ── 빈 상태 ────────────────────────────────────────────────
 
   const isEmpty = !mySection && !teamSection;
@@ -246,6 +313,7 @@ export function buildSprintCloseEmailHtml(
           ? `<div style="padding:20px 22px;color:#6b7280;font-size:13px;">${result.errors.length > 0 ? '정상 처리된 티켓이 없습니다.' : '처리된 티켓이 없습니다.'}</div>`
           : `${mySection}${teamSection}`
         }
+        ${noticeSection}
         ${errorSection}
       </div>
     </div>`;

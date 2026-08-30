@@ -16,7 +16,20 @@ process.env.BATCH_MODE = 'true';
 import { SyncOrchestrator } from '@/lib/services/sync/sync-orchestrator';
 import { SyncSummary } from '@/lib/services/sync/types';
 import { getTeamIdByName, getTeamUsers } from '@/lib/services/user-lookup';
-import { sendSyncReportEmail } from '@/lib/services/email/resend-client';
+import {
+  sendSyncReportEmail,
+  getEmailStatus,
+  isFailedEmailEvent,
+} from '@/lib/services/email/resend-client';
+import { sendSlackAlert } from '@/lib/services/notify/slack';
+
+function buildGhRunUrl(): string | null {
+  const server = process.env.GITHUB_SERVER_URL;
+  const repo = process.env.GITHUB_REPOSITORY;
+  const runId = process.env.GITHUB_RUN_ID;
+  if (!server || !repo || !runId) return null;
+  return `${server}/${repo}/actions/runs/${runId}`;
+}
 
 interface UserSyncResult {
   name: string;
@@ -31,10 +44,7 @@ async function main() {
   console.log('========================================\n');
 
   // 환경변수 체크 (Jira 인증은 DB에서 가져오므로 제거)
-  const requiredEnvVars = [
-    'NEXT_PUBLIC_DB_URL',
-    'DB_SERVICE_ROLE_KEY',
-  ];
+  const requiredEnvVars = ['NEXT_PUBLIC_DB_URL', 'DB_SERVICE_ROLE_KEY'];
 
   const missingVars = requiredEnvVars.filter((v) => !process.env[v]);
   if (missingVars.length > 0) {
@@ -53,9 +63,7 @@ async function main() {
   const results: UserSyncResult[] = [];
 
   console.log(`대상 담당자: ${users.length}명`);
-  console.log(
-    `담당자 목록: ${users.map((u) => u.name).join(', ')}\n`
-  );
+  console.log(`담당자 목록: ${users.map((u) => u.name).join(', ')}\n`);
 
   // 담당자별 순차 실행
   for (const user of users) {
@@ -66,12 +74,20 @@ async function main() {
     // 담당자별 Jira 인증정보 설정
     if (!user.igniteJiraEmail || !user.igniteJiraApiToken) {
       console.log(`[${user.name}] Ignite Jira 인증정보 없음 — 스킵`);
-      results.push({ name: user.name, summary: null, error: 'Ignite Jira 인증정보 없음' });
+      results.push({
+        name: user.name,
+        summary: null,
+        error: 'Ignite Jira 인증정보 없음',
+      });
       continue;
     }
     if (!user.hmgJiraEmail || !user.hmgJiraApiToken) {
       console.log(`[${user.name}] HMG Jira 인증정보 없음 — 스킵`);
-      results.push({ name: user.name, summary: null, error: 'HMG Jira 인증정보 없음' });
+      results.push({
+        name: user.name,
+        summary: null,
+        error: 'HMG Jira 인증정보 없음',
+      });
       continue;
     }
 
@@ -131,8 +147,7 @@ async function main() {
       totalSuccess += result.summary.totalSuccess;
       totalFailed += result.summary.totalFailed;
       totalCreated += result.summary.totalCreated;
-      const status =
-        result.summary.totalFailed > 0 ? '(일부 실패)' : '(성공)';
+      const status = result.summary.totalFailed > 0 ? '(일부 실패)' : '(성공)';
       console.log(
         `  ${result.name}: 처리 ${result.summary.totalProcessed}건, 성공 ${result.summary.totalSuccess}건, 실패 ${result.summary.totalFailed}건 ${status}`
       );
@@ -144,7 +159,9 @@ async function main() {
 
   console.log(`\n전체 통계:`);
   console.log(`  총 처리: ${totalProcessed}건`);
-  console.log(`  총 성공: ${totalSuccess}건 (업데이트: ${totalSuccess - totalCreated}, 신규 생성: ${totalCreated})`);
+  console.log(
+    `  총 성공: ${totalSuccess}건 (업데이트: ${totalSuccess - totalCreated}, 신규 생성: ${totalCreated})`
+  );
   console.log(`  총 실패: ${totalFailed}건`);
   console.log(`  실행 오류 담당자: ${userErrors}명`);
 
@@ -152,8 +169,17 @@ async function main() {
   const syncDate = new Date().toISOString().slice(0, 10);
   const hasResendKey = !!process.env.RESEND_API_KEY;
 
-  const userResultSummaries: { userName: string; processed: number; success: number; failed: number; created: number }[] = [];
-  const userFailures: { userName: string; failures: { ticketKey: string; error: string }[] }[] = [];
+  const userResultSummaries: {
+    userName: string;
+    processed: number;
+    success: number;
+    failed: number;
+    created: number;
+  }[] = [];
+  const userFailures: {
+    userName: string;
+    failures: { ticketKey: string; error: string }[];
+  }[] = [];
 
   for (const result of results) {
     if (result.summary) {
@@ -191,14 +217,88 @@ async function main() {
 
   const cutoffDate = SyncOrchestrator.getCutoffDate();
 
+  // ── 동기화 자체 오류 슬랙 알림 (담당자별 실패 또는 실행 오류) ─
+  if (totalFailed > 0 || userErrors > 0) {
+    const failureLines = userFailures.slice(0, 5).map((u) => {
+      const preview = u.failures
+        .slice(0, 3)
+        .map((f) => `${f.ticketKey}: ${f.error}`)
+        .join(' | ');
+      const overflow =
+        u.failures.length > 3 ? ` (외 ${u.failures.length - 3}건)` : '';
+      return `• [${u.userName}] ${preview}${overflow}`;
+    });
+    await sendSlackAlert({
+      title: `Daily Sync 실패 (${syncDate}) — 실패 ${totalFailed}건 · 실행오류 ${userErrors}명`,
+      body: failureLines.join('\n'),
+      color: 'yellow',
+    });
+  }
+
+  let emailMessageId: string | null = null;
   if (hasResendKey) {
     try {
-      await sendSyncReportEmail({ userResults: userResultSummaries, userFailures, syncDate, cutoffDate });
+      emailMessageId = await sendSyncReportEmail({
+        userResults: userResultSummaries,
+        userFailures,
+        syncDate,
+        cutoffDate,
+      });
+      if (!emailMessageId) {
+        const ghRun = buildGhRunUrl();
+        await sendSlackAlert({
+          title: `❌ Daily Sync 이메일 발송 실패 · ${syncDate}`,
+          body: [
+            `*사유*: Resend API 재시도 5회 모두 실패 (5xx/429/네트워크)`,
+            ghRun ? `*GH Actions*: <${ghRun}|로그 열기>` : null,
+            `동기화 처리 자체는 완료 · 이메일만 미발송.`,
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          color: 'red',
+        });
+      }
     } catch (emailError) {
       console.error('[이메일] 발송 중 오류:', emailError);
+      const ghRun = buildGhRunUrl();
+      await sendSlackAlert({
+        title: `❌ Daily Sync 이메일 발송 예외 · ${syncDate}`,
+        body: [
+          `*사유*: ${emailError instanceof Error ? emailError.message : String(emailError)}`,
+          ghRun ? `*GH Actions*: <${ghRun}|로그 열기>` : null,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        color: 'red',
+      });
     }
   } else {
     console.log('\nRESEND_API_KEY 미설정 — 결과 이메일 생략');
+  }
+
+  // ── 이메일 배달 상태 사후 확인 (async bounce 감지) ────────
+  if (emailMessageId) {
+    console.log(
+      `\n[검증] 이메일 배달 상태 확인 (${emailMessageId}) — 30초 대기…`
+    );
+    await new Promise((r) => setTimeout(r, 30_000));
+    const status = await getEmailStatus(emailMessageId);
+    console.log(`  최종 상태: ${status ?? 'unknown'}`);
+    if (isFailedEmailEvent(status)) {
+      const ghRun = buildGhRunUrl();
+      await sendSlackAlert({
+        title: `❌ Daily Sync 이메일 배달 실패 (${status}) · ${syncDate}`,
+        body: [
+          `*사유*: 이메일이 API로는 발송됐으나 수신 서버가 거절 (async bounce/complained/failed)`,
+          `*Resend*: <https://resend.com/emails/${emailMessageId}|이벤트 상세 열기>`,
+          ghRun ? `*GH Actions*: <${ghRun}|배치 로그 열기>` : null,
+          `동기화 처리 자체는 완료 · 이메일만 미도착.`,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        color: 'red',
+      });
+    }
   }
 
   // 부분 실패 시에도 Action은 성공으로 처리 (exit code 0)
@@ -209,7 +309,16 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   console.error('예상치 못한 오류:', error);
+  try {
+    await sendSlackAlert({
+      title: 'Daily Sync 배치 예외 (배치 전체 실패)',
+      body: error instanceof Error ? error.message : String(error),
+      color: 'red',
+    });
+  } catch {
+    // 슬랙 실패는 exit code에 영향 없음
+  }
   process.exit(1);
 });

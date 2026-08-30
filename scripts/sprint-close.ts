@@ -16,11 +16,61 @@ process.env.BATCH_MODE = 'true';
 import { JiraClient } from '@/lib/services/jira/client';
 import {
   FEHG_TRANSITIONS,
+  FEHG_STATUS_IDS,
   IGNITE_CUSTOM_FIELDS,
   JIRA_ENDPOINTS,
 } from '@/lib/constants/jira';
 import { getAllUsers } from '@/lib/services/user-lookup';
-import { sendSprintCloseEmail } from '@/lib/services/email/resend-client';
+import {
+  sendSprintCloseEmail,
+  getEmailDelivery,
+  isFailedEmailEvent,
+} from '@/lib/services/email/resend-client';
+import {
+  sendEmailFailureAlert,
+  sendBatchErrorAlert,
+  sendBatchCrashAlert,
+} from '@/lib/services/notify/sprint-close-alert';
+
+/**
+ * GH Actions에서 실행 중이면 현재 run URL을 조합하여 반환.
+ * 로컬 실행 등 env가 없으면 null.
+ */
+/**
+ * verify 실패 항목을 result.errors에 [VERIFY] prefix로 표면화.
+ * 이메일 결과 카드와 Slack 폴백 알림 모두에서 자동 노출된다.
+ */
+function pushVerifyFailures(
+  result: SprintCloseResult,
+  ticket: JiraIssue,
+  verify: VerifyResult
+): void {
+  if (verify.fatal) {
+    result.errors.push({
+      key: ticket.key,
+      summary: ticket.fields.summary,
+      error: `[VERIFY] ${verify.fatal}`,
+    });
+    return;
+  }
+  for (const c of verify.checks) {
+    if (c.status === 'fail') {
+      result.errors.push({
+        key: ticket.key,
+        summary: ticket.fields.summary,
+        error: `[VERIFY] ${c.label}: ${c.detail ?? '실패'}`,
+      });
+    }
+  }
+}
+
+function buildGhRunUrl(): string | null {
+  const server = process.env.GITHUB_SERVER_URL;
+  const repo = process.env.GITHUB_REPOSITORY;
+  const runId = process.env.GITHUB_RUN_ID;
+  if (!server || !repo || !runId) return null;
+  return `${server}/${repo}/actions/runs/${runId}`;
+}
 import {
   buildSprintCloseEmailHtml,
   SprintCloseResult,
@@ -37,6 +87,15 @@ import {
   patchAutomationKqTicket,
   FehgIssueLink,
 } from '@/lib/services/sprint-close/cascade-kq';
+import {
+  verifyCompleteAndClone,
+  verifyChangeSprint,
+  type VerifyResult,
+} from '@/lib/services/sprint-close/verify';
+import {
+  syncCounterpartStatuses,
+  findLinkedKqKey,
+} from '@/lib/services/sprint-close/counterpart-status';
 
 // ─── 타입 ────────────────────────────────────────────────────
 
@@ -54,7 +113,8 @@ interface JiraIssue {
     description?: unknown;
     assignee?: { accountId: string; displayName: string } | null;
     priority?: { name: string } | null;
-    issuetype?: { name: string; id: string };
+    // hierarchyLevel: 0=일반 티켓, 1=에픽, -1=하위 작업
+    issuetype?: { name: string; id: string; hierarchyLevel?: number };
     parent?: { key: string; id: string; fields?: { summary?: string } };
     labels?: string[];
     customfield_10015?: string | null; // 시작일
@@ -106,7 +166,23 @@ async function fetchActiveSprintTickets(
     throw new Error(`티켓 조회 실패: ${result.error}`);
   }
 
-  return result.data.issues;
+  // JQL의 `issuetype != Epic`은 이 프로젝트에서 에픽을 못 거른다.
+  // FEHG의 에픽 타입명이 한글 '에픽'이라 영문 Epic과 매칭되지 않기 때문.
+  // (2026-08-30 확인: FEHG-4335 "[CPO] 9/10 -> 9/14 정기배포"가 이월 대상에 섞였음)
+  //
+  // 이름은 로케일·설정에 따라 바뀌지만 hierarchyLevel은 구조값이라 안전하다.
+  //   0 = 일반 티켓 · 1 = 에픽 · -1 = 하위 작업
+  // 마감 대상은 일반 티켓뿐이므로 level 0만 남긴다.
+  const tickets = result.data.issues.filter(
+    (t) => (t.fields.issuetype?.hierarchyLevel ?? 0) === 0
+  );
+
+  const excluded = result.data.issues.length - tickets.length;
+  if (excluded > 0) {
+    console.log(`  (에픽·하위작업 ${excluded}건 제외)`);
+  }
+
+  return tickets;
 }
 
 /** 티켓 상태 전환 (1회 재시도) */
@@ -136,6 +212,16 @@ async function transitionIssue(
  * - summary에 " - OO월" suffix 추가
  * - 다음 달 스프린트 ID 설정
  * - 주요 필드 복사 (description, assignee, priority, parent, labels)
+ *
+ * parent와 assignee를 create payload에 포함한다. KQ 자동화 규칙이 "티켓 생성" 시점에
+ * 한 번만 실행되고, 그때 parent(에픽)가 있어야 KQ를 만들기 때문.
+ *
+ * 2026-08-30 실측 — 같은 사람이 같은 에픽(FEHG-4087)에 만든 두 티켓 비교:
+ *   FEHG-4384 성공: 생성과 parent 지정이 같은 초 → 4초 뒤 자동화가 KQ-18304 생성
+ *   FEHG-4438 실패: parent를 3초 뒤 별도 PUT → 자동화는 스프린트만 바꾸고 KQ는 안 만듦
+ * 담당자 유무는 원인이 아니었다(둘 다 있었음). 차이는 생성 시점의 parent 하나뿐.
+ *
+ * 부작용인 에픽 스프린트 상속은 아래 Agile API 재고정으로 되돌린다.
  */
 async function createCloneTicket(
   client: JiraClient,
@@ -143,8 +229,6 @@ async function createCloneTicket(
   nextSprintId: number,
   nextMonthLabel: string
 ): Promise<string> {
-  // parent는 의도적으로 제외: 에픽 소속 티켓은 생성 시 parent를 포함하면 에픽 스프린트를
-  // Jira가 즉시 상속시켜 Agile API sprint 설정을 덮어씀. parent는 sprint 고정 후 별도 PUT.
   const fields: Record<string, unknown> = {
     project: { key: 'FEHG' },
     summary: `${original.fields.summary} - ${nextMonthLabel}`,
@@ -154,6 +238,8 @@ async function createCloneTicket(
     [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: null, // 원본 AUTOWAY 연결 제거 - 데일리 싱크가 클론 티켓용 신규 AUTOWAY 생성
   };
 
+  if (original.fields.parent)
+    fields.parent = { key: original.fields.parent.key };
   if (original.fields.description)
     fields.description = original.fields.description;
   if (original.fields.assignee)
@@ -172,7 +258,8 @@ async function createCloneTicket(
 
   const newKey = result.data.key;
 
-  // 에픽 스프린트 상속 방지: Agile API로 다음 달 스프린트 1차 고정
+  // 에픽 스프린트 상속 되돌리기: Agile API로 다음 달 스프린트 재고정
+  // parent를 create에 넣으면서 상속이 확실히 일어나므로 이 단계가 더 중요해졌다.
   const sprintFix1 = await client.post(
     `agile/1.0/sprint/${nextSprintId}/issue`,
     {
@@ -181,17 +268,6 @@ async function createCloneTicket(
   );
   if (!sprintFix1.success) {
     throw new Error(`스프린트 변경 실패 (${newKey}): ${sprintFix1.error}`);
-  }
-
-  // parent 설정 (sprint 고정 후 적용)
-  // parent PUT 시 Jira가 에픽 스프린트로 재설정할 수 있어 Agile API로 2차 재고정
-  if (original.fields.parent) {
-    await client.put(`issue/${newKey}`, {
-      fields: { parent: { key: original.fields.parent.key } },
-    });
-    await client.post(`agile/1.0/sprint/${nextSprintId}/issue`, {
-      issues: [newKey],
-    });
   }
 
   return newKey;
@@ -265,7 +341,9 @@ async function cascadeLinkedTickets(
     { name: string; igniteAccountId: string; hmgAccountId?: string | null }
   >,
   isDryRun: boolean
-): Promise<void> {
+): Promise<string[]> {
+  const errors: string[] = [];
+
   // daily sync와 동일한 조건: 상위 에픽 summary에 [GW] 포함 시 AUTOWAY 생성
   const parentKey = original.fields.parent?.key;
   const parentSummary = original.fields.parent?.fields?.summary ?? '';
@@ -275,19 +353,21 @@ async function cascadeLinkedTickets(
     console.log(
       `    [SKIP] AUTOWAY 연쇄 생성 — [GW]/[GW-QA지원] 에픽 아님 (${parentSummary || parentKey || '부모 없음'})`
     );
-    return;
+    return errors;
   }
 
   if (isDryRun) {
     console.log(
       `    [DRY RUN] AUTOWAY 연쇄 생성 예정 ([GW]/[GW-QA지원] 에픽: ${parentSummary})`
     );
-    return;
+    return errors;
   }
 
   if (!hmgClient) {
-    console.log(`    [SKIP] AUTOWAY 연쇄 생성 불가 — HMG Jira 인증정보 없음`);
-    return;
+    const msg = 'AUTOWAY 연쇄 생성 불가 — HMG Jira 인증정보 없음';
+    console.log(`    [SKIP] ${msg}`);
+    errors.push(msg);
+    return errors;
   }
 
   const accountId = original.fields.assignee?.accountId ?? null;
@@ -318,29 +398,32 @@ async function cascadeLinkedTickets(
     );
 
     if (!newAutowayResult.success || !newAutowayResult.data) {
-      console.error(
-        `    [ERROR] AUTOWAY 연쇄 생성 실패: ${newAutowayResult.error}`
-      );
-      return;
+      const msg = `AUTOWAY 연쇄 생성 실패: ${newAutowayResult.error}`;
+      console.error(`    [ERROR] ${msg}`);
+      errors.push(msg);
+      return errors;
     }
     const newAutowayKey = newAutowayResult.data.key;
     const autowayUrl = `${JIRA_ENDPOINTS.HMG}/browse/${newAutowayKey}`;
     console.log(`    -> AUTOWAY 연쇄 생성: ${newAutowayKey} (${autowayUrl})`);
 
-    // 클론 FEHG의 customfield_10306에 AUTOWAY URL 저장 (daily sync와 동일)
     const saveResult = await igniteClient.put(`issue/${cloneKey}`, {
       fields: { [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: autowayUrl },
     });
     if (!saveResult.success) {
-      console.warn(
-        `    [WARN] ${cloneKey} AUTOWAY 링크 저장 실패 (티켓은 생성됨): ${saveResult.error}`
-      );
+      const msg = `${cloneKey} AUTOWAY 링크 저장 실패 (${newAutowayKey}는 생성됨): ${saveResult.error}`;
+      console.warn(`    [WARN] ${msg}`);
+      errors.push(msg);
     } else {
       console.log(`    -> ${cloneKey}.customfield_10306 = ${autowayUrl}`);
     }
   } catch (err) {
-    console.error(`    [ERROR] AUTOWAY 연쇄 처리 예외:`, err);
+    const msg = `AUTOWAY 연쇄 처리 예외: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`    [ERROR] ${msg}`);
+    errors.push(msg);
   }
+
+  return errors;
 }
 
 async function main() {
@@ -455,7 +538,12 @@ async function main() {
 
   // ── 티켓별 상태 처리 ──────────────────────────────────────
   console.log('[4/4] 티켓 처리...');
-  const result: SprintCloseResult = { moved: [], cloned: [], errors: [] };
+  const result: SprintCloseResult = {
+    moved: [],
+    cloned: [],
+    errors: [],
+    notices: [],
+  };
 
   for (const ticket of tickets) {
     const sprints = ticket.fields.customfield_10020 ?? [];
@@ -487,6 +575,16 @@ async function main() {
               `  [DRY RUN 진행중] ${ticket.key}: 완료 전환 + 신규 발행 예정 (변경 없음)`
             );
           }
+          await syncCounterpartStatuses({
+            fehgKey: ticket.key,
+            fehgStatusId: FEHG_STATUS_IDS.DONE,
+            hmgLinkUrl: ticket.fields.customfield_10306,
+            kqKey: findLinkedKqKey(ticket.fields.issuelinks),
+            igniteClient: client,
+            hmgClient,
+            onLog: (msg) => console.log(msg),
+            dryRun: true,
+          });
           await patchAutomationKqTicket(
             client,
             ticket.key,
@@ -505,6 +603,7 @@ async function main() {
             userByAccountId,
             true
           );
+          // DRY RUN에서는 실제 Jira 호출을 하지 않으므로 캐스케이드 실패를 errors에 집계하지 않음
           result.cloned.push({
             originalKey: ticket.key,
             originalSummary: ticket.fields.summary,
@@ -527,6 +626,41 @@ async function main() {
 
           await transitionIssue(client, ticket.key, FEHG_TRANSITIONS.DONE);
 
+          // 원본에 연결된 짝꿍(AUTOWAY/HMGBOARD · KQ)도 같이 종료.
+          // 데일리 싱크가 `due >= 오늘-1개월` 조건 때문에 놓치는 티켓을 여기서 메운다.
+          const sourceCounterparts = await syncCounterpartStatuses({
+            fehgKey: ticket.key,
+            fehgStatusId: FEHG_STATUS_IDS.DONE,
+            hmgLinkUrl: ticket.fields.customfield_10306,
+            kqKey: findLinkedKqKey(ticket.fields.issuelinks),
+            igniteClient: client,
+            hmgClient,
+            onLog: (msg) => console.log(msg),
+          });
+          for (const cp of sourceCounterparts.filter((c) => !c.ok)) {
+            result.errors.push({
+              key: ticket.key,
+              summary: ticket.fields.summary,
+              error: `[원본 짝꿍] ${cp.key} 종료 실패 — ${cp.error ?? '사유 없음'}`,
+            });
+          }
+          // 업무 규칙상 손대지 않은 건은 오류가 아니라 "확인 필요"로 알린다.
+          // 원본은 완료됐는데 짝꿍 KQ가 Verify in QA로 남아 있으면 QA가 마무리해야 한다.
+          for (const cp of sourceCounterparts.filter((c) => c.ok && c.skipped)) {
+            result.notices?.push({
+              key: cp.key,
+              summary: ticket.fields.summary,
+              notice: `원본 ${ticket.key} 완료 처리됨 · ${cp.skipReason ?? '상태 동기화 건너뜀'}`,
+              assigneeName,
+            });
+          }
+
+          // 원본에 Blocks→KQ 링크가 있으면 자동화가 신규 KQ를 만들어야 하는 티켓이다.
+          const hasKqLink = (ticket.fields.issuelinks ?? []).some(
+            (l) =>
+              l.type?.name === 'Blocks' && l.outwardIssue?.key.startsWith('KQ-')
+          );
+
           const newKey = await createCloneTicket(
             client,
             ticket,
@@ -535,11 +669,18 @@ async function main() {
           );
           console.log(`    -> 신규 발행: ${newKey}`);
 
-          // Cloners 링크 → 자동화 트리거 (KQ 자동 생성 + Blocks 링크)
-          await linkCloners(client, ticket.key, newKey);
+          if (hasKqLink && !ticket.fields.assignee) {
+            console.warn(
+              `    [WARN] ${ticket.key}에 담당자가 없어 신규 티켓도 담당자 없이 생성 — KQ 자동 생성이 안 될 가능성이 높음`
+            );
+          }
 
           // 자동화 KQ 대기 후 원본 KQ 기준 필드 패치 (상위항목/컴포넌트/수정버전/스프린트)
-          await patchAutomationKqTicket(
+          //
+          // Cloners 링크보다 먼저 해야 한다. KQ 자동화 규칙은 "복제된 티켓"을 걸러내므로
+          // 신규 티켓에 Cloners 링크가 붙어 있으면 KQ를 만들지 않는다.
+          // (2026-08-30 통제 실험: 링크 없는 FEHG-4444는 KQ 생성, 링크 있는 FEHG-4448은 미생성)
+          const kqResult = await patchAutomationKqTicket(
             client,
             ticket.key,
             ticket.fields.issuelinks ?? [],
@@ -547,12 +688,22 @@ async function main() {
             nextSprintName,
             (msg) => console.log(`    ${msg}`)
           );
+          for (const kqErr of kqResult.errors) {
+            result.errors.push({
+              key: ticket.key,
+              summary: ticket.fields.summary,
+              error: `[KQ] ${kqErr}`,
+            });
+          }
+
+          // Cloners 링크 (원본 ↔ 신규 추적용) — KQ 자동 생성이 끝난 뒤에 붙인다
+          await linkCloners(client, ticket.key, newKey);
 
           // FEHG 클론 스프린트 재고정 (자동화가 리셋했을 경우 대비)
           await client.post(`agile/1.0/sprint/${nextSprint.id}/issue`, {
             issues: [newKey],
           });
-          await cascadeLinkedTickets(
+          const autowayErrors = await cascadeLinkedTickets(
             client,
             hmgClient,
             ticket,
@@ -561,6 +712,47 @@ async function main() {
             userByAccountId,
             false
           );
+          for (const awErr of autowayErrors) {
+            result.errors.push({
+              key: ticket.key,
+              summary: ticket.fields.summary,
+              error: `[AUTOWAY] ${awErr}`,
+            });
+          }
+
+          // 실측 검증 — 클론 티켓의 실제 Jira 상태가 로직대로 반영됐는지
+          const originalKqKey =
+            (ticket.fields.issuelinks ?? []).find(
+              (l) =>
+                l.type?.name === 'Blocks' &&
+                l.outwardIssue?.key.startsWith('KQ-')
+            )?.outwardIssue?.key ?? null;
+          const parentSummary = ticket.fields.parent?.fields?.summary ?? '';
+          const hasGwEpic =
+            parentSummary.startsWith('[GW]') ||
+            parentSummary.startsWith('[GW-QA지원]');
+          const verify = await verifyCompleteAndClone({
+            client,
+            hmgClient,
+            original: {
+              key: ticket.key,
+              hadKqLink: !!originalKqKey,
+              originalKqKey,
+              hasGwEpic,
+              parentSummary,
+              parentKey: ticket.fields.parent?.key ?? null,
+              assigneeAccountId: ticket.fields.assignee?.accountId ?? null,
+            },
+            newKey,
+            nextSprintName,
+            nextSprintId: nextSprint.id,
+            expectedNewKqKey: kqResult.key,
+            expectedAutowayKey: null,
+            expectedAutowayUrl: null,
+            expectedSourceHmgKey:
+              sourceCounterparts.find((c) => c.kind === 'hmg')?.key ?? null,
+          });
+          pushVerifyFailures(result, ticket, verify);
 
           result.cloned.push({
             originalKey: ticket.key,
@@ -582,6 +774,14 @@ async function main() {
           const tag = sprints.length >= 2 ? '[중복+할일]' : '[할일]';
           console.log(`  ${tag} ${ticket.key}: 스프린트 → ${nextSprint.name}`);
           await changeTicketSprint(client, ticket.key, nextSprint.id);
+          // 실측 검증 — 상태 유지 + 스프린트 이동만
+          const verify = await verifyChangeSprint({
+            client,
+            ticketKey: ticket.key,
+            nextSprintName,
+            nextSprintId: nextSprint.id,
+          });
+          pushVerifyFailures(result, ticket, verify);
         }
         result.moved.push({
           key: ticket.key,
@@ -606,11 +806,50 @@ async function main() {
   console.log('========================================');
   console.log(`  이동 (할 일):  ${result.moved.length}건`);
   console.log(`  완료+신규발행: ${result.cloned.length}건`);
+  console.log(`  확인 필요:     ${result.notices?.length ?? 0}건`);
   console.log(`  오류:          ${result.errors.length}건`);
+
+  const notices = result.notices ?? [];
+  if (notices.length > 0) {
+    console.log('\n  [확인 필요]');
+    for (const n of notices) console.log(`    • ${n.key}: ${n.notice}`);
+  }
+
+  // ── 배치 처리 오류 슬랙 알림 (result.errors) ─────────────
+  // AUTOWAY 실패 · KQ 자동화 타임아웃 · 티켓 처리 예외 등 모두 여기서 감지
+  //
+  // 확인 필요(notices)는 실패가 아니라 배치가 일부러 손대지 않은 건이다.
+  // 이것만으로 Slack을 울리면 매월 오는 정상 알림이 되어 실제 장애 신호가 무뎌지므로,
+  // Slack이 이미 울릴 때(오류 존재)만 같이 실어 보낸다. 이메일에는 항상 들어간다.
+  if (result.errors.length > 0 && !isDryRun) {
+    await sendBatchErrorAlert({
+      fromSprint: activeSprint.name,
+      toSprint: nextSprint.name,
+      counts: {
+        moved: result.moved.length,
+        cloned: result.cloned.length,
+        errors: result.errors.length,
+        notices: notices.length,
+      },
+      ticketErrors: result.errors,
+      notices: notices.map((n) => ({ key: n.key, notice: n.notice })),
+      ghRunUrl: buildGhRunUrl(),
+    });
+  }
 
   // ── 이메일 발송 ────────────────────────────────────────────
   // 팀 요약 이메일 1건만 fedev1@ignite.co.kr으로 발송 (담당자별 그룹, 개인 강조 없음)
   // 개인 발송은 Resend 도메인 인증 없이 불가 (403 validation_error)
+  // DRY RUN에서도 이메일은 [TEST] 제목으로 실제 발송되므로 배달 검증·폴백 알림을
+  // 그대로 태운다. 다만 실제 장애로 오인하지 않도록 제목에 [DRY RUN]을 붙인다.
+  // 이메일 실패 알림에 함께 실어 "Jira는 괜찮나"에 즉답한다
+  const alertCounts = {
+    moved: result.moved.length,
+    cloned: result.cloned.length,
+    errors: result.errors.length,
+    notices: result.notices?.length ?? 0,
+  };
+  let emailMessageId: string | null = null;
   if (process.env.RESEND_API_KEY) {
     const summaryHtml = buildSprintCloseEmailHtml(
       activeSprint.name,
@@ -619,21 +858,81 @@ async function main() {
       { isDryRun }
     );
     try {
-      await sendSprintCloseEmail(
+      const sendResult = await sendSprintCloseEmail(
         summaryHtml,
         activeSprint.name,
         nextSprint.name,
         { isDryRun }
       );
+      emailMessageId = sendResult.id;
+      if (!emailMessageId) {
+        await sendEmailFailureAlert({
+          kind: 'send-failed',
+          fromSprint: activeSprint.name,
+          toSprint: nextSprint.name,
+          // Resend가 준 오류 원문을 그대로 싣는다
+          resendError: sendResult.error,
+          to: sendResult.to,
+          ghRunUrl: buildGhRunUrl(),
+          counts: alertCounts,
+          ticketErrors: result.errors,
+          isDryRun,
+        });
+      }
     } catch (err) {
       console.error('[이메일] 팀 요약 발송 실패:', err);
+      await sendEmailFailureAlert({
+        kind: 'exception',
+        fromSprint: activeSprint.name,
+        toSprint: nextSprint.name,
+        reason: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        ghRunUrl: buildGhRunUrl(),
+        counts: alertCounts,
+        ticketErrors: result.errors,
+        isDryRun,
+      });
     }
   } else {
     console.log('\nRESEND_API_KEY 미설정 — 이메일 발송 생략');
   }
+
+  // ── 이메일 배달 상태 사후 확인 (async bounce 감지) ────────
+  // Resend는 API 202 성공 후에도 수신 서버가 async bounce를 보낼 수 있음.
+  // 30초 대기 후 GET /emails/{id}로 최신 상태를 조회, 실패 이벤트면 슬랙 알림.
+  if (emailMessageId) {
+    console.log(
+      `\n[검증] 이메일 배달 상태 확인 (${emailMessageId}) — 30초 대기…`
+    );
+    await new Promise((r) => setTimeout(r, 30_000));
+    const delivery = await getEmailDelivery(emailMessageId);
+    const status = delivery.lastEvent;
+    console.log(`  최종 상태: ${status ?? 'unknown'}`);
+    if (delivery.lookupError) {
+      console.warn(`  [WARN] 상태 조회 실패: ${delivery.lookupError}`);
+    }
+    if (isFailedEmailEvent(status)) {
+      await sendEmailFailureAlert({
+        kind: 'bounced',
+        fromSprint: activeSprint.name,
+        toSprint: nextSprint.name,
+        status,
+        to: delivery.to,
+        resendMessageId: emailMessageId,
+        ghRunUrl: buildGhRunUrl(),
+        counts: alertCounts,
+        ticketErrors: result.errors,
+        isDryRun,
+      });
+    }
+  }
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('예상치 못한 오류:', err);
+  try {
+    await sendBatchCrashAlert({ error: err, ghRunUrl: buildGhRunUrl() });
+  } catch {
+    // 슬랙 발송 자체 실패는 배치 exit code를 바꾸지 않음
+  }
   process.exit(1);
 });
