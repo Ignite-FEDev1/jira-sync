@@ -19,20 +19,26 @@ export interface FehgIssueLink {
 /**
  * 원본 KQ에서 패치할 필드 목록
  *
+ * labels: 자동화는 규칙 기본값(FE1 등)만 넣고 원본 KQ의 분류 레이블(엔글QA 등)은
+ *   옮기지 않는다. 원본과 동일하게 맞춘다.
+ *   단 원본이 비어 있으면 자동화가 넣은 값을 지우지 않는다 — QA 필터가 그 값에 걸려 있다.
+ *
  * 의도적 제외:
- * - summary / assignee / labels / priority: 자동화가 FEHG 기준으로 이미 복사
+ * - summary / assignee / priority: 자동화가 FEHG 기준으로 이미 복사
  * - timetracking: 클론 추정치 초기화 정책
  * - reporter: KQ 프로젝트 스크린 불허 (HTTP 400)
  *
  * 공동담당자(customfield_10132)는 원본 KQ가 아닌 자동화 KQ의 assignee 기준으로 세팅
  */
-const KQ_PATCH_FIELDS = 'parent,customfield_10014,components,fixVersions';
+const KQ_PATCH_FIELDS =
+  'parent,customfield_10014,components,fixVersions,labels';
 
 interface KqPatchFields {
   parent?: { key: string } | null;
   customfield_10014?: string | null; // classic Epic Link (문자열 키)
   components?: Array<{ name: string }>;
   fixVersions?: Array<{ id: string }>;
+  labels?: string[];
 }
 
 const AUTOMATION_KQ_WAIT_MS = 30_000;
@@ -50,14 +56,14 @@ async function waitForAutomationKq(
   const deadline = Date.now() + AUTOMATION_KQ_WAIT_MS;
 
   while (Date.now() < deadline) {
-    const result = await client.get<{ fields: { issuelinks: FehgIssueLink[] } }>(
-      `issue/${cloneKey}`,
-      { fields: 'issuelinks' }
-    );
+    const result = await client.get<{
+      fields: { issuelinks: FehgIssueLink[] };
+    }>(`issue/${cloneKey}`, { fields: 'issuelinks' });
 
     if (result.success && result.data?.fields.issuelinks) {
       const link = result.data.fields.issuelinks.find(
-        (l) => l.type?.name === 'Blocks' && l.outwardIssue?.key.startsWith('KQ-')
+        (l) =>
+          l.type?.name === 'Blocks' && l.outwardIssue?.key.startsWith('KQ-')
       );
       if (link?.outwardIssue?.key) {
         log(`[INFO] 자동화 KQ 생성 확인: ${link.outwardIssue.key}`);
@@ -93,10 +99,15 @@ async function findOrCreateKqSprint(
 
   const listResult = await client.get<{
     values: Array<{ id: number; name: string; state: string }>;
-  }>(`agile/1.0/board/${boardId}/sprint`, { state: 'active,future', maxResults: '50' });
+  }>(`agile/1.0/board/${boardId}/sprint`, {
+    state: 'active,future',
+    maxResults: '50',
+  });
 
   if (listResult.success && listResult.data?.values) {
-    const existing = listResult.data.values.find((s) => s.name === kqSprintName);
+    const existing = listResult.data.values.find(
+      (s) => s.name === kqSprintName
+    );
     if (existing) return existing.id;
   }
 
@@ -122,6 +133,8 @@ async function findOrCreateKqSprint(
  * - 컴포넌트
  * - 수정버전
  * - KQ 해당 월 스프린트 (FEHG 2605 → KQ 202605)
+ *
+ * @returns 부분 실패 메시지 배열 (모두 성공 시 빈 배열)
  */
 async function patchKqFromSource(
   client: JiraClient,
@@ -129,63 +142,88 @@ async function patchKqFromSource(
   originalKqKey: string,
   nextSprintName: string,
   log: (msg: string) => void
-): Promise<void> {
+): Promise<string[]> {
+  const errors: string[] = [];
+
   const kqResult = await client.get<{ fields: KqPatchFields }>(
     `issue/${originalKqKey}`,
     { fields: KQ_PATCH_FIELDS }
   );
 
   if (!kqResult.success || !kqResult.data) {
-    log(`[ERROR] 원본 KQ 조회 실패 (${originalKqKey}): ${kqResult.error}`);
-    return;
+    const msg = `원본 KQ 조회 실패 (${originalKqKey}): ${kqResult.error}`;
+    log(`[ERROR] ${msg}`);
+    return [msg];
   }
 
   const kq = kqResult.data.fields;
   const kqParentKey = kq.parent?.key ?? kq.customfield_10014 ?? null;
   log(`[DEBUG] ${originalKqKey} parent=${kqParentKey ?? 'null'}`);
 
-  // 자동화 KQ의 assignee 조회 → co-assignee에 동일하게 세팅
-  const automationKqResult = await client.get<{ fields: { assignee?: { accountId: string } | null } }>(
-    `issue/${newKqKey}`,
-    { fields: 'assignee' }
-  );
-  const assigneeId = automationKqResult.data?.fields.assignee?.accountId ?? null;
+  const automationKqResult = await client.get<{
+    fields: { assignee?: { accountId: string } | null };
+  }>(`issue/${newKqKey}`, { fields: 'assignee' });
+  const assigneeId =
+    automationKqResult.data?.fields.assignee?.accountId ?? null;
 
-  // KQ는 classic 프로젝트 → Epic Link는 customfield_10014(문자열 키)로 설정
-  // parent 필드는 classic에서 서브태스크 전용 → 사용 안 함 (HTTP 400 유발)
   const updateFields: Record<string, unknown> = {};
   if (kqParentKey) updateFields[KQ_CUSTOM_FIELDS.EPIC_LINK] = kqParentKey;
-  if (kq.components?.length) updateFields.components = kq.components.map((c) => ({ name: c.name }));
-  if (kq.fixVersions?.length) updateFields.fixVersions = kq.fixVersions.map((v) => ({ id: v.id }));
-  if (assigneeId) updateFields[KQ_CUSTOM_FIELDS.CO_ASSIGNEE] = { accountId: assigneeId };
+  if (kq.components?.length)
+    updateFields.components = kq.components.map((c) => ({ name: c.name }));
+  if (kq.fixVersions?.length)
+    updateFields.fixVersions = kq.fixVersions.map((v) => ({ id: v.id }));
+  // 원본 KQ와 동일하게 맞춘다 (원본이 비어 있으면 자동화가 넣은 기본 레이블은 유지)
+  if (kq.labels?.length) updateFields.labels = [...kq.labels];
+  if (assigneeId)
+    updateFields[KQ_CUSTOM_FIELDS.CO_ASSIGNEE] = { accountId: assigneeId };
 
   if (Object.keys(updateFields).length > 0) {
-    const putResult = await client.put(`issue/${newKqKey}`, { fields: updateFields });
+    const putResult = await client.put(`issue/${newKqKey}`, {
+      fields: updateFields,
+    });
     if (putResult.success) {
       log(
         `${newKqKey} 필드 패치 완료: epicLink=${kqParentKey ?? 'null'}, ` +
-        `components=${kq.components?.length ?? 0}개, fixVersions=${kq.fixVersions?.length ?? 0}개, ` +
-        `co-assignee=${assigneeId ?? 'null'}`
+          `components=${kq.components?.length ?? 0}개, fixVersions=${kq.fixVersions?.length ?? 0}개, ` +
+          `labels=[${(kq.labels ?? []).join(', ')}], ` +
+          `co-assignee=${assigneeId ?? 'null'}`
       );
     } else {
-      log(`[WARN] ${newKqKey} 필드 패치 실패: ${putResult.error}`);
+      const msg = `${newKqKey} 필드 패치 실패: ${putResult.error}`;
+      log(`[WARN] ${msg}`);
+      errors.push(msg);
     }
   } else {
-    log(`[SKIP] ${newKqKey} 패치 필드 없음 (원본 ${originalKqKey}에 epicLink/components/fixVersions 없음)`);
+    log(
+      `[SKIP] ${newKqKey} 패치 필드 없음 (원본 ${originalKqKey}에 epicLink/components/fixVersions/labels 없음)`
+    );
   }
 
-  // KQ 스프린트 할당 (FEHG 다음 달 스프린트 → KQ 해당 월, 없으면 생성)
   const kqSprintId = await findOrCreateKqSprint(client, nextSprintName, log);
   if (kqSprintId) {
-    const sprintResult = await client.post(`agile/1.0/sprint/${kqSprintId}/issue`, {
-      issues: [newKqKey],
-    });
+    const sprintResult = await client.post(
+      `agile/1.0/sprint/${kqSprintId}/issue`,
+      {
+        issues: [newKqKey],
+      }
+    );
     if (sprintResult.success) {
       log(`${newKqKey} 스프린트 할당 완료`);
     } else {
-      log(`[WARN] ${newKqKey} 스프린트 할당 실패: ${sprintResult.error}`);
+      const msg = `${newKqKey} 스프린트 할당 실패: ${sprintResult.error}`;
+      log(`[WARN] ${msg}`);
+      errors.push(msg);
     }
   }
+
+  return errors;
+}
+
+export interface KqCascadeResult {
+  /** 자동화로 생성된 KQ 키 (없으면 null) */
+  key: string | null;
+  /** 부분/전체 실패 메시지 (성공 시 빈 배열) */
+  errors: string[];
 }
 
 /**
@@ -197,7 +235,7 @@ async function patchKqFromSource(
  * 3. 원본 FEHG의 Blocks→KQ 기준으로 상위항목/컴포넌트/수정버전/스프린트 패치
  *
  * @param isDryRun true이면 Jira 변경 없이 로그만 출력
- * @returns 자동화로 생성된 KQ 키 (없으면 null)
+ * @returns 생성된 KQ 키와 부분 실패 메시지 배열
  */
 export async function patchAutomationKqTicket(
   client: JiraClient,
@@ -207,35 +245,47 @@ export async function patchAutomationKqTicket(
   nextSprintName: string,
   log: (msg: string) => void,
   isDryRun = false
-): Promise<string | null> {
+): Promise<KqCascadeResult> {
   const originalKqKeys = issuelinks
-    .filter((l) => l.type?.name === 'Blocks' && l.outwardIssue?.key.startsWith('KQ-'))
+    .filter(
+      (l) => l.type?.name === 'Blocks' && l.outwardIssue?.key.startsWith('KQ-')
+    )
     .map((l) => l.outwardIssue!.key);
 
   if (originalKqKeys.length === 0) {
     log(`[SKIP] KQ 패치 — ${originalFehgKey}에 연결된 KQ 없음 (자동화 미발동)`);
-    return null;
+    return { key: null, errors: [] };
   }
 
   if (isDryRun) {
-    log(`[DRY RUN] 자동화 KQ 패치 예정 (원본: ${originalKqKeys.join(', ')}) — 상위항목/컴포넌트/수정버전/스프린트`);
-    return null;
+    log(
+      `[DRY RUN] 자동화 KQ 패치 예정 (원본: ${originalKqKeys.join(', ')}) — 상위항목/컴포넌트/수정버전/스프린트`
+    );
+    return { key: null, errors: [] };
   }
 
   log(`[INFO] 자동화 KQ 생성 대기 (원본 KQ: ${originalKqKeys.join(', ')})`);
   const automationKqKey = await waitForAutomationKq(client, cloneKey, log);
 
   if (!automationKqKey) {
-    log('[WARN] 자동화 KQ 미생성 — 패치 건너뜀');
-    return null;
+    const msg = `자동화 KQ 미생성 (원본 ${originalKqKeys.join(', ')}, ${AUTOMATION_KQ_WAIT_MS / 1000}s 타임아웃) — 패치 건너뜀`;
+    log(`[WARN] ${msg}`);
+    return { key: null, errors: [msg] };
   }
 
-  // 원본 KQ가 복수인 경우 첫 번째 기준으로 패치 (단일 KQ가 일반적)
   const originalKqKey = originalKqKeys[0];
   if (originalKqKeys.length > 1) {
-    log(`[INFO] 원본 KQ 복수 (${originalKqKeys.join(', ')}) — ${originalKqKey} 기준으로 패치`);
+    log(
+      `[INFO] 원본 KQ 복수 (${originalKqKeys.join(', ')}) — ${originalKqKey} 기준으로 패치`
+    );
   }
 
-  await patchKqFromSource(client, automationKqKey, originalKqKey, nextSprintName, log);
-  return automationKqKey;
+  const patchErrors = await patchKqFromSource(
+    client,
+    automationKqKey,
+    originalKqKey,
+    nextSprintName,
+    log
+  );
+  return { key: automationKqKey, errors: patchErrors };
 }

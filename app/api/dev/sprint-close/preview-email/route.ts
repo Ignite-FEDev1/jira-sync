@@ -61,7 +61,72 @@ const mockResult: SprintCloseResult = {
       assigneeName: '개발자G',
     },
   ],
-  errors: [],
+  // 오류 섹션 미리보기용 — 실제로 나오는 4가지 유형을 모두 담는다
+  // ([KQ] 자동화 미발화 · [AUTOWAY] HMG 생성 실패 · [VERIFY] 실측 불일치 · 처리 예외)
+  errors: [
+    {
+      key: 'FEHG-3210',
+      summary: '주문 취소 사유 코드 정합성 보정',
+      error:
+        '[KQ] 자동화 KQ 미생성 (원본 KQ-17749, 30s 타임아웃) — 패치 건너뜀',
+    },
+    {
+      key: 'FEHG-3211',
+      summary: '[GW] 조직도 동기화 스케줄러 예외 처리',
+      error:
+        '[AUTOWAY] 생성 실패 — HTTP 400 — assignee: User cannot be assigned issues | reporter: 값이 올바르지 않습니다',
+    },
+    {
+      key: 'FEHG-3212',
+      summary: '알림 센터 읽음 처리 배치',
+      error:
+        '[VERIFY] 신규 스프린트 = FEHG 2605: 2개 배정됨: FEHG 2604, FEHG 2605',
+    },
+    {
+      key: 'FEHG-3213',
+      summary: '공통 모달 포커스 트랩 개선',
+      error:
+        '티켓 처리 예외: 상태 전환 2회 모두 실패 (FEHG-3213, transition=31): HTTP 403 — 이 이슈를 편집할 권한이 없습니다',
+    },
+  ],
+  // 확인 필요 섹션 미리보기용 — 실패가 아니라 배치가 일부러 손대지 않은 건
+  notices: [
+    {
+      key: 'KQ-18304',
+      summary: '[CPO] 정기배포 대응',
+      notice:
+        '원본 FEHG-3200 완료 처리됨 · KQ가 "Verify in QA" 상태 — QA가 수동 관리하는 구간이라 건드리지 않습니다',
+      assigneeName: '개발자A',
+    },
+    {
+      key: 'KQ-18310',
+      summary: '[CPO] 상품 상세 이미지 지연 로딩',
+      notice:
+        '원본 FEHG-3202 완료 처리됨 · KQ가 "Verify in QA" 상태 — QA가 수동 관리하는 구간이라 건드리지 않습니다',
+      assigneeName: '개발자A',
+    },
+    {
+      key: 'KQ-18120',
+      summary: '[CPO] 결제 취소 플로우 정리',
+      notice:
+        '원본 FEHG-3201 완료 처리됨 · KQ가 "Verify in QA" 상태 — QA가 수동 관리하는 구간이라 건드리지 않습니다',
+      assigneeName: '개발자C',
+    },
+    {
+      key: 'KQ-18098',
+      summary: '[CPO] 쿠폰 중복 적용 방지',
+      notice:
+        '원본 FEHG-3203 완료 처리됨 · KQ가 "Verify in QA" 상태 — QA가 수동 관리하는 구간이라 건드리지 않습니다',
+      assigneeName: '개발자G',
+    },
+    {
+      key: 'KQ-18077',
+      summary: '[CPO] 배너 노출 조건 보정',
+      notice:
+        '원본 FEHG-3107 완료 처리됨 · KQ가 "Verify in QA" 상태 — QA가 수동 관리하는 구간이라 건드리지 않습니다',
+      assigneeName: null,
+    },
+  ],
 };
 
 export async function GET(req: Request) {

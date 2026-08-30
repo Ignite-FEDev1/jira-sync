@@ -33,4 +33,5 @@ jobs:
           NEXT_PUBLIC_DB_ANON_KEY: ${{ secrets.NEXT_PUBLIC_DB_ANON_KEY }}
           DB_SERVICE_ROLE_KEY: ${{ secrets.DB_SERVICE_ROLE_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SLACK_ALERT_WEBHOOK_URL: ${{ secrets.SLACK_ALERT_WEBHOOK_URL }}
         run: npx tsx scripts/daily-sync.ts

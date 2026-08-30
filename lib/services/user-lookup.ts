@@ -59,10 +59,15 @@ export async function getTeamIdByName(teamName: string): Promise<string | null> 
  * 전체 사용자 목록 조회 (배치용)
  */
 export async function getAllUsers(): Promise<DbUser[]> {
-  const { data } = await dbServer
+  const { data, error } = await dbServer
     .from('users')
     .select('id, name, ignite_account_id, hmg_account_id, hmg_user_id, ignite_jira_email, ignite_jira_api_token, hmg_jira_email, hmg_jira_api_token')
     .order('name');
+
+  // 조회 실패를 빈 배열로 삼키면 "사용자 0명"과 구분이 안 된다 (7월 배치가 조용히 넘어간 유형)
+  if (error) {
+    console.error('[user-lookup] getAllUsers 실패:', error.message, error.details ?? '');
+  }
 
   if (!data) return [];
 
