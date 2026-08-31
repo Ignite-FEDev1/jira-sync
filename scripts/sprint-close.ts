@@ -71,6 +71,19 @@ function buildGhRunUrl(): string | null {
   if (!server || !repo || !runId) return null;
   return `${server}/${repo}/actions/runs/${runId}`;
 }
+
+/**
+ * 워크플로 수동 실행 페이지 URL.
+ * Incoming Webhook 버튼은 링크만 열 수 있어 원클릭 재실행은 불가하다.
+ * "Run workflow" 버튼이 있는 페이지까지 데려다준다.
+ */
+function buildGhWorkflowUrl(): string | null {
+  const server = process.env.GITHUB_SERVER_URL;
+  const repo = process.env.GITHUB_REPOSITORY;
+  const workflow = process.env.GITHUB_WORKFLOW_REF?.split('/').pop()?.split('@')[0];
+  if (!server || !repo) return null;
+  return `${server}/${repo}/actions/workflows/${workflow ?? 'sprint-close.yml'}`;
+}
 import {
   buildSprintCloseEmailHtml,
   SprintCloseResult,
@@ -834,6 +847,7 @@ async function main() {
       ticketErrors: result.errors,
       notices: notices.map((n) => ({ key: n.key, notice: n.notice })),
       ghRunUrl: buildGhRunUrl(),
+      ghWorkflowUrl: buildGhWorkflowUrl(),
     });
   }
 
@@ -930,7 +944,11 @@ async function main() {
 main().catch(async (err) => {
   console.error('예상치 못한 오류:', err);
   try {
-    await sendBatchCrashAlert({ error: err, ghRunUrl: buildGhRunUrl() });
+    await sendBatchCrashAlert({
+      error: err,
+      ghRunUrl: buildGhRunUrl(),
+      ghWorkflowUrl: buildGhWorkflowUrl(),
+    });
   } catch {
     // 슬랙 발송 자체 실패는 배치 exit code를 바꾸지 않음
   }

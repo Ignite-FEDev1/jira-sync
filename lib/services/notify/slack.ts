@@ -171,12 +171,15 @@ export async function sendSlackAlert(opts: SlackAlertOptions): Promise<void> {
     return;
   }
 
+  // top-level text는 푸시 알림·검색 결과에 쓰이는 폴백이다.
+  // 이 값을 넣으면 데스크톱에서 attachment 위에 한 줄이 더 렌더되어
+  // header 블록과 제목이 두 번 보인다.
+  // fallback으로 옮기면 푸시에는 그대로 뜨면서 본문 중복은 사라진다.
   const payload = {
-    // 알림 목록·푸시에 뜨는 한 줄
-    text: stripMrkdwn(opts.title),
     attachments: [
       {
         color: COLOR_HEX[opts.color ?? 'red'],
+        fallback: stripMrkdwn(opts.title),
         blocks: buildBlocks(opts),
       },
     ],
