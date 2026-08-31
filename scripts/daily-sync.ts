@@ -22,6 +22,7 @@ import {
   isFailedEmailEvent,
 } from '@/lib/services/email/resend-client';
 import { sendSlackAlert } from '@/lib/services/notify/slack';
+import { sendDailySyncFailureAlert } from '@/lib/services/notify/sprint-close-alert';
 
 function buildGhRunUrl(): string | null {
   const server = process.env.GITHUB_SERVER_URL;
@@ -29,6 +30,22 @@ function buildGhRunUrl(): string | null {
   const runId = process.env.GITHUB_RUN_ID;
   if (!server || !repo || !runId) return null;
   return `${server}/${repo}/actions/runs/${runId}`;
+}
+
+/**
+ * 워크플로 수동 실행 페이지 URL.
+ *
+ * Incoming Webhook 버튼은 링크만 열 수 있어 클릭 한 번으로 재실행할 수는 없다.
+ * (그러려면 Slack Interactive Components를 받을 상시 서버가 필요하다)
+ * 대신 "Run workflow" 버튼이 있는 페이지까지 데려다준다.
+ */
+function buildGhWorkflowUrl(): string | null {
+  const server = process.env.GITHUB_SERVER_URL;
+  const repo = process.env.GITHUB_REPOSITORY;
+  const workflow = process.env.GITHUB_WORKFLOW_REF?.split('/').pop()?.split('@')[0];
+  if (!server || !repo) return null;
+  // GITHUB_WORKFLOW_REF가 없으면 파일명으로 폴백
+  return `${server}/${repo}/actions/workflows/${workflow ?? 'daily-sync.yml'}`;
 }
 
 interface UserSyncResult {
@@ -219,19 +236,34 @@ async function main() {
 
   // ── 동기화 자체 오류 슬랙 알림 (담당자별 실패 또는 실행 오류) ─
   if (totalFailed > 0 || userErrors > 0) {
-    const failureLines = userFailures.slice(0, 5).map((u) => {
-      const preview = u.failures
-        .slice(0, 3)
-        .map((f) => `${f.ticketKey}: ${f.error}`)
-        .join(' | ');
-      const overflow =
-        u.failures.length > 3 ? ` (외 ${u.failures.length - 3}건)` : '';
-      return `• [${u.userName}] ${preview}${overflow}`;
-    });
-    await sendSlackAlert({
-      title: `Daily Sync 실패 (${syncDate}) — 실패 ${totalFailed}건 · 실행오류 ${userErrors}명`,
-      body: failureLines.join('\n'),
-      color: 'yellow',
+    // 담당자별로 3건만 보여주면 원인 판단이 안 된다.
+    // 티켓 단위로 펼쳐 넘기고, 알림 쪽에서 원인별로 묶는다.
+    const flatFailures = userFailures.flatMap((u) =>
+      u.failures
+        .filter((f) => f.ticketKey !== '(전체)')
+        .map((f) => ({
+          userName: u.userName,
+          ticketKey: f.ticketKey,
+          error: f.error,
+        }))
+    );
+    const wholeUserErrors = userFailures
+      .filter((u) => u.failures.some((f) => f.ticketKey === '(전체)'))
+      .map((u) => ({
+        userName: u.userName,
+        error:
+          u.failures.find((f) => f.ticketKey === '(전체)')?.error ??
+          '알 수 없는 오류',
+      }));
+
+    await sendDailySyncFailureAlert({
+      syncDate,
+      totalFailed,
+      userErrorCount: userErrors,
+      failures: flatFailures,
+      userErrors: wholeUserErrors,
+      ghRunUrl: buildGhRunUrl(),
+      ghWorkflowUrl: buildGhWorkflowUrl(),
     });
   }
 

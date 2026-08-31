@@ -15,6 +15,7 @@ import {
   syncStatusWithPath,
   syncStatusWithPathFromDb,
 } from './transition-helper';
+import { describeFetchError } from '@/lib/services/jira/client';
 
 const AUTOWAY_HB_EPIC_ISSUETYPE_ID = '10000'; // 양쪽 모두 "에픽" id
 
@@ -211,7 +212,7 @@ async function syncEpicStatus(
       );
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
+    const msg = describeFetchError(error);
     logger.warning(`${targetEpicKey}: 에픽 상태 동기화 실패 - ${msg}`);
   }
 }

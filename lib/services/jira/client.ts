@@ -8,6 +8,35 @@ import type { JiraCallRecord } from '@/lib/services/sprint-close/run-log';
 export type JiraCallObserver = (record: JiraCallRecord) => void;
 
 /**
+ * 네트워크 예외를 원인까지 풀어서 사람이 읽을 수 있는 한 줄로 만든다.
+ *
+ * Node.js fetch는 DNS 실패·연결 거부·타임아웃 등 모든 하위 오류를
+ * `TypeError: fetch failed` 하나로 감싸고, 진짜 원인은 `error.cause`에 넣는다.
+ * error.message만 읽으면 "fetch failed"만 남아 원인 추적이 불가능해진다.
+ * (2026-08-31 데일리 싱크 18건 실패가 전부 "fetch failed"로만 보고된 사례)
+ */
+export function describeFetchError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+
+  const parts: string[] = [error.message];
+  let cause: unknown = (error as { cause?: unknown }).cause;
+  const seen = new Set<unknown>();
+
+  // cause가 중첩될 수 있어 끝까지 따라간다 (순환 방지)
+  while (cause instanceof Error && !seen.has(cause)) {
+    seen.add(cause);
+    const c = cause as Error & { code?: string; syscall?: string };
+    const detail = [c.code, c.syscall && `syscall=${c.syscall}`]
+      .filter(Boolean)
+      .join(' ');
+    parts.push(detail ? `${c.message} (${detail})` : c.message);
+    cause = (c as { cause?: unknown }).cause;
+  }
+
+  return parts.join(' ← ');
+}
+
+/**
  * Jira API 클라이언트
  * 브라우저: Next.js API Routes 프록시 경유
  * 배치 모드(BATCH_MODE=true): Jira API 직접 호출
@@ -176,10 +205,8 @@ export class JiraClient {
       return { success: true, data };
     } catch (error) {
       console.error(`[BATCH] Jira ${this.instance} API Error:`, error);
-      const message =
-        error instanceof Error
-          ? error.message
-          : '알 수 없는 오류가 발생했습니다.';
+      // fetch failed는 껍데기다. cause를 풀어야 DNS·타임아웃·연결거부를 구분할 수 있다.
+      const message = describeFetchError(error);
       this.notify({
         method,
         path: path.startsWith('/') ? path.slice(1) : path,
@@ -188,7 +215,16 @@ export class JiraClient {
         ok: false,
         ms: Date.now() - startedAt,
         error: `네트워크/예외 — ${message}`,
-        details: error instanceof Error ? { stack: error.stack } : undefined,
+        details:
+          error instanceof Error
+            ? {
+                name: error.name,
+                stack: error.stack,
+                cause: (error as { cause?: unknown }).cause
+                  ? String((error as { cause?: { message?: string } }).cause?.message ?? '')
+                  : undefined,
+              }
+            : undefined,
         requestBody: body,
       });
       return { success: false, error: message };
@@ -289,13 +325,7 @@ export class JiraClient {
       return { success: true, data: result.data };
     } catch (error) {
       console.error(`Jira ${this.instance} API Error:`, error);
-      return {
-        success: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : '알 수 없는 오류가 발생했습니다.',
-      };
+      return { success: false, error: describeFetchError(error) };
     }
   }
 

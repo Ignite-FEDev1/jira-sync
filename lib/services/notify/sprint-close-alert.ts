@@ -41,9 +41,9 @@ function clampStack(stack: string, maxLines = 18): string {
   return [...lines.slice(0, maxLines), `… 외 ${lines.length - maxLines}줄`].join('\n');
 }
 
-/** 한 줄이 예산을 다 먹지 않게 자른다 (Jira 400은 필드별 오류가 붙어 길어진다) */
-function clampLine(text: string, max = 180): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim();
+/** 목록 한 줄에 넣을 짧은 요약 (원문은 별도 코드블록으로 붙는다) */
+function errorHeadline(error: string, max = 120): string {
+  const oneLine = error.replace(/\s+/g, ' ').trim();
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max)}…`;
 }
 
@@ -72,14 +72,21 @@ function renderTicketErrors(errors: TicketError[]): string {
 
   return stages
     .map(([stage, items]) => {
-      const head = `*${stage} ${items.length}건*`;
-      const lines = items.map(
-        (e) =>
-          `• <${JIRA_BROWSE}/${e.key}|${e.key}>  ${clampLine(
-            e.error.replace(/^\[[^\]]+\]\s*/, '')
-          )}`
-      );
-      return [head, ...lines].join('\n');
+      // 같은 단계 안에서 원문이 다르면 나눠 보여준다.
+      // 원문 전체는 배치 로그에 있으므로 여기서는 요약만 — 알림은 판단용이다.
+      const byMsg = new Map<string, TicketError[]>();
+      for (const e of items) {
+        const msg = e.error.replace(/^\[[^\]]+\]\s*/, '');
+        if (!byMsg.has(msg)) byMsg.set(msg, []);
+        byMsg.get(msg)!.push(e);
+      }
+      const lines = [...byMsg.entries()].map(([msg, list]) => {
+        const keys = list
+          .map((e) => `<${JIRA_BROWSE}/${e.key}|${e.key}>`)
+          .join(' · ');
+        return `${keys}\n${errorHeadline(msg, 200)}`;
+      });
+      return [`*${stage} ${items.length}건*`, ...lines].join('\n');
     })
     .join('\n\n');
 }
@@ -128,6 +135,8 @@ export async function sendBatchErrorAlert(params: {
   ticketErrors: TicketError[];
   notices?: { key: string; notice: string }[];
   ghRunUrl?: string | null;
+  /** 워크플로 수동 실행 페이지 — 재실행 버튼용 */
+  ghWorkflowUrl?: string | null;
   /** 이메일도 관련된 경우 Resend 이벤트로 바로 갈 수 있게 */
   resendMessageId?: string | null;
 }): Promise<void> {
@@ -138,15 +147,24 @@ export async function sendBatchErrorAlert(params: {
     ticketErrors,
     notices = [],
     ghRunUrl,
+    ghWorkflowUrl,
     resendMessageId,
   } = params;
 
+  // 어느 단계가 몇 종류로 깨졌는지 — 5초 판단의 핵심
+  const stageCount = new Set(ticketErrors.map((e) => stageOf(e.error))).size;
+
   const sections = [
     {
-      heading: '📊 처리 결과',
-      text: `이월 ${counts.moved}건 · 신규 ${counts.cloned}건 · *오류 ${counts.errors}건*${
-        notices.length ? ` · 확인 필요 ${notices.length}건` : ''
-      }\n오류 건을 뺀 나머지는 정상 처리됐습니다.`,
+      heading: '📊 한눈에',
+      text: [
+        `이월 ${counts.moved}건 · 신규 ${counts.cloned}건 · *오류 ${counts.errors}건*${
+          notices.length ? ` · 확인 필요 ${notices.length}건` : ''
+        }`,
+        stageCount === 1
+          ? '한 단계에서만 실패했습니다. 오류 건을 뺀 나머지는 정상 처리됐습니다.'
+          : `${stageCount}개 단계에서 실패했습니다. 오류 건을 뺀 나머지는 정상 처리됐습니다.`,
+      ].join('\n'),
     },
     {
       heading: `❌ 실패한 티켓 (${ticketErrors.length}건)`,
@@ -158,7 +176,7 @@ export async function sendBatchErrorAlert(params: {
     sections.push({
       heading: `⚠️ 확인 필요 (${notices.length}건)`,
       text: notices
-        .map((n) => `• <${JIRA_BROWSE}/${n.key}|${n.key}>  ${clampLine(n.notice)}`)
+        .map((n) => `• <${JIRA_BROWSE}/${n.key}|${n.key}>  ${errorHeadline(n.notice)}`)
         .join('\n'),
     });
   }
@@ -168,9 +186,13 @@ export async function sendBatchErrorAlert(params: {
     text: '위 목록에 실패 건이 전부 들어 있습니다. 이 메시지를 그대로 복사해 전달하면 원인 분석이 가능합니다.',
   });
 
+
   const actions: SlackAlertAction[] = [];
   if (ghRunUrl) {
     actions.push({ label: '배치 로그 열기', url: ghRunUrl, primary: true });
+  }
+  if (ghWorkflowUrl) {
+    actions.push({ label: '재실행 화면 열기', url: ghWorkflowUrl });
   }
   if (resendMessageId) {
     actions.push({
@@ -195,8 +217,10 @@ export async function sendBatchErrorAlert(params: {
 export async function sendBatchCrashAlert(params: {
   error: unknown;
   ghRunUrl?: string | null;
+  /** 워크플로 수동 실행 페이지 — 재실행 버튼용 */
+  ghWorkflowUrl?: string | null;
 }): Promise<void> {
-  const { error, ghRunUrl } = params;
+  const { error, ghRunUrl, ghWorkflowUrl } = params;
   const message = error instanceof Error ? error.message : String(error);
   const stack = error instanceof Error ? error.stack : null;
 
@@ -218,9 +242,14 @@ export async function sendBatchCrashAlert(params: {
         text: '이 메시지를 그대로 복사해 전달하면 원인 분석이 가능합니다.',
       },
     ],
-    actions: ghRunUrl
-      ? [{ label: '배치 로그 열기', url: ghRunUrl, primary: true }]
-      : [],
+    actions: [
+      ...(ghRunUrl
+        ? [{ label: '배치 로그 열기', url: ghRunUrl, primary: true }]
+        : []),
+      ...(ghWorkflowUrl
+        ? [{ label: '재실행 화면 열기', url: ghWorkflowUrl }]
+        : []),
+    ],
     color: 'red',
   });
 }
@@ -326,6 +355,8 @@ export async function sendEmailFailureAlert(params: {
     text: '아래 버튼으로 결과를 직접 확인하세요. 자동 재발송은 하지 않습니다.',
   });
 
+  // 이메일 실패에는 재실행 버튼을 두지 않는다.
+  // 마감 처리는 이미 끝났고 메일만 못 받은 상태라, 재실행하면 Jira를 또 건드린다.
   const actions: SlackAlertAction[] = [];
   if (ghRunUrl) {
     actions.push({ label: '배치 로그 열기', url: ghRunUrl, primary: true });
@@ -353,5 +384,126 @@ export async function sendEmailFailureAlert(params: {
       ? '_DRY RUN 실행에서 발생 — 실제 장애가 아닙니다._'
       : undefined,
     color: counts && counts.errors > 0 ? 'red' : 'yellow',
+  });
+}
+
+/**
+ * 데일리 싱크 실패 알림.
+ *
+ * 이 알림을 보는 가장 흔한 순간은 "아침에 5초 안에 급한지 판단"이다.
+ * 그래서 판단에 필요한 것만 담는다: 원인이 몇 종인지, 몇 건인지, 무슨 계열인지.
+ * 원문 전체·티켓 목록·스택은 GitHub Actions 로그에 이미 남으므로 버튼으로 넘긴다.
+ *
+ * 원인이 1종이면 대개 일시적 장애(ECONNRESET 등)이고,
+ * 여러 종이면 티켓별로 다른 문제다. 이 구분이 판단의 핵심이다.
+ */
+export async function sendDailySyncFailureAlert(params: {
+  syncDate: string;
+  totalFailed: number;
+  userErrorCount: number;
+  failures: { userName: string; ticketKey: string; error: string }[];
+  /** 담당자 전체가 실패한 경우 (인증 오류 등) */
+  userErrors?: { userName: string; error: string }[];
+  ghRunUrl?: string | null;
+  /** 워크플로 수동 실행 페이지 — 재실행 버튼용 */
+  ghWorkflowUrl?: string | null;
+  /** 미리보기·검증용 발송. 실제 장애로 오인되지 않게 제목과 푸터에 표시한다. */
+  isPreview?: boolean;
+}): Promise<void> {
+  const {
+    syncDate,
+    totalFailed,
+    userErrorCount,
+    failures,
+    userErrors = [],
+    ghRunUrl,
+    ghWorkflowUrl,
+    isPreview,
+  } = params;
+
+  // 원인 원문 그대로 그룹핑 — 미세하게 다른 오류가 뭉개지지 않게
+  const byError = new Map<string, typeof failures>();
+  for (const f of failures) {
+    if (!byError.has(f.error)) byError.set(f.error, []);
+    byError.get(f.error)!.push(f);
+  }
+  const groups = [...byError.entries()].sort(
+    (a, b) => b[1].length - a[1].length
+  );
+  const people = new Set(failures.map((f) => f.userName)).size;
+
+  const sections: { heading?: string; text: string }[] = [];
+
+  // 5초 판단용 — 이 한 블록으로 급한지 아닌지가 갈린다
+  const verdict =
+    groups.length === 1
+      ? '원인이 하나입니다. 일시적 장애일 가능성이 높습니다.'
+      : groups.length === 0
+        ? '담당자 단위 실행 오류입니다.'
+        : `원인이 ${groups.length}가지입니다. 티켓별로 다른 문제일 수 있습니다.`;
+
+  sections.push({
+    heading: '📊 한눈에',
+    text: [
+      [
+        groups.length > 0 ? `원인 *${groups.length}종*` : null,
+        `티켓 *${totalFailed}건*`,
+        people > 0 ? `담당자 ${people}명` : null,
+        userErrorCount > 0 ? `실행오류 ${userErrorCount}명` : null,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      verdict,
+    ].join('\n'),
+  });
+
+  if (groups.length > 0) {
+    sections.push({
+      heading: groups.length === 1 ? '🔍 원인' : `🔍 원인 (${groups.length}종)`,
+      text: groups
+        .map(([err, items]) => `*${items.length}건*  ${errorHeadline(err, 200)}`)
+        .join('\n'),
+    });
+  }
+
+  if (userErrors.length > 0) {
+    sections.push({
+      heading: `💥 담당자 전체 실패 (${userErrors.length}명)`,
+      text: userErrors
+        .map((u) => `*${u.userName}*  ${errorHeadline(u.error, 200)}`)
+        .join('\n'),
+    });
+  }
+
+  const transient = groups.length === 1;
+  sections.push({
+    heading: '👉 지금 할 일',
+    text: [
+      '실패한 티켓 목록과 오류 전문은 배치 로그에 있습니다.',
+      ghWorkflowUrl && transient
+        ? '일시적 장애로 보이면 재실행으로 복구됩니다. (재실행 화면에서 *Run workflow* 를 눌러주세요)'
+        : null,
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  });
+
+  const actions: SlackAlertAction[] = [];
+  if (ghRunUrl) {
+    actions.push({ label: '배치 로그 열기', url: ghRunUrl, primary: true });
+  }
+  if (ghWorkflowUrl) {
+    actions.push({ label: '재실행 화면 열기', url: ghWorkflowUrl });
+  }
+
+  await sendSlackAlert({
+    title: `⚠️ ${isPreview ? '[미리보기] ' : ''}데일리 싱크 ${totalFailed}건 실패`,
+    context: [syncDate, nowKst()].join('  ·  '),
+    sections,
+    actions,
+    footer: isPreview
+      ? '_알림 형식 확인용 발송입니다. 실제 장애가 아니며 내용은 예시 데이터입니다._'
+      : undefined,
+    color: 'yellow',
   });
 }
