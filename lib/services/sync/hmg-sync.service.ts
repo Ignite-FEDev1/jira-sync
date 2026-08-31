@@ -10,6 +10,7 @@ import { syncStatusWithPath, syncStatusWithPathFromDb } from './transition-helpe
 import { jira } from '@/lib/services/jira';
 import { IGNITE_CUSTOM_FIELDS, JIRA_ENDPOINTS } from '@/lib/constants/jira';
 import { ensureTargetEpic } from './epic-resolver';
+import { describeFetchError } from '@/lib/services/jira/client';
 
 // AUTOWAY/HMGBOARD의 Epic Link 커스텀 필드 (자식 → 부모 에픽 연결)
 const HMG_EPIC_LINK_FIELD = 'customfield_10014';
@@ -206,7 +207,7 @@ export class HMGSyncService {
       );
     } catch (error) {
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        describeFetchError(error);
       this.logger.error(
         `${fehgTicket.key}: AUTOWAY 동기화 실패 - ${errorMessage}`
       );
@@ -308,7 +309,7 @@ export class HMGSyncService {
       };
     } catch (error) {
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        describeFetchError(error);
       this.logger.error(
         `${fehgTicket.key}: ${targetProjectKey} 생성 실패 - ${errorMessage}`
       );
@@ -398,7 +399,7 @@ export class HMGSyncService {
       };
     } catch (error) {
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        describeFetchError(error);
       this.logger.error(`${targetKey}: 업데이트 실패 - ${errorMessage}`);
 
       return {
@@ -487,7 +488,7 @@ export class HMGSyncService {
       }
     } catch (error) {
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        describeFetchError(error);
       this.logger.warning(
         `${targetKey}: 상태 동기화 실패 (필드는 업데이트됨) - ${errorMessage}`
       );

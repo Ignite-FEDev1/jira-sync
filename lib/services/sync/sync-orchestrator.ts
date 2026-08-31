@@ -12,6 +12,7 @@ import { clearTransitionCache } from './transition-helper';
 import { clearEpicCache } from './epic-resolver';
 import { jira } from '@/lib/services/jira';
 import { dbServer } from '@/lib/db';
+import { describeFetchError } from '@/lib/services/jira/client';
 
 /**
  * 동기화 오케스트레이터
@@ -157,7 +158,7 @@ export class SyncOrchestrator {
       return this.createSummary(allResults, startTime);
     } catch (error) {
       this.logger.error(
-        `동기화 중 치명적 오류: ${error instanceof Error ? error.message : String(error)}`
+        `동기화 중 치명적 오류: ${describeFetchError(error)}`
       );
       return this.createSummary(allResults, startTime);
     }
@@ -583,7 +584,7 @@ export class SyncOrchestrator {
       return [];
     } catch (error) {
       this.logger.error(
-        `티켓 정보 조회 실패: ${error instanceof Error ? error.message : String(error)}`
+        `티켓 정보 조회 실패: ${describeFetchError(error)}`
       );
       return [];
     }
@@ -641,7 +642,7 @@ export class SyncOrchestrator {
       return ['KQ', 'HDD'];
     } catch (error) {
       this.logger.error(
-        `에픽 정보 조회 실패: ${error instanceof Error ? error.message : String(error)} - 기본 프로젝트로 동기화`
+        `에픽 정보 조회 실패: ${describeFetchError(error)} - 기본 프로젝트로 동기화`
       );
       return ['KQ', 'HDD'];
     }

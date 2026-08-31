@@ -10,6 +10,7 @@ import {
   syncStatusWithPathFromDb,
 } from './transition-helper';
 import { jira } from '@/lib/services/jira';
+import { describeFetchError } from '@/lib/services/jira/client';
 
 /**
  * Ignite 프로젝트 동기화 서비스
@@ -86,7 +87,7 @@ export class IgniteSyncService {
       return results;
     } catch (error) {
       this.logger.error(
-        `${fehgTicket.key}: 동기화 중 예외 발생 - ${error instanceof Error ? error.message : String(error)}`
+        `${fehgTicket.key}: 동기화 중 예외 발생 - ${describeFetchError(error)}`
       );
       return results;
     }
@@ -141,7 +142,7 @@ export class IgniteSyncService {
       };
     } catch (error) {
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        describeFetchError(error);
       this.logger.error(`${targetKey}: 업데이트 실패 - ${errorMessage}`);
 
       return {
@@ -251,7 +252,7 @@ export class IgniteSyncService {
       }
     } catch (error) {
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        describeFetchError(error);
       this.logger.warning(
         `${targetKey}: 상태 동기화 실패 (필드는 업데이트됨) - ${errorMessage}`
       );
