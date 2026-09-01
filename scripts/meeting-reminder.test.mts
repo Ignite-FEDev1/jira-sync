@@ -110,10 +110,29 @@ test('ZOOM_MEETING_URL이 비어 있으면 Meet으로 나간다', () => {
   assert.deepEqual(link, { url: MEET, label: 'Google Meet 참여' });
 });
 
-test('화상 링크가 없는 대면 회의는 링크를 붙이지 않는다', () => {
+test('내부 회의는 화상 링크가 없어도 팀 Zoom 링크를 붙인다', () => {
   const event = fe1Daily({ hangoutLink: undefined });
+  assert.deepEqual(
+    getConferenceLink(event, { zoomUrl: ZOOM, teamEmails: TEAM }),
+    { url: ZOOM, label: 'Zoom 참여' }
+  );
+});
+
+test('외부 참석자가 있고 화상 링크도 없으면 링크를 붙이지 않는다', () => {
+  const event = fe1Daily({
+    hangoutLink: undefined,
+    attendees: [...fe1Daily().attendees!, { email: 'guest@partner.co.kr' }],
+  });
   assert.equal(
     getConferenceLink(event, { zoomUrl: ZOOM, teamEmails: TEAM }),
+    null
+  );
+});
+
+test('내부 회의라도 ZOOM_MEETING_URL이 없고 화상 링크도 없으면 링크를 붙이지 않는다', () => {
+  const event = fe1Daily({ hangoutLink: undefined });
+  assert.equal(
+    getConferenceLink(event, { zoomUrl: null, teamEmails: TEAM }),
     null
   );
 });

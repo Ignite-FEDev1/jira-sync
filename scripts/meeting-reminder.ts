@@ -5,7 +5,7 @@
  * 리마인드 시각(시작 REMIND_BEFORE_MIN 분 전)이 가까운 회의는
  * 그 시각까지 프로세스가 대기했다가 정시에 직접 발송한다.
  * 루트 메시지([회의명] + 회의 참여 링크) 발송 후 스레드 답글로 참석자 명단을 단다.
- * 참석자가 전원 팀원인 내부 회의는 캘린더의 Meet 링크 대신 팀 Zoom 링크를 안내한다.
+ * 참석자가 전원 팀원인 내부 회의는 Meet 링크 유무와 무관하게 팀 Zoom 링크를 안내한다.
  *
  * - 발송 이력은 meeting_reminders 테이블로 dedup (발송 완료 시점에 기록)
  * - 발송 직전 이벤트를 재조회해서 취소/시간 변경이면 발송하지 않음
@@ -26,8 +26,8 @@
  *   SLACK_BOT_TOKEN      — xoxb- 봇 토큰 (chat:write, 채널에 봇 초대 필요)
  *   SLACK_MEETING_CHANNEL_ID — 발송 채널 ID
  *   NEXT_PUBLIC_DB_URL, DB_SERVICE_ROLE_KEY — 발송 이력 저장
- *   ZOOM_MEETING_URL     — (선택) 팀 상시 Zoom 회의실 URL. 내부 회의에서 Meet 링크 대신 안내한다.
- *                          비워 두면 모든 회의가 캘린더의 Meet 링크를 그대로 쓴다.
+ *   ZOOM_MEETING_URL     — (선택) 팀 상시 Zoom 회의실 URL. 내부 회의는 Meet 링크가 없어도 이 링크를 안내한다.
+ *                          비워 두면 모든 회의가 캘린더의 Meet 링크를 그대로 쓰고, 그마저 없으면 링크를 붙이지 않는다.
  *   MEETING_TEAM_NAME    — (선택) 팀원 판정 기준 팀 이름. 기본 'FE1'.
  *                          users 테이블에서 이 팀의 ignite_jira_email을 팀원으로 본다.
  *   MEETING_TEAM_GROUP_EMAILS — (선택) 팀 구글 그룹 주소, 콤마 구분. 기본 'fedev1@ignite.co.kr'.
@@ -291,8 +291,8 @@ export function getNonTeamAttendees(
 
 /**
  * 회의 참여 링크와 표시 이름.
- * 내부 회의는 캘린더에 Meet 링크가 잡혀 있어도 실제로는 Zoom으로 모이므로 Zoom 링크로 바꿔 안내한다.
- * 화상 링크가 아예 없는 일정은 대면 회의일 수 있으니 링크를 새로 만들어 붙이지 않는다.
+ * 내부 회의는 팀이 상시 Zoom 회의실로 모이므로, 캘린더에 Meet 링크가 있든 없든 Zoom 링크로 안내한다.
+ * 외부 참석자가 낀 회의는 캘린더의 Meet 링크를 그대로 쓰고, 그마저 없으면(대면 회의 등) 링크를 붙이지 않는다.
  */
 export function getConferenceLink(
   event: CalendarEvent,
@@ -302,11 +302,13 @@ export function getConferenceLink(
     options.zoomUrl !== undefined ? options.zoomUrl : ZOOM_MEETING_URL;
   const teamEmails = options.teamEmails ?? TEAM_EMAILS;
 
-  const meetLink = getMeetLink(event);
-  if (!meetLink) return null;
+  // 내부 회의는 Meet 링크 유무와 무관하게 팀 Zoom으로 모인다.
   if (zoomUrl && isInternalMeeting(event, teamEmails)) {
     return { url: zoomUrl, label: 'Zoom 참여' };
   }
+
+  const meetLink = getMeetLink(event);
+  if (!meetLink) return null;
   return { url: meetLink, label: 'Google Meet 참여' };
 }
 
