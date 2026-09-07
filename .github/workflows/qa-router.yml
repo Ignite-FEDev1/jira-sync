@@ -1,0 +1,72 @@
+name: QA Router
+
+# schedule 은 쓰지 않는다. GitHub Actions 의 cron 은 이벤트를 대량 드랍해서
+# meeting-reminder 에서 이미 폐기했다 (15분 설정에 실제 1.5~2시간 간격 실행).
+# 안정적인 pg_cron 이 workflow_dispatch 로 깨우는 방식을 따른다.
+#
+# 개발 중에는 pg_cron 을 붙이지 않고 수동 실행만 쓴다 — 자동 발송 사고를 원천 차단.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'DRY RUN — Slack 발송·Jira 재배정 안 함'
+        required: false
+        type: boolean
+        default: false
+      iterations:
+        description: '내부 폴링 횟수 (0 이면 1회만)'
+        required: false
+        type: string
+        default: '9'
+      config_id:
+        description: '특정 대상만 실행 (비우면 활성 대상 전체)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# meeting-reminder 와 다른 그룹이라 서로 막지 않는다.
+# cancel-in-progress: true — meeting-reminder 와 반대다.
+# QA Router 는 조회 후 즉시 끝나고 멱등(seen 으로 중복 방지)하므로,
+# 밀린 실행을 죽이고 최신으로 이어받는 게 맞다.
+# (meeting-reminder 는 발송 시각까지 대기하므로 죽이면 예약이 유실된다)
+concurrency:
+  group: qa-router
+  cancel-in-progress: true
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    # 내부 루프 9회 × 60초 = 9분 + 준비 시간. 여유를 두되 무한 대기는 막는다.
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run QA Router
+        env:
+          # Jira 자격증명은 users 테이블에서 config.jira_operator_account_id 로 찾는다.
+          # 그래서 Jira 관련 시크릿이 없다 (daily-sync 와 같은 패턴).
+          NEXT_PUBLIC_DB_URL: ${{ secrets.NEXT_PUBLIC_DB_URL }}
+          # lib/db.ts 가 모듈 로드 시점에 anon 클라이언트도 만들기 때문에 필수다.
+          # 배치는 service_role 만 쓰지만, 없으면 "supabaseKey is required." 로 죽는다.
+          NEXT_PUBLIC_DB_ANON_KEY: ${{ secrets.NEXT_PUBLIC_DB_ANON_KEY }}
+          DB_SERVICE_ROLE_KEY: ${{ secrets.DB_SERVICE_ROLE_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          # github.event.inputs.* 는 항상 문자열이라 체크 해제 시 "false" 가 들어온다.
+          # 스크립트는 === 'true' 로 판정하므로 그대로 넘겨도 안전하다.
+          QA_ROUTER_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          QA_ROUTER_ITERATIONS: ${{ github.event.inputs.iterations || '9' }}
+          QA_ROUTER_CONFIG_ID: ${{ github.event.inputs.config_id }}
+        run: npx tsx scripts/qa-router.ts
