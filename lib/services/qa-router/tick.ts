@@ -59,6 +59,24 @@ const SCHEDULE_TTL_MS = 12 * 3_600_000;
 /** 연속 실패가 이 값에 닿을 때만 알린다. 일시적 네트워크 단절 오탐 억제. */
 export const FAIL_ALERT_THRESHOLD = 3;
 
+/**
+ * 재시도로 해결되지 않는 Slack 오류.
+ *
+ * 이 오류들은 봇이 영구히 아무것도 못 보내는 상태를 뜻한다. 그런데 폴링 자체는
+ * 정상이라 lastPollAt 이 갱신되고 워치독도 안 잡는다 — 초록불인데 알림이 안 가는
+ * "조용한 고장"이 된다. 그래서 tick 을 실패시켜 Actions 실행을 빨간불로 만든다.
+ * (알림 채널이 깨진 상황이라 Slack 경보에 의존할 수 없으므로 밖으로 드러내야 한다)
+ */
+export function isFatalSlackError(error: string | undefined): boolean {
+  return (
+    error === 'channel_not_found' ||
+    error === 'not_in_channel' ||
+    error === 'invalid_auth' ||
+    error === 'account_inactive' ||
+    error === 'token_revoked'
+  );
+}
+
 export interface TickDeps {
   jira: JiraClient;
   confluence: ConfluenceClient;
@@ -467,6 +485,11 @@ export async function runTick(
         });
         log(`사이클 시작 알림 발송 · thread ${res.ts}`);
       } else {
+        if (isFatalSlackError(res.error)) {
+          throw new Error(
+            `Slack 발송 불가: ${res.error} · 채널 ${cfg.slackChannelId} 에 봇이 없거나 토큰이 무효합니다`
+          );
+        }
         log(
           `사이클 시작 알림 실패: ${res.error} · 이번 tick 은 스레드 없이 진행`
         );
@@ -516,6 +539,8 @@ export async function runTick(
 
     let notified = 0;
     let failed = 0;
+    // 채널·토큰 문제는 루프를 다 돌아 이력을 남긴 뒤 tick 을 실패시킨다.
+    let fatalSlackError: string | null = null;
 
     for (const issue of targets) {
       try {
@@ -567,6 +592,9 @@ export async function runTick(
           });
           failed++;
           log(`✗ ${issue.key} 발송 실패 ${failCount}/3: ${res.error}`);
+          // 채널·토큰 문제면 재시도해도 소용없다. 3회 dead-letter 로 조용히
+          // 버리지 않고, 이력을 남긴 뒤 루프 밖에서 tick 을 실패시킨다.
+          if (isFatalSlackError(res.error)) fatalSlackError = res.error ?? null;
         }
 
         await repo.appendEvent({
@@ -595,6 +623,12 @@ export async function runTick(
           error: (e as Error).message,
         });
       }
+    }
+
+    if (fatalSlackError) {
+      throw new Error(
+        `Slack 발송 불가: ${fatalSlackError} · 채널 ${cfg.slackChannelId} 에 봇이 없거나 토큰이 무효합니다`
+      );
     }
 
     await finishOk(cfg, state, log, deps, opsChannel);
