@@ -82,6 +82,12 @@ async function main() {
   // config 별 자격증명은 tick 마다 다시 조회하지 않는다 (한 실행 안에서 안 바뀜)
   const credCache = new Map<string, { email: string; token: string } | null>();
 
+  // config 별 마지막 결과. 루프가 끝났을 때 실패로 남은 대상이 있으면 exit 1 한다.
+  // Slack 채널이 깨진 상황에서는 Slack 경보를 믿을 수 없으므로,
+  // Actions 실행을 빨간불로 만드는 게 유일하게 밖으로 드러나는 신호다.
+  // (일시적 오류는 뒤 iteration 에서 done 으로 덮이므로 초록불을 유지한다)
+  const lastStatus = new Map<string, string>();
+
   for (let i = 0; i <= iterations; i++) {
     if (i > 0) {
       if (Date.now() + intervalMs > deadline) {
@@ -130,6 +136,7 @@ async function main() {
 
         const creds = credCache.get(cfg.id);
         if (!creds) {
+          lastStatus.set(cfg.id, 'error');
           log(
             `${cfg.name} → skip · Jira 자격증명 없음 (operator 지정 또는 환경변수 필요)`
           );
@@ -159,14 +166,22 @@ async function main() {
           out.status === 'done'
             ? `조회 ${out.scanned} · 발송 ${out.notified} · 이월 ${out.deferred} · 실패 ${out.failed}`
             : JSON.stringify(out);
+        lastStatus.set(cfg.id, out.status);
         log(`${cfg.name} → ${out.status} · ${detail}`);
       } catch (e) {
         // runTick 이 자체 처리하지만, 저장소 접근 실패 등은 여기로 온다.
+        lastStatus.set(cfg.id, 'error');
         log(`${cfg.name} → 처리되지 않은 오류: ${(e as Error).message}`);
       }
     }
   }
 
+  const broken = [...lastStatus.entries()].filter(([, v]) => v === 'error');
+  if (broken.length > 0) {
+    log(`종료 · 실패로 남은 대상 ${broken.length}건 → exit 1`);
+    process.exitCode = 1;
+    return;
+  }
   log('종료');
 }
 
