@@ -701,8 +701,13 @@ async function finishOk(
   }
 }
 
-/** reassign_mode 에 따라 Jira 담당자를 바꾼다. 바꾸기 직전 트리아지 담당자인지 재확인한다. */
-async function maybeReassign(
+/**
+ * reassign_mode 에 따라 Jira 담당자를 바꾼다. 바꾸기 직전 트리아지 담당자인지 재확인한다.
+ *
+ * 'off' 는 Jira API 를 아예 호출하지 않는다 — 알림만 보내는 관찰 모드다.
+ * 새 대상의 기본값이고, 사람이 명시적으로 켜야 재배정이 시작된다.
+ */
+export async function maybeReassign(
   cfg: QaRouterConfig,
   issueKey: string,
   result: JudgeResult,

@@ -535,3 +535,134 @@ test('buildConfigChangedMessage — 사후 통보임을 명시하고, 변경 없
     null
   );
 });
+
+// ─────────────────────────────────────────────────────────────
+// Jira 재배정 차단 (안전 불변식)
+// ─────────────────────────────────────────────────────────────
+
+const { maybeReassign } = await import('../lib/services/qa-router/tick');
+
+/** reassign 관련 필드만 채운 config. 나머지는 이 테스트에서 안 쓴다. */
+function cfgWith(over: Record<string, unknown>) {
+  return {
+    id: 'c1',
+    name: 'T',
+    triageAccountId: 'triage-1',
+    slackChannelId: 'C1',
+    reassignMode: 'off',
+    selfAccountId: null,
+    ...over,
+  } as Parameters<typeof maybeReassign>[0];
+}
+
+/** Jira 호출이 일어나면 즉시 실패시키는 스텁 */
+function jiraThatMustNotBeCalled() {
+  const calls: string[] = [];
+  return {
+    calls,
+    port: {
+      getIssue: async (k: string) => {
+        calls.push(`getIssue:${k}`);
+        return { key: k, fields: { assignee: { accountId: 'triage-1' } } };
+      },
+      reassign: async (k: string, a: string) => {
+        calls.push(`reassign:${k}:${a}`);
+      },
+    },
+  };
+}
+
+test("maybeReassign — reassign_mode 'off' 는 Jira 를 호출하지 않는다", async () => {
+  // 안전 불변식: 새 대상의 기본값이 off 이고, 사람이 켜야 재배정이 시작된다.
+  const j = jiraThatMustNotBeCalled();
+  const out = await maybeReassign(
+    cfgWith({ reassignMode: 'off', selfAccountId: 'me' }),
+    'KQ-1',
+    {
+      classification: 'auto_self',
+      accountId: 'me',
+      name: '조한빈',
+      reason: 'r',
+      via: 'epic',
+    },
+    { jira: j.port, jiraBaseUrl: '' } as unknown as Parameters<
+      typeof maybeReassign
+    >[3],
+    () => {}
+  );
+  assert.deepEqual(j.calls, [], 'Jira API 를 한 번도 부르지 않아야 한다');
+  assert.equal(out?.kind, 'kept', '담당자 유지로 보고한다');
+});
+
+test("maybeReassign — 'self_only' 는 본인이 아니면 호출하지 않는다", async () => {
+  const j = jiraThatMustNotBeCalled();
+  const out = await maybeReassign(
+    cfgWith({ reassignMode: 'self_only', selfAccountId: 'me' }),
+    'KQ-1',
+    {
+      classification: 'ask_fe1',
+      accountId: 'other',
+      name: '박성찬',
+      reason: 'r',
+      via: 'epic',
+    },
+    { jira: j.port, jiraBaseUrl: '' } as unknown as Parameters<
+      typeof maybeReassign
+    >[3],
+    () => {}
+  );
+  assert.deepEqual(j.calls, []);
+  assert.equal(out?.kind, 'kept');
+});
+
+test('maybeReassign — 판정 불가면 재배정 대상이 아니다', async () => {
+  const j = jiraThatMustNotBeCalled();
+  const out = await maybeReassign(
+    cfgWith({ reassignMode: 'all_members' }),
+    'KQ-1',
+    { classification: 'unknown', reason: '판정 불가', via: 'none' },
+    { jira: j.port, jiraBaseUrl: '' } as unknown as Parameters<
+      typeof maybeReassign
+    >[3],
+    () => {}
+  );
+  assert.deepEqual(j.calls, []);
+  assert.equal(out, null);
+});
+
+test('maybeReassign — 사람이 이미 옮겼으면 덮어쓰지 않는다', async () => {
+  const calls: string[] = [];
+  const port = {
+    getIssue: async (k: string) => {
+      calls.push(`getIssue:${k}`);
+      // 트리아지 담당자가 아니라 이미 다른 사람에게 있음
+      return {
+        key: k,
+        fields: { assignee: { accountId: 'someone', displayName: '전옥현' } },
+      };
+    },
+    reassign: async (k: string) => {
+      calls.push(`reassign:${k}`);
+    },
+  };
+  const out = await maybeReassign(
+    cfgWith({ reassignMode: 'self_only', selfAccountId: 'me' }),
+    'KQ-1',
+    {
+      classification: 'auto_self',
+      accountId: 'me',
+      name: '조한빈',
+      reason: 'r',
+      via: 'epic',
+    },
+    { jira: port, jiraBaseUrl: '' } as unknown as Parameters<
+      typeof maybeReassign
+    >[3],
+    () => {}
+  );
+  assert.ok(
+    !calls.some((c) => c.startsWith('reassign')),
+    '재배정을 시도하지 않아야 한다'
+  );
+  assert.equal(out?.kind, 'skipped');
+});
