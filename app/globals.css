@@ -67,3 +67,20 @@
     @apply bg-background text-foreground;
   }
 }
+
+/*
+  동작을 줄여 달라고 한 사람에게는 줄인다.
+
+  OS 설정이다. 전정기관 질환이 있으면 움직이는 UI 가 실제로 어지럽다.
+  `0.01ms` 로 두는 이유는 완전히 0 으로 하면 animationend 를 기다리는
+  코드가 영영 안 깨어나기 때문이다 — 사실상 즉시 끝나되 끝나기는 한다.
+*/
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

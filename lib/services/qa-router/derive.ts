@@ -18,8 +18,15 @@
 
 export type JiraInstance = 'ignite' | 'hmg';
 
+/**
+ * 지원 호스트. 팀은 Jira 인스턴스를 두 개 쓴다 (lib/constants/jira.ts).
+ * hmg 가 빠져 있어서 그룹웨어 쪽 필터 URL 을 붙여넣으면 파싱이 실패했다.
+ * jira.hmg-corp.io 는 구 URL 이지만 오래된 링크가 아직 돌아다닌다.
+ */
 const INSTANCE_HOSTS: Record<string, JiraInstance> = {
   'ignitecorp.atlassian.net': 'ignite',
+  'hmg.atlassian.net': 'hmg',
+  'jira.hmg-corp.io': 'hmg',
 };
 
 export interface ParsedFilterUrl {

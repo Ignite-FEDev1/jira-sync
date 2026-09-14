@@ -2,14 +2,17 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { AlertTriangle, ExternalLink, Plus, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ChevronRight, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Badge, StatusLed } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Switch } from '@/components/ui/switch';
 import { db } from '@/lib/db';
+import {
+  toConfig,
+  toState,
+} from '@/lib/services/qa-router/rows';
 import { computeHealth, type Health } from '@/lib/services/qa-router/status';
 import type {
   QaRouterConfig,
@@ -29,7 +32,6 @@ const TONE_ORDER = { bad: 0, warn: 1, ok: 2, off: 3 } as const;
 
 export default function QaRouterListPage() {
   const [rows, setRows] = useState<Row[] | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const now = new Date();
@@ -103,40 +105,6 @@ export default function QaRouterListPage() {
   const counts = { ok: 0, warn: 0, bad: 0, off: 0 };
   for (const r of rows ?? []) counts[r.health.tone]++;
 
-  const toggle = async (row: Row) => {
-    const next = !row.config.enabled;
-    // 끄면 알림이 완전히 멈춘다. 되돌릴 수 없는 공백이 생기므로 확인을 받는다.
-    if (!next) {
-      const ok = window.confirm(
-        `${row.config.name} 을 끌까요?\n\n` +
-          '끄는 동안 배정되는 QA 티켓은 아무에게도 알림이 가지 않습니다.\n' +
-          '다시 켜도 그 사이 티켓은 소급 알림되지 않습니다.'
-      );
-      if (!ok) return;
-    }
-    setBusyId(row.config.id);
-    const { error } = await db
-      .from('qa_router_configs')
-      .update({ enabled: next })
-      .eq('id', row.config.id);
-    setBusyId(null);
-    if (error) {
-      toast.error(`변경 실패: ${error.message}`);
-      return;
-    }
-    toast.success(
-      next
-        ? `${row.config.name} 을 켰습니다`
-        : `${row.config.name} 을 껐습니다`,
-      {
-        description: next
-          ? '첫 폴링까지 최대 10분 · 바로 보려면 상세에서 "지금 실행"'
-          : '알림이 중단됩니다',
-      }
-    );
-    void load();
-  };
-
   const alerts = (rows ?? []).filter((r) => r.health.actionable);
 
   return (
@@ -148,7 +116,7 @@ export default function QaRouterListPage() {
             <>
               {counts.ok > 0 && (
                 <Badge variant="ok">
-                  <StatusLed tone="ok" />
+                  <StatusLed tone="ok" pulse />
                   정상 {counts.ok}
                 </Badge>
               )}
@@ -170,15 +138,15 @@ export default function QaRouterListPage() {
             </>
           )}
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => void load()}>
-            <RefreshCw />
-            새로고침
-          </Button>
-          <Button size="sm" disabled title="다음 단계에서 구현합니다">
-            <Plus />새 대상
-          </Button>
-        </div>
+        {/*
+          "새 대상"을 뺐다. 화면에서 유일하게 진한 버튼이 눌리지 않는 버튼이면
+          어디를 눌러야 할지 알려주는 신호가 거짓이 된다. 만들 수 있게 되면
+          그때 되살린다.
+        */}
+        <Button variant="outline" size="sm" onClick={() => void load()}>
+          <RefreshCw />
+          새로고침
+        </Button>
       </div>
 
       {/* 조치가 필요한 건은 표 안에서 스캔하게 하지 않고 위로 올린다 */}
@@ -192,10 +160,9 @@ export default function QaRouterListPage() {
             <span className="font-semibold">{r.config.name}</span>
             <span className="text-muted-foreground"> · {r.health.detail}</span>
           </div>
+          {/* 진단은 이제 상세 안의 섹션이다. 탭 쿼리스트링은 더 이상 없다. */}
           <Button variant="outline" size="sm" asChild>
-            <Link href={`/admin/qa-router/${r.config.id}?tab=diagnostics`}>
-              진단 보기
-            </Link>
+            <Link href={`/admin/qa-router/${r.config.id}`}>확인</Link>
           </Button>
         </div>
       ))}
@@ -217,18 +184,12 @@ export default function QaRouterListPage() {
                     마지막 확인
                   </th>
                   <th className="px-3 py-2 text-right font-medium">오늘</th>
-                  <th className="w-16 px-3 py-2 text-left font-medium">사용</th>
-                  <th className="w-10" />
+                  <th className="w-8" />
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <ConfigRow
-                    key={r.config.id}
-                    row={r}
-                    busy={busyId === r.config.id}
-                    onToggle={() => void toggle(r)}
-                  />
+                  <ConfigRow key={r.config.id} row={r} />
                 ))}
               </tbody>
             </table>
@@ -239,15 +200,7 @@ export default function QaRouterListPage() {
   );
 }
 
-function ConfigRow({
-  row,
-  busy,
-  onToggle,
-}: {
-  row: Row;
-  busy: boolean;
-  onToggle: () => void;
-}) {
+function ConfigRow({ row }: { row: Row }) {
   const { config: c, state, health } = row;
   // 색만으로 구분하지 않는다 — 행 배경 + LED + 텍스트를 겹친다.
   const rowTint =
@@ -258,16 +211,17 @@ function ConfigRow({
         : '';
 
   return (
+    // relative: 행 전체를 히트 영역으로 덮는다.
     <tr
-      className={`border-b last:border-0 ${rowTint} ${!c.enabled ? 'opacity-60' : ''}`}
+      className={`relative border-b last:border-0 hover:bg-muted/60 ${rowTint} ${!c.enabled ? 'opacity-60' : ''}`}
     >
       <td className="pl-3">
-        <StatusLed tone={health.tone} />
+        <StatusLed tone={health.tone} pulse={health.tone === 'ok'} />
       </td>
       <td className="px-3 py-2.5">
         <Link
           href={`/admin/qa-router/${c.id}`}
-          className="font-semibold hover:underline"
+          className="font-semibold after:absolute after:inset-0 after:content-[''] hover:underline"
         >
           {c.name}
         </Link>
@@ -285,7 +239,7 @@ function ConfigRow({
       </td>
       <td className="px-3 py-2.5 text-muted-foreground">
         <span className="font-mono text-xs">
-          {state?.derived?.projectKey ?? '—'}
+          {state?.derived?.projectKey ?? '-'}
         </span>
         <span className="block text-xs">
           {state?.activeCycle?.fixVersion ?? '차수 미확인'}
@@ -297,32 +251,30 @@ function ConfigRow({
               hour: '2-digit',
               minute: '2-digit',
             })
-          : '—'}
+          : '-'}
       </td>
+      {/* 0 을 "—" 로 가리면 "오늘 아직 한 건도 안 갔다"가 화면에서 사라진다. */}
       <td className="px-3 py-2.5 text-right font-mono tabular-nums">
-        {row.todayCount > 0 ? `${row.todayCount}건` : '—'}
+        {row.todayCount === 0 ? (
+          <span className="text-muted-foreground">0</span>
+        ) : (
+          row.todayCount
+        )}
       </td>
-      <td className="px-3 py-2.5">
-        <div className="flex items-center gap-2">
-          <Switch
-            checked={c.enabled}
-            disabled={busy}
-            onCheckedChange={onToggle}
-            aria-label={`${c.name} 사용 여부`}
-          />
-          {c.reassignMode === 'off' && (
-            <Badge variant="muted" title="Jira 담당자를 변경하지 않습니다">
-              알림만
-            </Badge>
-          )}
-        </div>
-      </td>
+      {/*
+        스위치를 뺐다. 훑다가 스쳐 누르면 알림이 멈추는데 되돌려도 그 사이
+        티켓은 소급되지 않는다 — 그런 토글이 목록 행에 있을 자리가 아니다.
+        "알림만" 배지도 뺐다: 재배정을 없앤 뒤로 모든 행에 늘 붙어 무정보였다.
+
+        아이콘은 ChevronRight 다. 전에 쓰던 ExternalLink 는 "이 앱을 떠난다"는
+        뜻이라 Jira·Confluence 링크와 같은 기호가 두 뜻을 갖고 있었다.
+        이 화살표는 표시일 뿐이고 누르는 것은 행 전체다.
+      */}
       <td className="pr-3 text-right">
-        <Button variant="ghost" size="icon" asChild>
-          <Link href={`/admin/qa-router/${c.id}`} aria-label={`${c.name} 상세`}>
-            <ExternalLink />
-          </Link>
-        </Button>
+        <ChevronRight
+          className="ml-auto size-4 text-muted-foreground"
+          aria-hidden
+        />
       </td>
     </tr>
   );
@@ -346,59 +298,17 @@ function EmptyState() {
       <p className="max-w-sm text-sm text-muted-foreground">
         QA 티켓이 쌓이는 Jira 필터와 알릴 Slack 채널만 있으면 됩니다.
       </p>
-      <Button
-        size="sm"
-        className="mt-1"
-        disabled
-        title="다음 단계에서 구현합니다"
-      >
-        <Plus />첫 대상 만들기
-      </Button>
+      {/*
+        눌리지 않는 버튼을 두지 않는다. 빈 화면에서 유일한 행동이 막혀 있으면
+        막다른 길이 된다. 지금 할 수 있는 일을 그대로 적는다.
+      */}
+      <p className="mt-1 text-xs text-muted-foreground">
+        만들기는 아직 화면에 없습니다. 필요하면 FE1 에 요청해 주세요.
+      </p>
     </div>
   );
 }
 
 // ── 매퍼 ────────────────────────────────────────────────
-// 브라우저에서 직접 읽으므로 여기서 snake_case → camelCase 변환한다.
-// (서버 배치는 lib/services/qa-router/repository.ts 의 매퍼를 쓴다)
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
-function toConfig(r: any): QaRouterConfig {
-  return {
-    id: r.id,
-    name: r.name,
-    enabled: r.enabled,
-    jiraInstance: r.jira_instance,
-    jiraFilterId: r.jira_filter_id,
-    triageAccountId: r.triage_account_id,
-    jiraOperatorAccountId: r.jira_operator_account_id ?? null,
-    confluenceDeployRootId: r.confluence_deploy_root_id,
-    fixVersionPattern: r.fix_version_pattern,
-    slackChannelId: r.slack_channel_id,
-    slackFallbackChannelId: r.slack_fallback_channel_id,
-    slackOpsChannelId: r.slack_ops_channel_id ?? null,
-    quietHours: r.quiet_hours,
-    reassignMode: r.reassign_mode,
-    selfAccountId: r.self_account_id,
-    maxTicketsPerTick: r.max_tickets_per_tick,
-    heartbeatStaleMinutes: r.heartbeat_stale_minutes,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-  };
-}
-
-function toState(r: any): QaRouterState {
-  return {
-    configId: r.config_id,
-    seen: r.seen ?? {},
-    activeCycle: r.active_cycle,
-    filterCache: r.filter_cache,
-    derived: r.derived,
-    lastPollAt: r.last_poll_at,
-    consecutiveFails: r.consecutive_fails,
-    lockedUntil: r.locked_until,
-    lockedBy: r.locked_by,
-    staleAlertedAt: r.stale_alerted_at,
-    updatedAt: r.updated_at,
-  };
-}
+// snake_case → camelCase 변환은 lib/services/qa-router/rows.ts 한 곳에서 한다.
+// 배치와 화면이 다른 클라이언트를 쓰지만 매핑 규칙은 같기 때문이다.

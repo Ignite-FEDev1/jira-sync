@@ -49,7 +49,7 @@ begin
       url := 'https://slack.com/api/chat.postMessage',
       headers := jsonb_build_object(
         'Authorization', 'Bearer ' || token,
-        'Content-Type', 'application/json; charset=utf-8'
+        'Content-Type', 'application/json'
       ),
       body := jsonb_build_object(
         'channel', r.alert_channel,

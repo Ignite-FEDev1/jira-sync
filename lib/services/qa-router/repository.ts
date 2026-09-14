@@ -10,7 +10,21 @@
  */
 
 import { dbServer } from '@/lib/db';
+/*
+  행 변환은 rows.ts 한 곳에 둔다. 배치와 화면이 서로 다른 클라이언트를 쓰지만
+  **매핑 규칙은 같다** — 복제해 두었다가 컬럼을 더할 때 한쪽을 빠뜨린다.
+*/
+import {
+  toConfig,
+  toEvent,
+  toState,
+  type ConfigRow,
+  type EventRow,
+  type StateRow,
+} from './rows';
+import type { PlanProgress } from './plan-tickets';
 import type {
+  DeployCycle,
   ActiveCycle,
   DerivedContext,
   QaRouterConfig,
@@ -18,60 +32,12 @@ import type {
   QaRouterEvent,
   QaRouterEventInput,
   QaRouterState,
-  QuietHours,
-  RoutingMapEntry,
   SeenEntry,
 } from './types';
 
 // ─────────────────────────────────────────────────────────────
 // 행 타입 · 매퍼
 // ─────────────────────────────────────────────────────────────
-
-type ConfigRow = {
-  id: string;
-  name: string;
-  enabled: boolean;
-  jira_instance: 'ignite' | 'hmg';
-  jira_filter_id: string;
-  triage_account_id: string;
-  jira_operator_account_id: string | null;
-  confluence_deploy_root_id: string | null;
-  fix_version_pattern: string | null;
-  slack_channel_id: string;
-  slack_fallback_channel_id: string | null;
-  slack_ops_channel_id: string | null;
-  quiet_hours: QuietHours;
-  reassign_mode: QaRouterConfig['reassignMode'];
-  self_account_id: string | null;
-  max_tickets_per_tick: number;
-  heartbeat_stale_minutes: number;
-  created_at: string;
-  updated_at: string;
-};
-
-function toConfig(r: ConfigRow): QaRouterConfig {
-  return {
-    id: r.id,
-    name: r.name,
-    enabled: r.enabled,
-    jiraInstance: r.jira_instance,
-    jiraFilterId: r.jira_filter_id,
-    triageAccountId: r.triage_account_id,
-    jiraOperatorAccountId: r.jira_operator_account_id,
-    confluenceDeployRootId: r.confluence_deploy_root_id,
-    fixVersionPattern: r.fix_version_pattern,
-    slackChannelId: r.slack_channel_id,
-    slackFallbackChannelId: r.slack_fallback_channel_id,
-    slackOpsChannelId: r.slack_ops_channel_id,
-    quietHours: r.quiet_hours,
-    reassignMode: r.reassign_mode,
-    selfAccountId: r.self_account_id,
-    maxTicketsPerTick: r.max_tickets_per_tick,
-    heartbeatStaleMinutes: r.heartbeat_stale_minutes,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-  };
-}
 
 function fromConfigInput(i: QaRouterConfigInput): Partial<ConfigRow> {
   const row: Partial<ConfigRow> = {
@@ -93,76 +59,32 @@ function fromConfigInput(i: QaRouterConfigInput): Partial<ConfigRow> {
     row.slack_fallback_channel_id = i.slackFallbackChannelId;
   if (i.slackOpsChannelId !== undefined)
     row.slack_ops_channel_id = i.slackOpsChannelId;
+  if (i.qaThreadChannelId !== undefined)
+    row.qa_thread_channel_id = i.qaThreadChannelId;
+  if (i.qaThreadTitlePattern !== undefined)
+    row.qa_thread_title_pattern = i.qaThreadTitlePattern;
+  if (i.planIssueTypeId !== undefined)
+    row.plan_issue_type_id = i.planIssueTypeId;
+  if (i.devIssueTypeId !== undefined) row.dev_issue_type_id = i.devIssueTypeId;
+  if (i.planIssueTypeName !== undefined)
+    row.plan_issue_type_name = i.planIssueTypeName;
+  if (i.devIssueTypeName !== undefined)
+    row.dev_issue_type_name = i.devIssueTypeName;
+  if (i.coAssigneeField !== undefined)
+    row.co_assignee_field = i.coAssigneeField;
+  if (i.planCollectHours !== undefined)
+    row.plan_collect_hours = i.planCollectHours;
+  if (i.judgeTiers !== undefined) row.judge_tiers = i.judgeTiers;
+  if (i.alerts !== undefined) row.alerts = i.alerts;
+  if (i.alertRules !== undefined) row.alert_rules = i.alertRules;
   if (i.quietHours !== undefined) row.quiet_hours = i.quietHours;
+  if (i.tickIntervalSeconds !== undefined)
+    row.tick_interval_seconds = i.tickIntervalSeconds;
   if (i.reassignMode !== undefined) row.reassign_mode = i.reassignMode;
   if (i.selfAccountId !== undefined) row.self_account_id = i.selfAccountId;
-  if (i.maxTicketsPerTick !== undefined)
-    row.max_tickets_per_tick = i.maxTicketsPerTick;
   if (i.heartbeatStaleMinutes !== undefined)
     row.heartbeat_stale_minutes = i.heartbeatStaleMinutes;
   return row;
-}
-
-type StateRow = {
-  config_id: string;
-  seen: Record<string, SeenEntry> | null;
-  active_cycle: ActiveCycle | null;
-  filter_cache: { fixVersion: string; checkedAt: string } | null;
-  derived: DerivedContext | null;
-  last_poll_at: string | null;
-  consecutive_fails: number;
-  locked_until: string | null;
-  locked_by: string | null;
-  stale_alerted_at: string | null;
-  updated_at: string;
-};
-
-function toState(r: StateRow): QaRouterState {
-  return {
-    configId: r.config_id,
-    seen: r.seen ?? {},
-    activeCycle: r.active_cycle,
-    filterCache: r.filter_cache,
-    derived: r.derived,
-    lastPollAt: r.last_poll_at,
-    consecutiveFails: r.consecutive_fails,
-    lockedUntil: r.locked_until,
-    lockedBy: r.locked_by,
-    staleAlertedAt: r.stale_alerted_at,
-    updatedAt: r.updated_at,
-  };
-}
-
-type EventRow = {
-  id: number;
-  config_id: string;
-  issue_key: string;
-  summary: string | null;
-  classification: QaRouterEvent['classification'];
-  target_account_id: string | null;
-  target_name: string | null;
-  reason: string | null;
-  notified: boolean;
-  reassigned: boolean;
-  error: string | null;
-  created_at: string;
-};
-
-function toEvent(r: EventRow): QaRouterEvent {
-  return {
-    id: r.id,
-    configId: r.config_id,
-    issueKey: r.issue_key,
-    summary: r.summary,
-    classification: r.classification,
-    targetAccountId: r.target_account_id,
-    targetName: r.target_name,
-    reason: r.reason,
-    notified: r.notified,
-    reassigned: r.reassigned,
-    error: r.error,
-    createdAt: r.created_at,
-  };
 }
 
 /** supabase-js 는 에러를 던지지 않고 반환한다. 조용한 실패를 막기 위해 명시적으로 던진다. */
@@ -384,6 +306,9 @@ export async function appendEvent(input: QaRouterEventInput): Promise<void> {
     target_account_id: input.targetAccountId,
     target_name: input.targetName,
     reason: input.reason,
+    // 근거로 센 티켓. 화면이 목록으로 펼쳐 보여준다.
+    evidence: input.evidence ?? null,
+    via: input.via ?? null,
     notified: input.notified ?? false,
     reassigned: input.reassigned ?? false,
     error: input.error,
@@ -392,6 +317,42 @@ export async function appendEvent(input: QaRouterEventInput): Promise<void> {
 }
 
 /** 이월·상한 도달·설정 변경처럼 티켓에 매이지 않는 기록. issueKey 는 라벨로 쓴다. */
+/**
+ * 부수 작업의 마지막 시도 결과를 남긴다. **성공도 남긴다.**
+ *
+ * 실패만 남기면 "지금 고장" 과 "예전에 한 번 고장났고 지금은 멀쩡" 을
+ * 구분할 수 없다. 시도할 때마다 덮어쓰므로 행이 늘지 않는다.
+ *
+ * 이벤트 표에 넣지 않는 이유: tick 이 60초마다 도는데 실패가 이어지면
+ * 분당 한 건씩 쌓인다. 그 표는 "티켓마다 무엇을 했나" 를 담는 자리다.
+ *
+ * 여기서 나는 오류는 삼킨다. 관측하려다 본 작업을 죽이면 주객이 뒤바뀐다.
+ */
+export async function recordSideEffect(
+  configId: string,
+  key: string,
+  error: string | null,
+  now: () => Date = () => new Date()
+): Promise<void> {
+  try {
+    const { data } = await dbServer
+      .from('qa_router_state')
+      .select('side_effects')
+      .eq('config_id', configId)
+      .maybeSingle();
+    const next = {
+      ...((data?.side_effects as Record<string, unknown>) ?? {}),
+      [key]: { at: now().toISOString(), error },
+    };
+    await dbServer
+      .from('qa_router_state')
+      .update({ side_effects: next })
+      .eq('config_id', configId);
+  } catch {
+    // 기록 실패는 조용히 넘긴다 — 이건 부수 작업의 부수 작업이다.
+  }
+}
+
 export async function appendSystemEvent(
   configId: string,
   label: string,
@@ -428,62 +389,172 @@ export async function listEvents(
 // 학습 맵
 // ─────────────────────────────────────────────────────────────
 
-export async function getRoutingMap(
-  configId: string
-): Promise<Map<string, RoutingMapEntry>> {
-  const rows = must(
-    await dbServer
-      .from('qa_router_routing_map')
-      .select('*')
-      .eq('config_id', configId),
-    'getRoutingMap'
-  ) as Array<{
-    config_id: string;
-    prefix: string;
-    account_id: string;
-    name: string;
-    count: number;
-    total: number;
-    generated_at: string;
-  }>;
+// ─────────────────────────────────────────────────────────────
+// 배포 차수
+// ─────────────────────────────────────────────────────────────
 
-  return new Map(
-    rows.map((r) => [
-      r.prefix,
-      {
-        configId: r.config_id,
-        prefix: r.prefix,
-        accountId: r.account_id,
-        name: r.name,
-        count: r.count,
-        total: r.total,
-        generatedAt: r.generated_at,
-      },
-    ])
+/**
+ * 수집한 정기배포 차수를 저장한다.
+ *
+ * deploy_ymd 가 키다. 같은 차수를 다시 수집하면 일정과 Jira 버전 존재 여부가
+ * 갱신된다 — 배포대장의 일정은 실제로 바뀐다 (2026-10-12 페이지에
+ * "배포일정 변경됨"이 적혀 있었다).
+ */
+export async function upsertCycles(
+  configId: string,
+  cycles: DeployCycle[]
+): Promise<void> {
+  if (cycles.length === 0) return;
+  const { error } = await dbServer.from('qa_router_cycles').upsert(
+    cycles.map((c) => ({
+      config_id: configId,
+      deploy_ymd: c.deployYmd,
+      fix_version: c.fixVersion,
+      cycle_label: c.cycleLabel,
+      qa_start_ymd: c.qaStartYmd,
+      qa_end_ymd: c.qaEndYmd,
+      prod_ymd: c.prodYmd,
+      deploy_page_id: c.deployPageId,
+      deploy_page_title: c.deployPageTitle,
+      jira_version_exists: c.jiraVersionExists,
+      collected_at: new Date().toISOString(),
+    })),
+    { onConflict: 'config_id,deploy_ymd' }
   );
+  if (error) throw new Error(`upsertCycles: ${error.message}`);
 }
 
-export async function replaceRoutingMap(
+/** 차수 하나를 fixVersion 으로 읽는다. 진행 현황 갱신 주기 판단에 쓴다. */
+export async function getCycle(
   configId: string,
-  entries: Array<Omit<RoutingMapEntry, 'configId' | 'generatedAt'>>
-): Promise<void> {
-  const del = await dbServer
-    .from('qa_router_routing_map')
-    .delete()
-    .eq('config_id', configId);
-  if (del.error)
-    throw new Error(`replaceRoutingMap(delete): ${del.error.message}`);
-  if (entries.length === 0) return;
+  fixVersion: string
+): Promise<DeployCycle | null> {
+  const { data, error } = await dbServer
+    .from('qa_router_cycles')
+    .select('*')
+    .eq('config_id', configId)
+    .eq('fix_version', fixVersion)
+    .maybeSingle();
+  if (error) throw new Error(`getCycle: ${error.message}`);
+  if (!data) return null;
+  return {
+    deployYmd: data.deploy_ymd,
+    fixVersion: data.fix_version,
+    cycleLabel: data.cycle_label ?? null,
+    qaStartYmd: data.qa_start_ymd ?? null,
+    qaEndYmd: data.qa_end_ymd ?? null,
+    prodYmd: data.prod_ymd ?? null,
+    deployPageId: data.deploy_page_id ?? null,
+    deployPageTitle: data.deploy_page_title ?? null,
+    jiraVersionExists: Boolean(data.jira_version_exists),
+    collectedAt: data.collected_at,
+    planProgress: data.plan_progress ?? null,
+    qaThreadTs: data.qa_thread_ts ?? null,
+    threadDeployYmd: data.thread_deploy_ymd ?? null,
+    threadQaEndYmd: data.thread_qa_end_ymd ?? null,
+    qaLabel: data.qa_label ?? null,
+    planCollectedAt: data.plan_collected_at ?? null,
+  };
+}
 
-  const { error } = await dbServer.from('qa_router_routing_map').insert(
-    entries.map((e) => ({
-      config_id: configId,
-      prefix: e.prefix,
-      account_id: e.accountId,
-      name: e.name,
-      count: e.count,
-      total: e.total,
-    }))
-  );
-  if (error) throw new Error(`replaceRoutingMap(insert): ${error.message}`);
+/**
+ * 한 차수의 기획티켓 진행 현황을 저장한다.
+ *
+ * 차수 자체(upsertCycles)와 분리한 이유: 차수 목록은 배포대장에서 오고
+ * 진행 현황은 Jira·Slack 에서 온다. 한 번에 쓰면 한쪽이 실패할 때
+ * 멀쩡한 다른 쪽까지 날아간다.
+ */
+export async function savePlanProgress(
+  configId: string,
+  deployYmd: string,
+  progress: PlanProgress,
+  meta: {
+    qaThreadTs?: string | null;
+    qaLabel?: string | null;
+    /** 스레드 제목에서 읽은 배포일. 배포일 출처 1순위다. */
+    threadDeployYmd?: string | null;
+  } = {}
+): Promise<void> {
+  const patch: Record<string, unknown> = {
+    plan_progress: progress,
+    plan_collected_at: new Date().toISOString(),
+  };
+  // 못 찾은 값으로 이미 찾아 둔 값을 덮지 않는다.
+  if (meta.qaThreadTs) patch.qa_thread_ts = meta.qaThreadTs;
+  if (meta.qaLabel) patch.qa_label = meta.qaLabel;
+  if (meta.threadDeployYmd) patch.thread_deploy_ymd = meta.threadDeployYmd;
+
+  const { error } = await dbServer
+    .from('qa_router_cycles')
+    .update(patch)
+    .eq('config_id', configId)
+    .eq('deploy_ymd', deployYmd);
+  if (error) throw new Error(`savePlanProgress: ${error.message}`);
+}
+
+/** 마지막 수집 시각. 하루 한 번만 수집하려고 본다. */
+export async function lastCycleCollectedAt(
+  configId: string
+): Promise<string | null> {
+  const { data, error } = await dbServer
+    .from('qa_router_cycles')
+    .select('collected_at')
+    .eq('config_id', configId)
+    .order('collected_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`lastCycleCollectedAt: ${error.message}`);
+  return data?.collected_at ?? null;
+}
+
+/**
+ * 결과를 아직 확인하지 않은 판정. 이 차수 것만.
+ *
+ * `outcome is null`(한 번도 안 봄)과 `'pending'`(봤는데 아직 트리아지)을
+ * 함께 가져온다 — pending 은 다음에 또 확인해야 하는 상태다.
+ * system 기록과 발송 실패는 뺀다. 전자는 티켓이 아니고, 후자는 판정 결과가
+ * 아니라 전송 문제라 티켓 소유와 무관하다.
+ */
+export async function unresolvedEventKeys(
+  configId: string,
+  fixVersion: string,
+  limit = 200
+): Promise<string[]> {
+  const rows = must(
+    await dbServer
+      .from('qa_router_events')
+      .select('issue_key')
+      .eq('config_id', configId)
+      .eq('fix_version', fixVersion)
+      .neq('classification', 'system')
+      .is('error', null)
+      .or('outcome.is.null,outcome.eq.pending')
+      .limit(limit),
+    'unresolvedEventKeys'
+  ) as Array<{ issue_key: string }>;
+  // 같은 티켓이 여러 번 판정될 수 있다. Jira 에는 한 번만 물어본다.
+  return [...new Set(rows.map((r) => r.issue_key))];
+}
+
+/**
+ * 확인한 결과를 되쓴다.
+ *
+ * 같은 티켓의 기록이 여러 줄이면 모두 갱신한다 — 한 줄만 고치면 화면에서
+ * 같은 티켓이 두 상태로 보인다.
+ */
+export async function saveOutcomes(
+  configId: string,
+  fixVersion: string,
+  results: { issueKey: string; outcome: string; name: string | null }[]
+): Promise<void> {
+  const at = new Date().toISOString();
+  for (const r of results) {
+    const { error } = await dbServer
+      .from('qa_router_events')
+      .update({ outcome: r.outcome, outcome_name: r.name, outcome_at: at })
+      .eq('config_id', configId)
+      .eq('fix_version', fixVersion)
+      .eq('issue_key', r.issueKey);
+    if (error) throw new Error(`saveOutcomes(${r.issueKey}): ${error.message}`);
+  }
 }

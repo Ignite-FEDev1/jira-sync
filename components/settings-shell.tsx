@@ -72,7 +72,19 @@ export function SettingsShell({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <div className="flex h-screen flex-col">
+    /*
+      셸을 h-screen 으로 잡지 않는다.
+
+      전역 GNB(sticky h-12 + border-b, 49px)가 흐름 안에 있는데 그 아래 셸이
+      다시 100vh 를 차지해서 문서 높이가 늘 `100vh + 49px` 이 됐다. 그래서
+      본문(main.overflow-auto) 스크롤바 하나, 49px 만큼만 움직이는 문서
+      스크롤바 하나, 이렇게 두 개가 보였다.
+
+      스크롤은 문서 하나로 통일한다. 앱의 다른 화면(홈·배포방·배포 대장)도
+      전부 문서 스크롤이라 그쪽 감각과도 맞는다. 사이드바는 sticky 로 붙여
+      두어 아래로 내려도 계속 보인다.
+    */
+    <div className="flex flex-col">
       <header className="border-b">
         <div className="container mx-auto flex items-center justify-between px-6 py-6">
           <div>
@@ -98,56 +110,78 @@ export function SettingsShell({ children }: { children: React.ReactNode }) {
 
         본문이 800px 로 줄지만 실측상 가장 넓은 표가 754px 라 다 들어간다.
       */}
-      <div className="container mx-auto flex min-h-0 flex-1 overflow-hidden px-6">
+      <div className="container mx-auto flex px-6">
+        {/*
+          바깥 nav 는 세로선(border-r)만 맡고, 메뉴는 그 안의 sticky 상자가
+          맡는다. 둘을 한 엘리먼트로 합쳐 sticky 를 걸면 선이 메뉴 높이(약
+          400px)에서 끊겨, 긴 화면에서 왼쪽이 중간에 잘려 보인다.
+
+          바깥 nav 는 grid/flex 기본 stretch 로 본문 높이를 그대로 받으므로
+          선은 끝까지 내려가고, 문서 높이는 본문이 정한다 (nav 가 높이를
+          만들지 않는다).
+        */}
         <nav
           className={cn(
-            'shrink-0 space-y-1 overflow-y-auto border-r py-4 pr-4 transition-[width]',
-            collapsed ? 'w-14 pr-2' : 'w-56'
+            'shrink-0 border-r transition-[width]',
+            collapsed ? 'w-14' : 'w-56'
           )}
         >
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={toggle}
-            className={cn('mb-1', collapsed ? 'w-full' : 'ml-auto flex')}
-            aria-label={collapsed ? '사이드바 펼치기' : '사이드바 접기'}
-            title={collapsed ? '사이드바 펼치기' : '사이드바 접기'}
+          {/*
+            top-12 는 GNB 높이(h-12)다. 사이드바 자체가 뷰포트보다 길어질
+            때만 여기서 스크롤된다 — 그건 의도된 내부 스크롤이다.
+          */}
+          <div
+            className={cn(
+              'sticky top-12 max-h-[calc(100vh-3rem)] space-y-1 overflow-y-auto py-4',
+              collapsed ? 'pr-2' : 'pr-4'
+            )}
           >
-            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
-          </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggle}
+              className={cn('mb-1', collapsed ? 'w-full' : 'ml-auto flex')}
+              aria-label={collapsed ? '사이드바 펼치기' : '사이드바 접기'}
+              title={collapsed ? '사이드바 펼치기' : '사이드바 접기'}
+            >
+              {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+            </Button>
 
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            // 상세 페이지(/admin/qa-router/{id})에서도 해당 메뉴를 켜둔다.
-            // 정확히 일치만 보면 하위 경로에서 하이라이트가 꺼져 위치를 잃는다.
-            const isActive =
-              pathname === item.href || pathname.startsWith(`${item.href}/`);
-            return (
-              <Link key={item.href} href={item.href} title={item.label}>
-                <Button
-                  variant={isActive ? 'secondary' : 'ghost'}
-                  className={cn(
-                    'w-full',
-                    isActive && 'font-semibold',
-                    collapsed
-                      ? 'justify-center px-0'
-                      : // 접지 않았을 때는 긴 이름을 자르지 않고 두 줄로 흘린다.
-                        // 폭을 늘리면 "지금 이름들"에만 맞는 값이 되어, 더 긴 메뉴가
-                        // 생길 때마다 다시 조정해야 한다.
-                        'h-auto min-h-9 justify-start whitespace-normal py-2 text-left'
-                  )}
-                >
-                  <Icon
-                    className={cn('h-4 w-4 shrink-0', !collapsed && 'mr-2')}
-                  />
-                  {!collapsed && <span className="min-w-0">{item.label}</span>}
-                </Button>
-              </Link>
-            );
-          })}
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              // 상세 페이지(/admin/qa-router/{id})에서도 해당 메뉴를 켜둔다.
+              // 정확히 일치만 보면 하위 경로에서 하이라이트가 꺼져 위치를 잃는다.
+              const isActive =
+                pathname === item.href || pathname.startsWith(`${item.href}/`);
+              return (
+                <Link key={item.href} href={item.href} title={item.label}>
+                  <Button
+                    variant={isActive ? 'secondary' : 'ghost'}
+                    className={cn(
+                      'w-full',
+                      isActive && 'font-semibold',
+                      collapsed
+                        ? 'justify-center px-0'
+                        : // 접지 않았을 때는 긴 이름을 자르지 않고 두 줄로 흘린다.
+                          // 폭을 늘리면 "지금 이름들"에만 맞는 값이 되어, 더 긴 메뉴가
+                          // 생길 때마다 다시 조정해야 한다.
+                          'h-auto min-h-9 justify-start whitespace-normal py-2 text-left'
+                    )}
+                  >
+                    <Icon
+                      className={cn('h-4 w-4 shrink-0', !collapsed && 'mr-2')}
+                    />
+                    {!collapsed && (
+                      <span className="min-w-0">{item.label}</span>
+                    )}
+                  </Button>
+                </Link>
+              );
+            })}
+          </div>
         </nav>
 
-        <main className="min-w-0 flex-1 overflow-auto p-6">{children}</main>
+        <main className="min-w-0 flex-1 p-6">{children}</main>
       </div>
     </div>
   );

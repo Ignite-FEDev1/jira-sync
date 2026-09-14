@@ -10,8 +10,8 @@
  *     (윈도를 쓰면 quiet hours 공백이 상한을 넘는 순간 티켓이 영구 유실된다)
  *   - 발송 직후 즉시 markSeen 한다. 그 사이에 죽으면 재발송되는데,
  *     중복 알림이 누락보다 낫다는 판단이다.
- *   - 처리 상한을 넘긴 건은 seen 에 남기지 않아 다음 tick 이 이어받고,
- *     넘겼다는 사실을 반드시 이력에 남긴다 (조용한 누락 금지).
+ *   - 발송 건수에 상한을 두지 않는다. 상한은 도배를 막지 못하고 늦추기만 하면서
+ *     안전하다는 착각을 준다. 대신 순차 발송으로 Slack 속도 제한만 지킨다.
  */
 
 import {
@@ -21,7 +21,19 @@ import {
   parseFixVersion,
   type FixVersionRule,
 } from './derive';
-import { judge, type JudgeResult } from './judge';
+import { CO_ASSIGNEE_FIELD, judge, type JudgeResult } from './judge';
+import {
+  collectPlanProgress,
+  threadTableFrom,
+  type ThreadStatus,
+} from './plan-tickets';
+import { resolveOutcomes } from './outcome';
+import {
+  findQaThread,
+  readThreadTable,
+  shouldLookForThread,
+  type SlackReader,
+} from './qa-thread';
 import {
   buildConfigChangedMessage,
   buildCycleHeader,
@@ -29,8 +41,10 @@ import {
   type ConfigDiffEntry,
   type ReassignOutcome,
 } from './message';
+import { tooSoon } from './status';
 import * as repo from './repository';
 import type {
+  DeployCycle,
   ActiveCycle,
   DerivedContext,
   DerivedMember,
@@ -81,6 +95,11 @@ export interface TickDeps {
   jira: JiraClient;
   confluence: ConfluenceClient;
   slack: SlackClient;
+  /**
+   * Slack 읽기. 발송용 슬랙과 토큰이 다르다 — 봇 토큰은 읽기 스코프가 없다.
+   * 없으면 스레드 관련 기능만 건너뛴다 (알림은 계속 나간다).
+   */
+  slackReader?: SlackReader;
   jiraBaseUrl: string;
   log?: Logger;
   now?: () => Date;
@@ -89,13 +108,14 @@ export interface TickDeps {
 export type TickOutcome =
   | { status: 'lease_held'; holder?: string }
   | { status: 'quiet_hours' }
+  /** 이 대상의 다음 확인 시각이 아직 안 됐다. */
+  | { status: 'too_soon' }
   | { status: 'not_started'; fixVersion: string; qaStartYmd: string }
   | { status: 'cycle_ended'; fixVersion: string }
   | {
       status: 'done';
       scanned: number;
       notified: number;
-      deferred: number;
       failed: number;
     }
   | { status: 'error'; message: string; consecutiveFails: number };
@@ -204,6 +224,60 @@ export async function deriveContext(
     }
   }
 
+  /*
+    채널 이름과 **발송 가능 여부**를 같이 본다.
+
+    전에는 이름만 챙기고 나머지를 버렸다. 그런데 이 한 번의 왕복이 이미
+    "이 채널로 보낼 수 있나" 를 말해 준다 — 채널이 있는지, 보관됐는지,
+    봇이 그 안에 있는지. 그걸 안 보다가 18시 마감 때 `not_in_channel` 로
+    처음 알게 됐다. 설정 화면의 형식 검사(`^C[A-Z0-9]{6,}$`)는 오타를
+    못 걸러 준다 — 형식이 맞는 없는 채널이 그대로 통과한다.
+
+    확인 못 한 경우(네트워크)는 문제로 치지 않는다. 멀쩡한 채널을
+    고장 났다고 하면 가짜 경보가 되고, 가짜 경보는 곧 무시된다.
+  */
+  const channelNames: Record<string, string> = {};
+  const channelProblems: string[] = [];
+  for (const id of new Set(
+    [cfg.slackChannelId, cfg.slackOpsChannelId].filter((v): v is string => !!v)
+  )) {
+    const info = await deps.slack.getChannelInfo(id);
+    if (info.name) channelNames[id] = info.name;
+    if (info.unreachable) continue;
+    if (!info.ok) {
+      /*
+        우리 쪽 권한 문제와 채널 문제를 갈라야 한다. 고칠 곳이 다르다.
+
+        실측: 봇 토큰에 `channels:read` 가 없어 conversations.info 가
+        `missing_scope` 로 막혀 있었고, **여태 한 번도 성공한 적이 없다.**
+        그래서 설정 화면에 `#fe1-tool-alert` 대신 `C0BVDJEJ19C` 가 떴다 —
+        아무도 몰랐다. 이것도 결과를 버리던 코드가 숨긴 고장이다.
+      */
+      const scopeIssue =
+        info.error === 'missing_scope' ||
+        info.error === 'invalid_auth' ||
+        info.error === 'not_authed';
+      channelProblems.push(
+        scopeIssue
+          ? `채널 상태를 확인할 권한이 없습니다 (봇에 channels:read 필요) · ${info.error}`
+          : info.error === 'channel_not_found'
+            ? `${id} · 그런 채널이 없습니다 (ID 오타이거나 삭제됨)`
+            : `${id} · ${info.error}`
+      );
+    } else if (info.isArchived) {
+      channelProblems.push(`#${info.name} · 보관된 채널이라 발송할 수 없습니다`);
+    } else if (!info.isMember) {
+      channelProblems.push(
+        `#${info.name} · 봇이 이 채널에 없습니다. 초대해 주세요`
+      );
+    }
+  }
+  await repo.recordSideEffect(
+    cfg.id,
+    'channel',
+    channelProblems.length > 0 ? channelProblems.join(' · ') : null
+  );
+
   return {
     ctx: {
       projectKey,
@@ -212,6 +286,7 @@ export async function deriveContext(
       members,
       fixVersionRule: rule?.display ?? null,
       fixVersionPattern: rule?.pattern ?? null,
+      channelNames,
       derivedAt: (deps.now?.() ?? new Date()).toISOString(),
     },
     fixVersion: d.fixVersions[0],
@@ -283,6 +358,141 @@ export function parseSchedule(body: string, year: number) {
   };
 }
 
+/**
+ * 배포대장에서 정기배포 차수를 수집한다.
+ *
+ * adhoc·hotfix 는 뺀다. 김가빈(트리아지)을 거친 KQ Bug 1,447건 중
+ * adhoc 3건 + hotfix 18건(1.4%)뿐이라 목록에 넣으면 배정 0건인 행만 쌓인다.
+ * "정기"를 화이트리스트로 잡지 않는 이유는 제목 표기가 (정기)·(월)·(표기 없음)
+ * 으로 일정하지 않아서다 — 제외 목록이 실제 데이터에 맞다.
+ *
+ * 현재 차수보다 오래된 것은 담지 않는다. 지난 차수는 배포대장이 원본이고,
+ * 어드민이 복제하면 두 곳이 어긋난다.
+ */
+/**
+ * 기획티켓 진행을 채우는 시각(KST). 하루 두 번이다.
+ *
+ * 왜 두 번인가:
+ *   QA 팀이 결과를 늘 근무시간에 공유하지 않는다 — 19시·20시에 올리는 날이
+ *   있다. 마감 직전(17시) 한 번만 읽으면 그 몫이 **다음날 17시까지** 반영이
+ *   안 되고, 그 사이 09시 아침 알림과 화면이 하루 지난 값을 말한다.
+ *
+ * 왜 18시가 아니라 17시인가:
+ *   동작 창이 `9 ≤ hour < 18` 이라 **18시에는 tick 자체가 돌지 않는다**
+ *   (quiet_hours.endHour = 18). 18시 마감 요약은 pg_cron 이 따로 쏘는 것이라
+ *   tick 과 다른 트랙이다. 그래서 "마감 직전" 은 17시대가 최선이다.
+ *
+ * 09시:
+ *   창이 열리자마자 한 번. 전날 퇴근 후(17~24시) 올라온 공유를 여기서 걷는다.
+ */
+/**
+ * 알림을 막지 않는 부수 작업을 돌린다. **실패해도 던지지 않고, 반드시 남긴다.**
+ *
+ * 왜 함수로 묶나:
+ *   tick 에는 이런 작업이 셋 있다 — 차수 목록 수집 · 기획티켓 진행 수집 ·
+ *   판정 결과 확인. 셋 다 실패해도 티켓 라우팅은 계속돼야 하므로 던지면
+ *   안 된다. 그런데 그 catch 들이 `log()` 만 하고 끝나서, 실패가 GitHub
+ *   Actions 콘솔 밖으로 나가지 않았다.
+ *
+ *   실측(2026-09-11): 화면이 `09-10 13:26 기준` 에서 멈춰 있었는데 그게
+ *   "아직 걷을 때가 아니다" 인지 "걷다 실패했다" 인지 구분할 수 없었다.
+ *
+ *   원인은 catch 하나가 **두 결정을 같이** 내린 것이다:
+ *     흐름 제어 — 던질까 말까  (부수 작업이니 "안 던진다" 가 맞다)
+ *     관측     — 남길까 말까  (남겨야 한다)
+ *   "안 던진다" 를 고르는 순간 "남기지도 않는다" 가 딸려 왔다.
+ *
+ *   여기서 흐름 제어는 이 함수가 정하고(절대 안 던진다) 관측은 자동으로
+ *   따라온다. 부르는 쪽이 잊을 자리가 없어진다.
+ *
+ * 성공도 남긴다 — 실패만 남기면 "지금 고장" 과 "예전에 고장났었다" 를
+ * 구분할 수 없다.
+ */
+async function runAside(
+  configId: string,
+  key: string,
+  log: Logger,
+  label: string,
+  fn: () => Promise<void>
+): Promise<void> {
+  try {
+    await fn();
+    await repo.recordSideEffect(configId, key, null);
+  } catch (e) {
+    const message = (e as Error).message;
+    log(`${label} 실패 (알림은 계속): ${message}`);
+    await repo.recordSideEffect(configId, key, message);
+  }
+}
+
+export const PLAN_HOURS_KST = [9, 17] as const;
+
+export async function collectCycles(
+  cfg: QaRouterConfig,
+  // Slack 을 쓰지 않는다. 화면의 "다시 읽기" 가 알림 경로 없이 부를 수 있게
+  // 필요한 것만 받는다 — 확인하려고 누른 버튼이 채널에 글을 쓰면 안 된다.
+  deps: Pick<TickDeps, 'jira' | 'confluence' | 'log'>,
+  opts: { sinceYmd: string }
+): Promise<DeployCycle[]> {
+  if (!cfg.confluenceDeployRootId) return [];
+
+  // Jira 버전은 한 번만 받아서 대조한다 (418개 중 release_ 는 61개).
+  let versionNames = new Set<string>();
+  try {
+    const projectKey = await deps.jira.resolveProjectKey(
+      // 파생값이 없을 수도 있으니 필터에서 다시 읽지 않고 프로젝트 키를 직접 쓴다.
+      (await deps.jira.getFilter(cfg.jiraFilterId)).jql.match(
+        /project\s*=\s*"?([\w-]+)"?/i
+      )?.[1] ?? ''
+    );
+    versionNames = new Set(
+      (await deps.jira.getProjectVersions(projectKey)).map((v) => v.name)
+    );
+  } catch (e) {
+    // 버전 조회가 실패해도 차수 목록 자체는 만들 수 있다.
+    deps.log?.(`Jira 버전 목록 조회 실패: ${(e as Error).message}`);
+  }
+
+  const out: DeployCycle[] = [];
+  const months = await deps.confluence.getChildren(cfg.confluenceDeployRootId);
+  for (const mo of months) {
+    const kids = await deps.confluence.getChildren(mo.id);
+    for (const kid of kids) {
+      if (/\((adhoc|hotfix)\)/i.test(kid.title)) continue;
+      const dm = kid.title.match(/(\d{4})-(\d{2})-(\d{2})/);
+      if (!dm) continue;
+      const deployYmd = `${dm[1]}-${dm[2]}-${dm[3]}`;
+      if (deployYmd < opts.sinceYmd) continue;
+
+      const fixVersion = `release_${dm[1]}${dm[2]}${dm[3]}`;
+      let schedule: ReturnType<typeof parseSchedule> | null = null;
+      try {
+        schedule = parseSchedule(
+          await deps.confluence.getPageBody(kid.id),
+          Number(dm[1])
+        );
+      } catch (e) {
+        // 페이지가 아직 비어 있으면 일정이 없다 — 차수는 그대로 담는다.
+        deps.log?.(`${deployYmd} 일정 파싱 실패: ${(e as Error).message}`);
+      }
+
+      out.push({
+        deployYmd,
+        fixVersion,
+        cycleLabel: `정기배포 ${dm[1].slice(2)}${dm[2]}${dm[3]}`,
+        qaStartYmd: schedule?.qaStartYmd ?? null,
+        qaEndYmd: schedule?.qaEndYmd ?? null,
+        prodYmd: schedule?.prodYmd ?? deployYmd,
+        deployPageId: kid.id,
+        deployPageTitle: kid.title,
+        jiraVersionExists: versionNames.has(fixVersion),
+        collectedAt: new Date().toISOString(),
+      });
+    }
+  }
+  return out.sort((a, b) => b.deployYmd.localeCompare(a.deployYmd));
+}
+
 /** 배포대장 트리에서 이 차수의 배포일과 일치하는 페이지를 찾아 스케줄을 읽는다. */
 async function resolveSchedule(
   cfg: QaRouterConfig,
@@ -352,6 +562,36 @@ export async function runTick(
       return { status: 'quiet_hours' };
     }
 
+    /*
+      이 대상의 차례가 아직 아니면 건너뛴다.
+
+      finishOk 를 부르지 않는다 — lastPollAt 을 갱신하면 주기가 영영 다시
+      시작돼 설정한 간격이 안 지켜진다.
+    */
+    // 리스는 아래 finally 가 푼다. 여기서 또 풀면 두 번 부르는 셈이다.
+    if (tooSoon(cfg, state.lastPollAt, now())) return { status: 'too_soon' };
+
+    // ── 차수 목록 (하루 1회) ──
+    // 배포대장은 하루에 몇 번씩 바뀌는 문서가 아니다. 매 tick 마다 트리를 훑으면
+    // 월 폴더 6개 × 자식 조회 + 페이지 본문까지 읽어 10분마다 수십 번 호출이 된다.
+    // 실패해도 tick 본체(알림)를 막지 않는다 — 목록은 부가 정보다.
+    await runAside(cfg.id, 'cycles', log, '차수 목록 수집', async () => {
+      const lastAt = await repo.lastCycleCollectedAt(cfg.id);
+      const stale =
+        !lastAt ||
+        now().getTime() - new Date(lastAt).getTime() > 20 * 3_600_000;
+      if (stale) {
+        // 지난 차수는 담지 않는다. 지금 보는 차수부터가 의미 있는 범위다.
+        const sinceYmd =
+          state.activeCycle?.schedule?.qaStartYmd ??
+          parseFixVersion(state.activeCycle?.fixVersion ?? '')?.deployYmd ??
+          kstYmd(now());
+        const cycles = await collectCycles(cfg, deps, { sinceYmd });
+        await repo.upsertCycles(cfg.id, cycles);
+        log(`차수 목록 ${cycles.length}건 수집 (${sinceYmd} 이후)`);
+      }
+    });
+
     // ── 파생 (TTL 캐시) ──
     let derived = state.derived;
     let fixVersion = state.filterCache?.fixVersion ?? null;
@@ -397,6 +637,145 @@ export async function runTick(
       }
     }
     if (!derived || !fixVersion) throw new Error('파생 컨텍스트를 만들지 못함');
+
+    /*
+      ── 기획티켓 진행 (하루 두 번) ──
+
+      시간마다 돌리면 Jira 만 두드리고 그 사이 값을 보는 사람이 없다.
+      그래서 읽는 쪽 일정에 맞춰 09시·17시 두 슬롯에만 채운다
+      (PLAN_HOURS_KST 주석에 왜 그 두 시각인지 적어 뒀다).
+
+      슬롯마다 한 번씩이다. "오늘 채웠나" 로 판단하면 09시에 채운 뒤
+      17시 슬롯이 통째로 막힌다 — 마지막 수집이 **그 슬롯 시작 이후**인지를
+      본다.
+    */
+    await runAside(cfg.id, 'plan', log, '기획티켓 진행 수집', async () => {
+      const activeFv = state.activeCycle?.fixVersion;
+      const today = kstYmd(now());
+      const kstHour = Number(
+        new Intl.DateTimeFormat('en-GB', {
+          hour: '2-digit',
+          hour12: false,
+          timeZone: 'Asia/Seoul',
+        }).format(now())
+      );
+      // 오늘 이미 지나온 슬롯 중 가장 늦은 것.
+      // 설정값이 비어 있으면 기본 슬롯을 쓴다. 빈 배열이면 수집이 통째로
+      // 멎는데, 그건 "끄고 싶다" 가 아니라 값을 잘못 넣은 쪽에 가깝다.
+      const hours = cfg.planCollectHours?.length
+        ? [...cfg.planCollectHours].sort((a, b) => a - b)
+        : [...PLAN_HOURS_KST];
+      const dueHour = hours.reverse().find((h) => kstHour >= h);
+      if (
+        activeFv &&
+        derived.projectKey &&
+        derived.members.length > 0 &&
+        dueHour !== undefined
+      ) {
+        const cyc = await repo.getCycle(cfg.id, activeFv);
+        // KST 슬롯 시작 시각. 오프셋을 문자열에 박아 서버 타임존과 무관하게 만든다.
+        const slotStart = new Date(
+          `${today}T${String(dueHour).padStart(2, '0')}:00:00+09:00`
+        );
+        const doneThisSlot =
+          cyc?.planCollectedAt && new Date(cyc.planCollectedAt) >= slotStart;
+        if (cyc && !doneThisSlot) {
+          /*
+            QA 스레드를 먼저 찾는다. 스레드 제목에 배포일이 들어 있어
+            (`[9/14(월) 정기배포 QA]`) 그게 배포일 출처 1순위가 된다.
+            읽기 토큰이 없으면 이 블록만 건너뛰고 Jira 집계는 그대로 한다.
+          */
+          let threadTs = cyc.qaThreadTs ?? null;
+          let threadDeployYmd: string | null = null;
+          let threadTable: Map<string, ThreadStatus> | undefined;
+          let threadUnavailable: string | undefined =
+            'QA 스레드를 읽을 권한이 없습니다 (channels:history 필요)';
+
+          if (deps.slackReader) {
+            try {
+              if (
+                shouldLookForThread({ ...cyc, qaThreadTs: threadTs }, today)
+              ) {
+                const found = await findQaThread(
+                  deps.slackReader,
+                  cyc.deployYmd,
+                  { channelId: cfg.qaThreadChannelId }
+                );
+                if (found) {
+                  threadTs = found.ts;
+                  threadDeployYmd = found.deployYmd;
+                  log(`QA 스레드 발견 ${found.title} (ts ${found.ts})`);
+                }
+              }
+              if (threadTs) {
+                threadTable = await readThreadTable(
+                  deps.slackReader,
+                  threadTs,
+                  cfg.qaThreadChannelId
+                );
+                threadUnavailable = undefined;
+                log(`QA 스레드 대응상태 ${threadTable.size}건 읽음`);
+              }
+            } catch (e) {
+              // 스레드를 못 읽어도 Jira 집계는 낸다. 이유는 화면에 그대로 뜬다.
+              threadUnavailable = (e as Error).message;
+              log(
+                `QA 스레드 읽기 실패 (Jira 집계는 계속): ${threadUnavailable}`
+              );
+            }
+          }
+
+          /*
+            스레드를 못 읽었으면 마지막으로 안 값을 유지한다.
+            "못 읽음"을 0 건으로 저장하면 화면이 "아무것도 안 끝났다"로
+            그리고, 그 값이 18시 마감 요약까지 그대로 나간다.
+          */
+          const progress = await collectPlanProgress(deps.jira, {
+            projectKey: derived.projectKey,
+            fixVersion: activeFv,
+            memberIds: new Set(derived.members.map((m) => m.accountId)),
+            threadTable: threadTable ?? threadTableFrom(cyc.planProgress),
+            threadUnavailable,
+            planIssueTypeId: cfg.planIssueTypeId,
+            devIssueTypeId: cfg.devIssueTypeId,
+          });
+          await repo.savePlanProgress(cfg.id, cyc.deployYmd, progress, {
+            qaThreadTs: threadTs,
+            threadDeployYmd,
+          });
+          log(`기획티켓 진행 ${progress.threadDone}/${progress.total} 갱신`);
+        }
+      }
+    });
+
+    /*
+      ── 판정 결과 확인 (수집 슬롯과 같은 주기) ──
+
+      봇 조회는 `assignee = 트리아지` 라서, 누가 티켓을 가져가면 **검색에서
+      빠져** 그 뒤를 아무도 안 본다. 그래서 "확인 필요" 숫자가 영원히 줄지
+      않았다 — 실측 3건 전부 이미 타팀이 가져가 끝난 건이었다.
+
+      여기서 그 티켓들을 다시 읽어 누가 가져갔는지 적는다. 줄지 않는 숫자를
+      줄게 만드는 것이 목적이고, 덤으로 "타팀이라고 넘겼는데 우리 팀이
+      가져간" 놓친 건이 드러난다.
+
+      기획티켓 수집과 같은 슬롯에 둔다 — 둘 다 Jira 를 읽고, 둘 다 급하지 않다.
+    */
+    await runAside(cfg.id, 'outcome', log, '판정 결과 확인', async () => {
+      const activeFv = state.activeCycle?.fixVersion;
+      if (activeFv && derived.members.length > 0) {
+        const keys = await repo.unresolvedEventKeys(cfg.id, activeFv);
+        if (keys.length > 0) {
+          const results = await resolveOutcomes(deps.jira, keys, {
+            members: derived.members,
+            triageAccountId: cfg.triageAccountId,
+          });
+          await repo.saveOutcomes(cfg.id, activeFv, results);
+          const done = results.filter((r) => r.outcome !== 'pending').length;
+          log(`판정 결과 확인 ${results.length}건 · 해결 ${done}건`);
+        }
+      }
+    });
 
     // 캐시 히트로 deriveContext 를 건너뛴 경우 rule 이 비어 있다.
     // 저장된 패턴으로 복원해야 매 tick 같은 규칙으로 해석된다.
@@ -464,7 +843,13 @@ export async function runTick(
         fixVersion: parsedFv.raw,
         qaStartYmd: cycle.schedule?.qaStartYmd ?? null,
         qaEndYmd: cycle.schedule?.qaEndYmd ?? null,
-        prodYmd: cycle.schedule?.prodYmd ?? parsedFv.deployYmd,
+        /*
+          배포대장 본문이 아니라 차수 이름(release_YYYYMMDD)의 날짜를 쓴다.
+          실측 release_20260914 은 본문이 9/10 으로 남아 있었는데 제목·Jira
+          릴리스·QA 팀 스레드가 모두 9/14 였다. 스레드 머리글에 본문 값을
+          적으면 차수 이름과 어긋난 날짜가 채널에 박힌다.
+        */
+        prodYmd: parsedFv.deployYmd,
         deployPageUrl: cycle.deployPageId
           ? `${deps.jiraBaseUrl}/wiki/spaces/CPO/pages/${cycle.deployPageId}`
           : null,
@@ -508,12 +893,41 @@ export async function runTick(
       (excl ? ` AND status not in (${excl})` : '') +
       ` ORDER BY created DESC`;
 
+    /*
+      담당자·공동담당자·보고자를 함께 읽는다.
+      전에는 summary/labels/issuetype 만 읽어서, 판정이 "티켓에 이미 적힌
+      담당자"를 볼 수가 없었다 — 답이 티켓에 있는데 레이블로 추측만 했다.
+      보고자는 "QA 가 자기 티켓을 도로 가져간 상태"를 알아보는 데 쓴다.
+    */
     const found = await deps.jira.searchAll(jql, [
       'summary',
       'labels',
       'issuetype',
+      'assignee',
+      'reporter',
+      CO_ASSIGNEE_FIELD,
     ]);
     log(`${cfg.name} · 트리아지 배정 활성 티켓 ${found.length}건`);
+
+    /*
+      센 김에 남긴다. 전에는 로그로만 흘려보내서, 설정 화면이 "이 필터가
+      지금 무엇을 잡고 있나" 에 답하지 못했다 — 0건이면 알림이 한 통도
+      안 나가는데 화면은 멀쩡해 보였다.
+
+      실패해도 tick 을 멈추지 않는다. 이건 보여주기용 숫자고, 여기서
+      던지면 알림이 이 줄 때문에 막힌다.
+    */
+    try {
+      await repo.saveState(cfg.id, {
+        derived: {
+          ...derived,
+          triageActiveCount: found.length,
+          triageCountedAt: now().toISOString(),
+        },
+      });
+    } catch (e) {
+      log(`활성 건수 기록 실패 (알림은 계속): ${(e as Error).message}`);
+    }
 
     const fresh = found.filter((it) => {
       const s = state.seen[it.key];
@@ -522,27 +936,21 @@ export async function runTick(
       return s.c === 'notify_failed' && (s.failCount ?? 0) < 3;
     });
 
-    const targets = fresh.slice(0, cfg.maxTicketsPerTick);
-    const deferred = fresh.length - targets.length;
-    log(
-      `신규 ${fresh.length}건 · 처리 ${targets.length}건 · 이월 ${deferred}건`
-    );
-
-    if (deferred > 0) {
-      // 조용한 누락 금지 — 이월 사실을 이력에 남긴다.
-      await repo.appendSystemEvent(
-        cfg.id,
-        '처리 상한',
-        `상한 ${cfg.maxTicketsPerTick}건 도달 · ${deferred}건 다음 tick 으로 이월`
-      );
-    }
+    /*
+      발송 상한을 두지 않는다.
+      상한이 있으면 잘못된 필터로 수백 건이 잡혔을 때도 매 tick 마다 정해진
+      수만큼 계속 나가 결국 채널이 도배된다 — 문제를 늦출 뿐 막지 못하면서
+      "상한이 있으니 안전하다"는 잘못된 감각만 준다. 대신 아래 루프가 순차라서
+      Slack 의 채널당 초당 1건 권장치를 넘지 않는다.
+    */
+    log(`신규 ${fresh.length}건 · 전량 처리`);
 
     let notified = 0;
     let failed = 0;
     // 채널·토큰 문제는 루프를 다 돌아 이력을 남긴 뒤 tick 을 실패시킨다.
     let fatalSlackError: string | null = null;
 
-    for (const issue of targets) {
+    for (const issue of fresh) {
       try {
         const result = await judge(issue, deps.jira, {
           projectKey: derived.projectKey!,
@@ -550,7 +958,7 @@ export async function runTick(
           triageAccountId: cfg.triageAccountId,
           members: derived.members,
           selfAccountId: cfg.reassignMode === 'off' ? null : cfg.selfAccountId,
-          routingMap: await routingMapFor(cfg.id),
+          tiers: cfg.judgeTiers,
           onWarn: log,
         });
 
@@ -605,9 +1013,20 @@ export async function runTick(
           targetAccountId: result.accountId ?? null,
           targetName: result.name ?? null,
           reason: result.reason,
+          // 근거로 센 티켓. 화면이 목록으로 펼쳐 보여준다.
+          evidence: result.evidence ?? null,
+          /*
+            어느 단계가 답했나. judge() 가 늘 돌려주던 값인데 여기서 안 넘겨
+            버려지고 있었다 — 그래서 설정 화면이 단계 순서를 보여 주면서도
+            "이 단계가 실제로 일하나" 는 말하지 못했다.
+          */
+          via: result.via,
           notified: ok,
           reassigned: reassign?.kind === 'done',
           error: ok ? null : (res.error ?? '발송 실패'),
+          // 어느 차수의 알림인지. 컬럼만 만들어 두고 여기서 넘기지 않아
+          // 모든 기록이 null 로 쌓였고, 화면의 차수별 집계가 늘 비었다.
+          fixVersion,
         });
       } catch (e) {
         failed++;
@@ -621,6 +1040,7 @@ export async function runTick(
           targetName: null,
           reason: null,
           error: (e as Error).message,
+          fixVersion,
         });
       }
     }
@@ -636,7 +1056,6 @@ export async function runTick(
       status: 'done',
       scanned: found.length,
       notified,
-      deferred,
       failed,
     };
   } catch (e) {
@@ -663,16 +1082,6 @@ export async function runTick(
   } finally {
     await repo.releaseLease(cfg.id, holder).catch(() => {});
   }
-}
-
-async function routingMapFor(configId: string) {
-  const m = await repo.getRoutingMap(configId);
-  return new Map(
-    [...m].map(([k, v]) => [
-      k,
-      { accountId: v.accountId, name: v.name, count: v.count, total: v.total },
-    ])
-  );
 }
 
 /** 정상 종료 공통 경로. 조기 종료도 "이번 tick 성공"이라 카운터를 리셋한다. */
@@ -720,6 +1129,14 @@ export async function maybeReassign(
       : cfg.triageAccountId.slice(0, 12);
 
   if (!result.accountId) return null;
+  /*
+    타팀으로 판정한 건은 절대 재배정하지 않는다.
+    ask_other 는 "우리 팀 밖 사람 같다"는 **추정**이라, 그 이름으로 Jira 를
+    바꾸면 남의 팀 사람에게 티켓을 떠넘기는 셈이 된다. 지금은 reassignMode
+    가 'off' 라 도달하지 않지만, 나중에 켰을 때 조용히 새지 않도록 막아 둔다.
+  */
+  if (result.classification === 'ask_other')
+    return { kind: 'kept', triageName };
   if (cfg.reassignMode === 'off') return { kind: 'kept', triageName };
   if (
     cfg.reassignMode === 'self_only' &&

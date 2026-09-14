@@ -5,7 +5,15 @@
  * 순수 함수 — DB 접근 없이 config + state 만으로 판단한다.
  */
 
-import type { ActiveCycle, QaRouterConfig, QaRouterState } from './types';
+import type {
+  AlertRule,
+  AlertShift,
+  ActiveCycle,
+  DeployCycle,
+  DerivedContext,
+  QaRouterConfig,
+  QaRouterState,
+} from './types';
 
 export type HealthTone = 'ok' | 'warn' | 'bad' | 'off';
 
@@ -41,6 +49,23 @@ export function formatAgo(iso: string | null, now: Date): string {
   if (sec < 3600) return `${Math.floor(sec / 60)}분 전`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}시간 전`;
   return `${Math.floor(sec / 86400)}일 전`;
+}
+
+/**
+ * 상대 시간 옆에 붙일 절대 시각. "3시간 전"만으로는 언제인지 확인할 수 없다.
+ *
+ * 같은 날이면 시:분만, 다른 날이면 월/일을 붙인다.
+ */
+export function formatClock(iso: string | null, now: Date): string {
+  if (!iso) return '';
+  const t = new Date(iso);
+  const a = kstParts(t);
+  const b = kstParts(now);
+  const k = new Date(t.getTime() + KST_OFFSET_MS);
+  const hm = `${String(k.getUTCHours()).padStart(2, '0')}:${String(k.getUTCMinutes()).padStart(2, '0')}`;
+  const sameDay =
+    a.day === b.day && now.getTime() - t.getTime() < 24 * 3_600_000;
+  return sameDay ? hm : `${k.getUTCMonth() + 1}/${k.getUTCDate()} ${hm}`;
 }
 
 /** 다음 업무 시작까지 남은 표현. "내일 09:00" 처럼 사람이 읽을 형태. */
@@ -153,6 +178,114 @@ export function computeHealth({
 }
 
 /**
+ * 필터에서 읽어온 조건들을 한 문장으로 합친다.
+ *
+ * 프로젝트·이슈타입·제외상태를 각각 한 줄씩 보여 주면, 사람은 그걸 머릿속에서
+ * AND 로 조립해야 "이 티켓이 왜 안 잡혔나"에 답할 수 있다. 그 조립을 대신한다.
+ *
+ * 읽어온 값이 없으면 null 을 준다 — 화면이 "아직 안 읽었다"를 따로 말해야 한다.
+ */
+export function describeScope(derived: DerivedContext | null): string | null {
+  if (!derived?.projectKey) return null;
+  const what = derived.issueType ? `${derived.issueType} 이슈` : '모든 이슈';
+  const head = `${derived.projectKey} 프로젝트의 ${what}`;
+  if (derived.excludeStatuses.length === 0) {
+    return `${head}를 모두 확인합니다.`;
+  }
+  return `${head} 중 ${derived.excludeStatuses.join(', ')} 상태가 아닌 것을 확인합니다.`;
+}
+
+/**
+ * 차수가 준비 어디까지 왔는지.
+ *
+ * 차수는 두 단계로 준비된다.
+ *   ① 배포대장에 페이지가 생긴다               → 예정 (봇은 아직 모른다)
+ *   ② Jira 버전이 생기고 필터가 그걸 가리킨다   → 보는 중
+ * 사이에 "버전은 생겼는데 필터가 아직 이전 차수" 구간이 있고, 그때 사람이
+ * 필터를 바꿔야 넘어간다. 그 구간을 전환 대기로 드러낸다.
+ */
+export type CycleStage = 'watching' | 'pending_switch' | 'planned' | 'past';
+
+export function cycleStage(
+  cycle: DeployCycle,
+  activeFixVersion: string | null,
+  todayYmd: string
+): { stage: CycleStage; label: string; tone: HealthTone } {
+  if (cycle.fixVersion === activeFixVersion) {
+    // "보는 중"은 주체가 모호하고 옆 라벨(예정·전환 대기)과 성격이 어긋났다.
+    // 실제 동작은 이 차수 티켓을 찾아 담당자에게 알리는 것이다.
+    return { stage: 'watching', label: '알림 중', tone: 'ok' };
+  }
+  // QA 가 끝났고 지금 보는 차수도 아니면 지나간 것이다.
+  if (cycle.qaEndYmd && cycle.qaEndYmd < todayYmd) {
+    return { stage: 'past', label: '지난 차수', tone: 'off' };
+  }
+  if (!cycle.jiraVersionExists) {
+    return { stage: 'planned', label: '예정', tone: 'off' };
+  }
+  // 버전은 있는데 필터가 안 가리킨다 — 사람이 필터를 바꿔야 한다.
+  return { stage: 'pending_switch', label: '전환 대기', tone: 'warn' };
+}
+
+/**
+ * QA 기간을 오늘 기준으로 해석한다.
+ *
+ * 날짜 두 개(`2026-09-03 ~ 2026-09-09`)만 보여 주면 오늘이 며칠째인지,
+ * 며칠 남았는지를 사람이 세야 한다. 개요에서 가장 먼저 알고 싶은 것이 그것이다.
+ *
+ * 모든 날짜는 KST `YYYY-MM-DD` 문자열이라 사전순 비교가 곧 시간순 비교다.
+ */
+/**
+ * 배포일까지 남은 기간을 사람 말로.
+ *
+ * QA 기간 행에만 상대 시각("2일 전 종료")이 붙고 운영 배포일에는 없었다.
+ * 같은 층에 놓인 두 날짜인데 한쪽만 "언제인지" 를 말해 주면, 다른 쪽은
+ * 매번 오늘 날짜를 세어 봐야 한다.
+ */
+export function describeDeployWhen(
+  deployYmd: string,
+  todayYmd: string
+): string {
+  const d = Math.round(
+    (Date.parse(`${deployYmd}T00:00:00Z`) -
+      Date.parse(`${todayYmd}T00:00:00Z`)) /
+      86_400_000
+  );
+  if (d === 0) return '오늘';
+  if (d === 1) return '내일';
+  if (d === -1) return '어제';
+  return d > 0 ? `${d}일 뒤` : `${-d}일 전`;
+}
+
+export function describeQaProgress(
+  startYmd: string,
+  endYmd: string | null,
+  todayYmd: string
+): string {
+  const days = (from: string, to: string) =>
+    Math.round(
+      (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) /
+        86_400_000
+    );
+
+  if (todayYmd < startYmd) {
+    const d = days(todayYmd, startYmd);
+    return d === 1 ? '내일 시작' : `${d}일 뒤 시작`;
+  }
+  if (!endYmd) return `QA ${days(startYmd, todayYmd) + 1}일차`;
+  if (todayYmd > endYmd) {
+    const d = days(endYmd, todayYmd);
+    return d === 1 ? '어제 종료' : `${d}일 전 종료`;
+  }
+
+  const nth = days(startYmd, todayYmd) + 1;
+  const left = days(todayYmd, endYmd);
+  if (left === 0) return `QA ${nth}일차 · 오늘 마감`;
+  if (left === 1) return `QA ${nth}일차 · 내일 마감`;
+  return `QA ${nth}일차 · ${left}일 남음`;
+}
+
+/**
  * 배포대장에 다음 차수가 생겼는데 필터가 아직 안 바뀐 구간을 감지한다.
  *
  * 이때 봇은 이전 차수를 "정상적으로" 보고 있어서 초록불이다. 사람이 필터를
@@ -168,4 +301,283 @@ export function pendingCycleSwitch(cycle: ActiveCycle | null): string | null {
     return `배포대장은 ${cycle.schedule.prodYmd} · 필터는 ${versionYmd}`;
   }
   return null;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 일정 판정 — SQL(qa_router_milestone 등)과 같은 규칙
+// ─────────────────────────────────────────────────────────────
+//
+// 규칙이 SQL 과 여기 둘에 있다. 배치는 pg_cron 에서 SQL 로 돌고 화면은 TS 로
+// 그리기 때문인데, 어긋나면 "화면은 9/14 라는데 알림은 9/10 에 왔다"가 된다.
+// scripts/qa-router.test.mts 가 두 구현이 같은 답을 내는지 묶어 둔다.
+// (같은 방식의 선례: isWorkingWindow ↔ qa_router_in_window)
+
+/** 날짜를 말하는 출처. 신뢰 순서대로다. */
+export type ScheduleSource =
+  | 'thread'
+  | 'ledgerTitle'
+  | 'fixVersion'
+  | 'ledgerBody';
+
+export const SOURCE_LABEL: Record<ScheduleSource, string> = {
+  thread: 'QA 스레드',
+  ledgerTitle: '배포대장 제목',
+  fixVersion: 'Jira 릴리스',
+  ledgerBody: '배포대장 본문',
+};
+
+export interface ResolvedYmd {
+  ymd: string | null;
+  /** 이 값을 준 출처 */
+  source: ScheduleSource | null;
+  /**
+   * 1순위(QA 스레드)를 못 읽어 아래 순위로 정한 값인가.
+   * 화면에 "추정"이라고 적어야 하는 경우다.
+   */
+  estimated: boolean;
+  /** 값이 다른 나머지 출처. 배포대장이 어긋나 있다는 신호라 숨기지 않는다. */
+  others: { source: ScheduleSource; ymd: string }[];
+  /**
+   * 말해야 하는데 아직 값이 없는 출처.
+   *
+   * "추정"이라고만 적으면 무엇을 못 읽어서 추정인지 알 수 없다. QA 종료는
+   * 규칙상 **배포대장 종료 AND 스레드 종료 공유** 둘 다 만족해야 하는데,
+   * 한쪽만 보고 정한 값이라는 사실이 화면에 있어야 한다.
+   */
+  pending: ScheduleSource[];
+}
+
+/**
+ * 여럿 중 가장 늦은 날.
+ *
+ * **배포는 밀리기만 하고 당겨지지 않는다.** 그래서 값이 엇갈리면 늦은 쪽이
+ * 최신이다. 같은 날이면 신뢰 순서가 앞선 출처를 적는다.
+ */
+function latest(
+  cands: { source: ScheduleSource; ymd: string | null | undefined }[]
+): { source: ScheduleSource; ymd: string } | null {
+  let best: { source: ScheduleSource; ymd: string } | null = null;
+  for (const c of cands) {
+    if (!c.ymd) continue;
+    if (!best || c.ymd > best.ymd) best = { source: c.source, ymd: c.ymd };
+  }
+  return best;
+}
+
+/** fixVersion(release_YYYYMMDD)에 박힌 날짜. */
+export function fixVersionYmd(fixVersion: string): string | null {
+  const m = fixVersion.match(/(\d{4})(\d{2})(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+/**
+ * 운영 배포일.
+ *
+ * 신뢰 1·2위(QA 스레드 제목 · 배포대장 제목)끼리만 늦은 쪽을 고른다.
+ * 3위(fixVersion)와 4위(배포대장 본문)는 표시용이다 — 잘못 만들어진 버전
+ * 하나가 전체를 끌고 가면 안 된다.
+ */
+export function resolveDeployYmd(cycle: DeployCycle): ResolvedYmd {
+  const picked = latest([
+    { source: 'thread', ymd: cycle.threadDeployYmd },
+    { source: 'ledgerTitle', ymd: cycle.deployYmd },
+  ]);
+  const extra: { source: ScheduleSource; ymd: string | null }[] = [
+    { source: 'fixVersion', ymd: fixVersionYmd(cycle.fixVersion) },
+    { source: 'ledgerBody', ymd: cycle.prodYmd },
+  ];
+  const others = extra.filter(
+    (o): o is { source: ScheduleSource; ymd: string } =>
+      !!o.ymd && o.ymd !== picked?.ymd
+  );
+  return {
+    ymd: picked?.ymd ?? null,
+    source: picked?.source ?? null,
+    estimated: !cycle.threadDeployYmd,
+    others,
+    pending: cycle.threadDeployYmd ? [] : ['thread'],
+  };
+}
+
+/**
+ * QA 종료일.
+ *
+ * 종료는 배포대장 일정과 QA 스레드 공유가 **둘 다** 만족해야 하므로
+ * 늦은 쪽이 답이다. 대장 9/10 · 스레드 9/13 이면 9/13.
+ */
+export function resolveQaEndYmd(cycle: DeployCycle): ResolvedYmd {
+  const picked = latest([
+    { source: 'thread', ymd: cycle.threadQaEndYmd },
+    { source: 'ledgerBody', ymd: cycle.qaEndYmd },
+  ]);
+  return {
+    ymd: picked?.ymd ?? null,
+    source: picked?.source ?? null,
+    estimated: !cycle.threadQaEndYmd,
+    others: [],
+    pending: cycle.threadQaEndYmd ? [] : ['thread'],
+  };
+}
+
+function shiftDays(ymd: string, days: number): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function isWeekend(ymd: string): boolean {
+  const dow = new Date(`${ymd}T00:00:00Z`).getUTCDay();
+  return dow === 0 || dow === 6;
+}
+
+/** 이 날 이전의 마지막 근무일. 미리 알려야 하는 것에 쓴다. */
+export function prevWorkday(ymd: string): string {
+  let d = shiftDays(ymd, -1);
+  while (isWeekend(d)) d = shiftDays(d, -1);
+  return d;
+}
+
+/** 이 날 또는 그 뒤 첫 근무일. 이미 일어난 일을 알릴 때 쓴다. */
+export function nextWorkday(ymd: string): string {
+  let d = ymd;
+  while (isWeekend(d)) d = shiftDays(d, 1);
+  return d;
+}
+
+/**
+ * 규칙 하나가 실제로 알리는 날. SQL 의 qa_router_rule_day 와 같다.
+ *
+ * **보정은 주말일 때만 움직인다.** 위 prevWorkday 를 그대로 쓰면 안 된다 —
+ * 그건 "이 날 이전의 마지막 근무일" 이라 평일에도 하루를 뺀다. 그러면
+ * 오프셋과 의미가 겹쳐서, `-3일` 을 넣은 규칙이 6일 전에 울린다.
+ */
+export function ruleDay(
+  anchorYmd: string | null,
+  offset: number,
+  shift: AlertShift
+): string | null {
+  if (!anchorYmd) return null;
+  const d = shiftDays(anchorYmd, offset);
+  if (!isWeekend(d)) return d;
+  if (shift === 'next_workday') return nextWorkday(d);
+  if (shift === 'prev_workday') return prevWorkday(d);
+  return d;
+}
+
+/**
+ * 오늘 알릴 문구. SQL 의 qa_router_milestone_from 과 같아야 한다.
+ *
+ * **위에서부터 보고 처음 맞는 것 하나만** 낸다. 하루에 둘이 겹치는 일이
+ * 실제로 있다 — 운영 배포일과 QA 종료 다음 근무일이 같은 날일 수 있다.
+ * 둘 다 보내면 같은 차수 이야기가 두 번 오므로 순서로 우선순위를 정한다.
+ */
+export function milestoneFrom(
+  rules: readonly AlertRule[],
+  s: {
+    qaStartYmd: string | null;
+    qaEndYmd: string | null;
+    prodYmd: string | null;
+  },
+  todayYmd: string
+): string | null {
+  const anchorOf = (a: AlertRule['anchor']) =>
+    a === 'qa_start' ? s.qaStartYmd : a === 'qa_end' ? s.qaEndYmd : s.prodYmd;
+
+  for (const r of rules) {
+    if (r.enabled === false) continue;
+    const anchor = anchorOf(r.anchor);
+    if (ruleDay(anchor, r.offset, r.shift) !== todayYmd) continue;
+    const days = Math.round(
+      (Date.parse(`${anchor}T00:00:00Z`) -
+        Date.parse(`${todayYmd}T00:00:00Z`)) /
+        86_400_000
+    );
+    // 1일이면 '1일 뒤' 가 아니라 '내일' 이다. 사람이 그렇게 말한다.
+    return days === 1
+      ? r.label.replace('{days}일 뒤', '내일')
+      : r.label.replace('{days}', String(days));
+  }
+  return null;
+}
+
+/**
+ * 아침 알림이 이 날 무엇을 말하는가. SQL 의 qa_router_milestone 과 같다.
+ *
+ * 규칙 기본값(DEFAULT_ALERT_RULES)으로 돌린 것과 같은 답을 낸다 —
+ * 테스트가 둘을 맞대어 고정한다. 규칙을 쓰는 쪽은 milestoneFrom 이다.
+ */
+export function milestoneOn(
+  s: {
+    qaStartYmd: string | null;
+    qaEndYmd: string | null;
+    prodYmd: string | null;
+  },
+  todayYmd: string
+): string | null {
+  if (s.prodYmd && s.prodYmd === todayYmd) return '오늘 운영 배포';
+  if (s.qaStartYmd && s.qaStartYmd === todayYmd) return '오늘 QA 시작';
+  if (s.qaEndYmd && nextWorkday(s.qaEndYmd) === todayYmd) return 'QA 종료';
+  if (s.prodYmd && prevWorkday(s.prodYmd) === todayYmd) {
+    const gap =
+      (Date.parse(`${s.prodYmd}T00:00:00Z`) -
+        Date.parse(`${todayYmd}T00:00:00Z`)) /
+      86_400_000;
+    return gap === 1 ? '내일 운영 배포' : `${gap}일 뒤 운영 배포`;
+  }
+  return null;
+}
+
+/** 그 분기점을 아침 알림이 실제로 말하는 날. */
+export function alertYmd(kind: 'qaEnd' | 'deploy', ymd: string): string {
+  return kind === 'qaEnd' ? nextWorkday(ymd) : ymd;
+}
+
+/**
+ * 설정한 수집 슬롯이 지났는데 아직 안 걷혔나. 밀렸으면 그 시각을 돌려준다.
+ *
+ * "마지막 수집 1일 전" 만으로는 그게 정상인지 고장인지 모른다. 09시·17시에
+ * 걷기로 해 놓고 어제 13:26 이 마지막이면 **오늘 09시 슬롯을 놓친 것**이다.
+ * 실측으로 그 상태를 발견했는데 화면은 아무 말도 안 하고 있었다.
+ *
+ * tick.ts 가 "오늘 지나온 슬롯 중 가장 늦은 것" 을 고르는 규칙과 같아야
+ * 한다 — 다르면 화면이 밀렸다고 하는데 배치는 멀쩡하다고 여긴다.
+ */
+export function overdueSlot(
+  hours: number[],
+  collectedAt: string | null | undefined,
+  now: Date
+): number | null {
+  if (!hours.length) return null;
+  const kst = new Date(now.getTime() + 9 * 3_600_000);
+  const today = kst.toISOString().slice(0, 10);
+  const hour = kst.getUTCHours();
+
+  // 오늘 이미 지나온 슬롯 중 가장 늦은 것. tick 이 고르는 것과 같은 규칙이다.
+  const due = [...hours].sort((a, b) => a - b).reverse().find((h) => hour >= h);
+  if (due === undefined) return null;
+
+  const slotStart = Date.parse(
+    `${today}T${String(due).padStart(2, '0')}:00:00+09:00`
+  );
+  if (!collectedAt) return due;
+  return Date.parse(collectedAt) < slotStart ? due : null;
+}
+
+/**
+ * 아직 다음 확인 시각이 안 됐나.
+ *
+ * 배치는 한 번 돌 때 대상 전부를 훑는다. 그래서 **대상마다 다른 주기**를
+ * 주려면 루프 간격이 아니라 여기서 걸러야 한다 — 마지막 확인으로부터
+ * `tickIntervalSeconds` 가 안 지났으면 이번 바퀴는 건너뛴다.
+ *
+ * 한 번도 안 돌았으면(lastPollAt 없음) 바로 돈다.
+ */
+export function tooSoon(
+  cfg: QaRouterConfig,
+  lastPollAt: string | null,
+  now: Date
+): boolean {
+  if (!lastPollAt) return false;
+  const next = Date.parse(lastPollAt) + cfg.tickIntervalSeconds * 1000;
+  return now.getTime() < next;
 }

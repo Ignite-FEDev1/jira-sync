@@ -8,6 +8,7 @@
  */
 
 import type { JiraIssue, JiraPort } from './judge';
+import type { SlackMessage, SlackReader } from './qa-thread';
 
 const NET_RETRY_DELAYS_MS = [3_000, 9_000, 20_000];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -53,6 +54,21 @@ export interface JiraVersion {
   archived?: boolean;
 }
 
+/**
+ * 프로젝트가 쓰는 이슈 타입.
+ *
+ * 설정에 저장하는 건 여전히 `id` 다 — 이름은 로케일과 관리자 손에 따라
+ * 바뀐다. 하지만 **사람에게 10001 을 물어보면 안 된다.** 이 목록이 있어야
+ * 화면이 "스토리" 라고 묻고 `10001` 을 저장할 수 있다.
+ */
+export interface JiraIssueType {
+  id: string;
+  name: string;
+  /** 하위 작업 타입은 고를 이유가 없어 화면이 걸러 낸다. */
+  subtask?: boolean;
+  description?: string;
+}
+
 export interface JiraUser {
   accountId: string;
   displayName?: string;
@@ -68,6 +84,8 @@ export interface JiraClient extends JiraPort {
    */
   resolveProjectKey(identifier: string): Promise<string>;
   getProjectVersions(projectKey: string): Promise<JiraVersion[]>;
+  /** 이 프로젝트에서 고를 수 있는 이슈 타입. 설정 화면이 이름으로 묻는다. */
+  getProjectIssueTypes(projectKey: string): Promise<JiraIssueType[]>;
   getUser(accountId: string): Promise<JiraUser>;
   /** 담당자 + 공동담당자를 함께 바꾼다. */
   reassign(issueKey: string, accountId: string): Promise<void>;
@@ -146,6 +164,18 @@ export function createJiraClient(opts: {
       call<JiraVersion[]>(
         `/project/${encodeURIComponent(projectKey)}/versions`
       ),
+
+    /*
+      `/project/{key}` 한 번이면 issueTypes 가 같이 온다. createmeta 는
+      필드까지 다 끌고 와 응답이 수십 배 크고, 여기서 필요한 건 id 와
+      이름뿐이다.
+    */
+    getProjectIssueTypes: async (projectKey) =>
+      (
+        await call<{ issueTypes?: JiraIssueType[] }>(
+          `/project/${encodeURIComponent(projectKey)}`
+        )
+      ).issueTypes ?? [],
 
     getUser: (accountId) =>
       call<JiraUser>(`/user?accountId=${encodeURIComponent(accountId)}`),
@@ -251,6 +281,21 @@ export interface SlackPostResult {
   error?: string;
 }
 
+/**
+ * 채널 상태. 발송이 성공할지를 미리 말해 준다.
+ *
+ * `unreachable` 은 "확인 못 했다" 다 — "채널이 잘못됐다" 와 구분해야 한다.
+ * Slack 이 잠깐 안 될 때 멀쩡한 채널을 고장 났다고 하면 가짜 경보가 된다.
+ */
+export interface ChannelInfo {
+  ok: boolean;
+  name?: string | null;
+  isMember?: boolean;
+  isArchived?: boolean;
+  unreachable?: boolean;
+  error?: string;
+}
+
 export interface SlackClient {
   post(
     channel: string,
@@ -260,6 +305,11 @@ export interface SlackClient {
   ): Promise<SlackPostResult>;
   /** 페이지네이션 필수 — 한 페이지만 읽으면 뒤쪽 인원을 놓친다 (실측 379명/2페이지) */
   listUsers(): Promise<SlackMemberRaw[]>;
+  /**
+   * 채널 ID → 이름. 어드민 화면이 ID 대신 사람이 읽는 이름을 보여주기 위한 것 뿐이라
+   * 실패해도 알림 발송에 영향이 없다 — 그래서 throw 하지 않고 null 을 준다.
+   */
+  getChannelInfo(channelId: string): Promise<ChannelInfo>;
 }
 
 export function createSlackClient(opts: {
@@ -320,5 +370,113 @@ export function createSlackClient(opts: {
       } while (cursor && pages < 10);
       return out;
     },
+
+    /*
+      채널 상태. 전에는 이름만 빼고 나머지를 버렸다.
+
+      conversations.info 는 **발송이 성공할지**를 미리 알려 주는 값들을 이미
+      같이 준다 — 채널이 있는지(`channel_not_found`), 보관됐는지
+      (`is_archived`), 봇이 그 안에 있는지(`is_member`). 그걸 안 보고 있다가
+      18시 마감 때 `not_in_channel` 로 처음 알게 됐다.
+      같은 왕복에서 오는 답을 버리지 않는다.
+    */
+    async getChannelInfo(channelId) {
+      try {
+        const r = await fetchRetry(
+          `https://slack.com/api/conversations.info?channel=${encodeURIComponent(channelId)}`,
+          { headers },
+          log
+        );
+        const j = (await r.json()) as {
+          ok: boolean;
+          error?: string;
+          channel?: {
+            name?: string;
+            is_member?: boolean;
+            is_archived?: boolean;
+          };
+        };
+        if (!j.ok) {
+          log(`Slack conversations.info(${channelId}): ${j.error}`);
+          return { ok: false, error: j.error ?? 'unknown' };
+        }
+        return {
+          ok: true,
+          name: j.channel?.name ?? null,
+          isMember: j.channel?.is_member ?? false,
+          isArchived: j.channel?.is_archived ?? false,
+        };
+      } catch (e) {
+        // 네트워크 실패는 "채널이 잘못됐다" 가 아니다. 확인 못 했다고만 한다.
+        log(`Slack conversations.info(${channelId}): ${(e as Error).message}`);
+        return { ok: false, unreachable: true, error: (e as Error).message };
+      }
+    },
+  };
+}
+
+/**
+ * Slack 읽기 전용 클라이언트.
+ *
+ * 발송용 `createSlackClient` 와 토큰을 나눠 쓴다. 발송은 봇 토큰(`xoxb-`)으로
+ * 되지만 읽기는 안 된다 — 실측으로 봇 토큰에 붙은 스코프가
+ * `incoming-webhook, chat:write, usergroups:read, users:read` 뿐이고
+ * `conversations.history` 는 `channels:history` 를 요구한다.
+ * (스코프를 붙여도 봇은 채널 멤버여야 히스토리를 읽는다.)
+ *
+ * ── [배포 전 전환] ──────────────────────────────────────────────────────
+ * 지금은 개인 사용자 토큰(`xoxp-`)을 받는다. 배포 직전에 할 일:
+ *   1. 봇(FE1 Tool Alert)을 `#cpo-qa` 에 초대
+ *   2. 봇 앱에 `channels:history` 스코프 추가 후 재설치
+ *   3. `SLACK_READ_TOKEN` 값을 봇 토큰으로 교체
+ * **이 함수는 고칠 것이 없다.** 토큰 종류를 가리지 않는다.
+ * 같은 표시가 붙은 곳을 다 보려면: `rg "배포 전 전환"`
+ * ──────────────────────────────────────────────────────────────────────
+ */
+export function createSlackReader(opts: {
+  token: string;
+  log?: Logger;
+}): SlackReader {
+  const log = opts.log ?? (() => {});
+  const headers = { Authorization: `Bearer ${opts.token}` };
+
+  async function call(
+    path: string,
+    params: Record<string, string>
+  ): Promise<SlackMessage[]> {
+    const qs = new URLSearchParams(params).toString();
+    const r = await fetchRetry(
+      `https://slack.com/api/${path}?${qs}`,
+      { headers },
+      log
+    );
+    const j = (await r.json()) as {
+      ok: boolean;
+      error?: string;
+      needed?: string;
+      messages?: { ts: string; text?: string }[];
+    };
+    if (!j.ok) {
+      /*
+        스코프 부족은 설정 문제라 원인을 그대로 드러낸다. 조용히 빈 배열을
+        돌려주면 "스레드를 못 찾았다"로 읽혀서 며칠 뒤에야 알게 된다.
+      */
+      throw new Error(
+        `Slack ${path} 실패: ${j.error}${j.needed ? ` (필요 스코프 ${j.needed})` : ''}`
+      );
+    }
+    // 원본을 통째로 들고 간다 — 표가 블록·첨부에 실려 오는 경우가 있다.
+    return (j.messages ?? []).map((m) => ({
+      ts: m.ts,
+      text: m.text,
+      raw: m,
+    }));
+  }
+
+  return {
+    history: (channel, limit) =>
+      call('conversations.history', { channel, limit: String(limit) }),
+    replies: (channel, ts) =>
+      call('conversations.replies', { channel, ts, limit: '200' }),
   };
 }
