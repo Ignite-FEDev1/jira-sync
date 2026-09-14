@@ -99,6 +99,21 @@ export default function QaRouterSettingsPage() {
   const [saving, setSaving] = useState(false);
   const t = useRouterTarget(id, { autoRefresh: !editing });
 
+  /*
+    ── 훅은 early return **위**에 둔다 ──
+
+    저장된 필터로 추론을 한 번 받아, ①을 편집하지 않아도 ②가 "이 단계가
+    여기서 먹히나" 를 말하게 한다. 편집을 열어야만 알 수 있으면, 문제가
+    있어도 안 열어 본 사람은 영영 모른다.
+
+    설정을 아직 못 읽었으면 빈 주소를 넘긴다 — 훅이 형태를 먼저 보고
+    아무것도 안 한다. 조건부 호출은 React 규칙 위반이다.
+  */
+  const savedFilterUrl = t.config
+    ? `${jiraBaseUrl(t.config.jiraInstance)}/issues?filter=${t.config.jiraFilterId}`
+    : '';
+  const savedCheck = useFilterCheck(id, savedFilterUrl);
+
   if (t.loading) return <DetailSkeleton />;
   if (!t.config) {
     return (
@@ -246,6 +261,10 @@ export default function QaRouterSettingsPage() {
         prodYmd: activeCycle.prodYmd,
       }
     : null;
+
+  const deadTiers = (savedCheck.data?.infer?.fits ?? []).filter(
+    (f) => f.verdict === 'dead' && config.judgeTiers.includes(f.tier)
+  );
 
   const close = () => setEditing(null);
 
@@ -436,6 +455,15 @@ export default function QaRouterSettingsPage() {
             <span className="flex flex-wrap items-baseline gap-x-1.5 text-[12.5px]">
               <span>{config.judgeTiers.length}번 물어서 찾습니다</span>
               {/*
+                죽은 단계가 있으면 접힌 채로도 보여야 한다. 펴야만 보이면
+                안 펴 본 사람은 영영 모른다.
+              */}
+              {deadTiers.length > 0 && (
+                <span className="text-amber-700 dark:text-amber-400">
+                  {deadTiers.length}단계는 이 프로젝트에서 안 돕니다
+                </span>
+              )}
+              {/*
                 단계별 적중 건수는 `via` 기록이 쌓여야 나온다. 그 전에는
                 이 단계의 건강을 실제로 말해 주는 값(판정 불가)을 쓴다.
               */}
@@ -460,6 +488,7 @@ export default function QaRouterSettingsPage() {
                 Object.entries(tierStats).map(([k, v]) => [k, v.count])
               )
             }
+            fits={savedCheck.data?.infer?.fits}
           />
         </Stage>
 
@@ -578,6 +607,7 @@ export default function QaRouterSettingsPage() {
               id={id}
               config={config}
               knownNames={names}
+              suggest={savedCheck.data?.infer}
               saving={saving}
               onCancel={close}
               onSave={patch}
@@ -1148,6 +1178,7 @@ function IssueTypePicker({
   types,
   error,
   onChange,
+  suggested,
 }: {
   label: string;
   hint: string;
@@ -1155,10 +1186,27 @@ function IssueTypePicker({
   types: IssueTypeOption[] | null;
   error: string | null;
   onChange: (id: string, name: string) => void;
+  /**
+   * 필터 표본이 찾아낸 후보.
+   *
+   * 목록에서 위로 올리고 "추천" 을 붙인다. 고르는 일 자체를 없애지는
+   * 않는다 — 표본 8건 중 7건이 에픽으로 이어졌다는 건 **1건은 아니라는**
+   * 뜻이고, 어느 쪽이 맞는지는 사람이 안다.
+   */
+  suggested?: { id: string; count: number }[];
 }) {
-  // 최근에 쓰는 타입이 위로. 안 쓰는 타입을 먼저 보여 줄 이유가 없다.
+  /*
+    순서: 추천 → 최근 많이 쓰는 것 → 나머지.
+    추천이 맨 위인 이유는 그게 **이 판정 경로에서 실제로 나온 타입**이라서다.
+    "최근 많이 쓰임" 은 프로젝트 전체 이야기지 이 경로의 이야기가 아니다.
+  */
+  const rank = new Map((suggested ?? []).map((s) => [s.id, s.count]));
   const sorted = types
-    ? [...types].sort((a, b) => b.recentCount - a.recentCount)
+    ? [...types].sort(
+        (a, b) =>
+          (rank.get(b.id) ?? -1) - (rank.get(a.id) ?? -1) ||
+          b.recentCount - a.recentCount
+      )
     : null;
 
   return (
@@ -1195,6 +1243,11 @@ function IssueTypePicker({
                 <span className="font-mono text-[10px] text-muted-foreground">
                   {t.id}
                 </span>
+                {rank.has(t.id) && (
+                  <span className="rounded bg-blue-50 px-1 py-px text-[9.5px] font-semibold text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                    추천
+                  </span>
+                )}
                 {/*
                   건수가 곧 "이 타입이 실제로 쓰이나" 의 답이다.
                   0 건은 경고다 — 골라 봐야 아무것도 안 잡힌다.
@@ -1235,6 +1288,14 @@ interface FilterCheck {
   triageAccountId?: string;
   triageName?: string | null;
   triageCount?: number | null;
+  /** 표본으로 추론한 판정 경로. ② 흐름도와 ⑤ 이슈타입이 같이 쓴다. */
+  infer?: {
+    sampled: number;
+    fits: { tier: JudgeTier; verdict: 'ok' | 'weak' | 'dead'; why: string }[];
+    planTypes: { id: string; name: string; count: number }[];
+    devTypes: { id: string; name: string; count: number }[];
+    prefixes: { name: string; count: number }[];
+  };
   problems?: string[];
   error?: string;
 }
@@ -1583,6 +1644,7 @@ function CycleEditor({
   id,
   config,
   knownNames,
+  suggest,
   saving,
   onCancel,
   onSave,
@@ -1590,6 +1652,11 @@ function CycleEditor({
   id: string;
   config: QaRouterConfig;
   knownNames?: Record<string, string>;
+  /** 필터 표본이 찾아낸 기획·개발 티켓 타입 후보 */
+  suggest?: {
+    planTypes: { id: string; name: string; count: number }[];
+    devTypes: { id: string; name: string; count: number }[];
+  };
 }) {
   const [root, setRoot] = useState(
     config.confluenceDeployRootId
@@ -1645,6 +1712,7 @@ function CycleEditor({
           value={plan.id}
           types={types}
           error={error}
+          suggested={suggest?.planTypes}
           onChange={(tid, name) => setPlan({ id: tid, name })}
         />
         <IssueTypePicker
@@ -1653,6 +1721,7 @@ function CycleEditor({
           value={dev.id}
           types={types}
           error={error}
+          suggested={suggest?.devTypes}
           onChange={(tid, name) => setDev({ id: tid, name })}
         />
       </div>

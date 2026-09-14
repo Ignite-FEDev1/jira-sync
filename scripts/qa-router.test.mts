@@ -54,6 +54,11 @@ import {
 } from '../lib/services/qa-router/qa-thread';
 import { tokenize } from '../app/admin/qa-router/[id]/slack-preview';
 import { buildDiagram } from '../app/admin/qa-router/[id]/judge-flow';
+import {
+  countTypes,
+  inferFromSample,
+  judgeFits,
+} from '../lib/services/qa-router/infer';
 
 
 // tick → repository → @/lib/db 가 모듈 로드 시점에 createClient 를 호출한다.
@@ -2234,4 +2239,128 @@ test('판정 회귀 — 표본이 네 단계를 충분히 덮나', (t) => {
     seen.has('ref_owner'),
     `ref_owner 가 표본에 없음 (지금: ${covered})`
   );
+});
+
+/*
+  ── 판정 경로 추론 ──
+
+  필터만 주면 "이 프로젝트에서 판정이 돌아갈지" 를 표본으로 알아낸다.
+  틀리면 **없는 단계를 있다고 하거나, 되는 단계를 죽었다고 한다** — 둘 다
+  사람이 잘못된 설정을 저장하게 만든다.
+*/
+test('추론 — 지금 KQ 모양이면 네 단계가 다 산다', () => {
+  const fits = judgeFits({
+    sampled: 100,
+    assignedHits: 100,
+    labelHits: 99,
+    prefixHits: 99,
+    parentHits: 6,
+    parentChecked: 12,
+    devTypeCount: 1,
+    prefixKinds: 14,
+  });
+  const by = Object.fromEntries(fits.map((f) => [f.tier, f.verdict]));
+  assert.equal(by.assigned, 'ok');
+  assert.equal(by.epic, 'ok');
+  assert.equal(by.ref_owner, 'ok');
+  // 프리픽스 99건이 14종류면 종류당 7건 — 다수결이 선다.
+  assert.equal(by.siblings, 'ok');
+});
+
+test('추론 — 레이블이 없으면 ②④가 함께 죽는다', () => {
+  const fits = judgeFits({
+    sampled: 50,
+    assignedHits: 50,
+    labelHits: 0,
+    prefixHits: 50,
+    parentHits: 0,
+    parentChecked: 0,
+    devTypeCount: 0,
+    prefixKinds: 5,
+  });
+  const by = Object.fromEntries(fits.map((f) => [f.tier, f]));
+  assert.equal(by.epic.verdict, 'dead');
+  assert.equal(by.ref_owner.verdict, 'dead');
+  assert.match(by.epic.why, /레이블에 티켓 참조가 없습니다/);
+  // ①③은 멀쩡해야 한다. 하나가 죽었다고 다 죽이면 안 된다.
+  assert.equal(by.assigned.verdict, 'ok');
+  assert.equal(by.siblings.verdict, 'ok');
+});
+
+test('추론 — 레이블은 있는데 에픽이 없으면 ②만 죽는다', () => {
+  /*
+    ②는 세 관문을 다 지나야 한다. 레이블이 99% 있어도 그게 가리킨 티켓에
+    부모가 없으면 답을 못 낸다 — 앞 숫자만 보고 "쓸 만하다" 고 하면 안 된다.
+  */
+  const fits = judgeFits({
+    sampled: 40,
+    assignedHits: 40,
+    labelHits: 39,
+    prefixHits: 39,
+    parentHits: 0,
+    parentChecked: 10,
+    devTypeCount: 0,
+    prefixKinds: 6,
+  });
+  const by = Object.fromEntries(fits.map((f) => [f.tier, f]));
+  assert.equal(by.epic.verdict, 'dead');
+  assert.match(by.epic.why, /상위 에픽이 없습니다/);
+  // ④는 참조 티켓 담당자로 폴백하므로 산다.
+  assert.equal(by.ref_owner.verdict, 'ok');
+});
+
+test('추론 — 프리픽스가 전부 제각각이면 ③은 약하다', () => {
+  // 30건에 28종류 = 거의 1건씩. 같은 메뉴가 안 모이니 다수결이 안 선다.
+  const fits = judgeFits({
+    sampled: 30,
+    assignedHits: 30,
+    labelHits: 30,
+    prefixHits: 30,
+    parentHits: 8,
+    parentChecked: 10,
+    devTypeCount: 1,
+    prefixKinds: 28,
+  });
+  const sib = fits.find((f) => f.tier === 'siblings')!;
+  assert.equal(sib.verdict, 'weak');
+  assert.match(sib.why, /흩어져 있어/);
+});
+
+test('추론 — 표본에서 레이블·프리픽스를 뽑는다', () => {
+  const sample = [
+    {
+      key: 'KQ-1',
+      fields: {
+        summary: '[BO_주문관리] 정렬 오류',
+        labels: ['KQ-100', 'FE1'],
+        assignee: { accountId: 'u1' },
+      },
+    },
+    {
+      key: 'KQ-2',
+      fields: { summary: '제목만 있음', labels: ['FE1'] },
+    },
+  ];
+  const r = inferFromSample(sample, 'KQ');
+  assert.equal(r.sampled, 2);
+  assert.equal(r.assignedHits, 1);
+  // 'FE1' 은 티켓 키가 아니므로 세지 않는다.
+  assert.equal(r.labelHits, 1);
+  assert.deepEqual(r.refKeys, ['KQ-100']);
+  assert.equal(r.prefixHits, 1);
+  assert.deepEqual(r.prefixes, [{ name: 'BO_주문관리', count: 1 }]);
+});
+
+test('추론 — 이슈타입 분포는 id 와 이름을 같이 센다', () => {
+  // 저장은 id 로 한다. 이름만 세면 무엇을 저장할지 모른다.
+  const r = countTypes([
+    { fields: { issuetype: { id: '10205', name: '개발처리' } } },
+    { fields: { issuetype: { id: '10205', name: '개발처리' } } },
+    { fields: { issuetype: { id: '10001', name: '스토리' } } },
+    { fields: {} },
+  ]);
+  assert.deepEqual(r, [
+    { id: '10205', name: '개발처리', count: 2 },
+    { id: '10001', name: '스토리', count: 1 },
+  ]);
 });

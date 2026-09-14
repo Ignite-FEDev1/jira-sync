@@ -27,6 +27,14 @@ interface JudgeFlowProps {
   tiers: JudgeTier[];
   /** 단계별 실제 실적. 있으면 칸에 건수를 적는다. */
   counts?: Partial<Record<JudgeTier, number>>;
+  /**
+   * 필터 표본으로 추론한 "이 단계가 여기서 먹히나".
+   *
+   * 있으면 죽은 단계를 흐린 회색으로 내린다 — 새 프로젝트를 붙였는데
+   * 레이블 규칙이 없으면 ②④가 영영 0건인데, 그걸 모르면 "알림이 왜
+   * 안 오지" 를 코드에서 찾게 된다.
+   */
+  fits?: { tier: JudgeTier; verdict: 'ok' | 'weak' | 'dead'; why: string }[];
 }
 
 /**
@@ -58,7 +66,8 @@ function esc(s: string): string {
  */
 export function buildDiagram(
   tiers: JudgeTier[],
-  counts?: Partial<Record<JudgeTier, number>>
+  counts?: Partial<Record<JudgeTier, number>>,
+  fits?: JudgeFlowProps['fits']
 ): string {
   const lines = ['flowchart LR', '  start([QA 티켓])'];
 
@@ -68,7 +77,17 @@ export function buildDiagram(
     const q = `q${i}`;
     const a = `a${i}`;
     // 질문 아래에 어디를 뒤지는지 한 줄. `<br/>` 은 mermaid 가 줄바꿈으로 읽는다.
-    const hits = n === undefined ? '' : `<br/><small>최근 ${n}건</small>`;
+    const fit = fits?.find((f) => f.tier === t);
+    /*
+      추론 결과가 있으면 그걸 먼저 적는다. 실적(`최근 N건`)보다 앞인 이유는
+      죽은 단계에는 실적이 쌓일 수가 없어서다 — 0건의 이유를 말해야 한다.
+    */
+    const note = fit && fit.verdict !== 'ok'
+      ? `<br/><small>${esc(fit.why)}</small>`
+      : n === undefined
+        ? ''
+        : `<br/><small>최근 ${n}건</small>`;
+    const hits = note;
     lines.push(`  ${q}{"${esc(s.ask)}<br/><small>${esc(s.look)}</small>"}`);
     lines.push(`  ${a}["${esc(s.hit)}${hits}"]`);
 
@@ -99,16 +118,27 @@ export function buildDiagram(
     .filter(Boolean);
   if (guesses.length) lines.push(`  class ${guesses.join(',')} guess;`);
 
+  // 죽은 단계는 흐리게. 질문과 답을 같이 내린다 — 답도 안 나오므로.
+  const dead = tiers.flatMap((t, i) =>
+    fits?.find((f) => f.tier === t)?.verdict === 'dead' ? [`q${i}`, `a${i}`] : []
+  );
+  if (dead.length) {
+    lines.push(
+      '  classDef dead fill:#f8fafc,stroke:#e2e8f0,color:#94a3b8,stroke-dasharray:3 3;'
+    );
+    lines.push(`  class ${dead.join(',')} dead;`);
+  }
+
   return lines.join('\n');
 }
 
-export default function JudgeFlow({ tiers, counts }: JudgeFlowProps) {
+export default function JudgeFlow({ tiers, counts, fits }: JudgeFlowProps) {
   const box = useRef<HTMLDivElement>(null);
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   // id 가 겹치면 mermaid 가 앞 그림을 덮어쓴다. React 가 주는 고유값을 쓴다.
   const uid = useId().replace(/:/g, '');
-  const src = buildDiagram(tiers, counts);
+  const src = buildDiagram(tiers, counts, fits);
 
   useEffect(() => {
     let alive = true;
