@@ -10,6 +10,7 @@ import type {
   AlertShift,
   ActiveCycle,
   DeployCycle,
+  DeployKind,
   DerivedContext,
   QaRouterConfig,
   QaRouterState,
@@ -32,6 +33,18 @@ const KST_OFFSET_MS = 9 * 3_600_000;
 function kstParts(now: Date) {
   const k = new Date(now.getTime() + KST_OFFSET_MS);
   return { day: k.getUTCDay(), hour: k.getUTCHours() };
+}
+
+/**
+ * 오늘의 KST 날짜.
+ *
+ * `tick.ts` 의 `kstYmd` 와 같은 값을 낸다. 거기서 가져오지 않는 이유는
+ * 그 파일이 Slack·Jira 클라이언트를 끌고 오기 때문이다 — 이 모듈은 화면이
+ * 직접 import 한다. 여섯 줄을 복제하는 편이 번들에 배치를 끌어들이는
+ * 것보다 낫다. (`KST_OFFSET_MS` 도 같은 이유로 양쪽에 있다)
+ */
+export function kstYmdOf(now: Date): string {
+  return new Date(now.getTime() + KST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 /** 지금이 폴링해야 하는 시간대인지 */
@@ -140,7 +153,18 @@ export function computeHealth({
     };
   }
 
-  const pending = pendingCycleSwitch(state?.activeCycle ?? null);
+  /*
+    전환 대기를 두 갈래로 본다. 둘은 같은 구간의 앞뒤다.
+
+      ① 배포대장에 다음 차수가 떴는데 필터가 아직 이전 차수  (pendingCycleSwitch)
+      ② 필터가 가리키는 차수의 배포일마저 지났다              (staleFilterCycle)
+
+    ①은 `activeCycle` 을 읽는데, 배포일이 지나면 tick 이 그 포인터를 비우므로
+    ②의 구간에서는 아무 말도 못 한다. 정작 사람이 손댈 일이 남은 쪽은 ②다.
+  */
+  const pending =
+    pendingCycleSwitch(state?.activeCycle ?? null) ??
+    staleFilterCycle(state?.filterCache ?? null, kstYmdOf(now));
   if (pending) {
     return {
       tone: 'warn',
@@ -301,6 +325,36 @@ export function pendingCycleSwitch(cycle: ActiveCycle | null): string | null {
     return `배포대장은 ${cycle.schedule.prodYmd} · 필터는 ${versionYmd}`;
   }
   return null;
+}
+
+/**
+ * 필터가 **이미 끝난 차수**를 가리키고 있는 구간을 감지한다.
+ *
+ * ── 왜 `pendingCycleSwitch` 로 부족한가 ──
+ *
+ * 그쪽은 `activeCycle` 을 읽는다. 그런데 배포일이 지나면 tick 이 그 포인터를
+ * 일부러 비운다 — 안 비우면 SQL 크론이 죽은 차수를 계속 믿고 그 차수의 QA
+ * 스레드에 매일 답글을 단다(2026-09-15 실측).
+ *
+ * 그래서 포인터를 비운 **바로 그 순간부터** 전환 대기 신호도 같이 사라졌다.
+ * 사람이 필터를 바꿔야 하는 구간이 정확히 그때 시작되는데, 화면은 초록불이
+ * 된다. 조용해진 이유를 화면 어디서도 못 읽는다.
+ *
+ * 포인터 대신 **필터가 뭘 보고 있는지**(`filterCache`)를 읽는다. 그 값은
+ * 차수가 끝나도 남아 있고, 사람이 Jira 필터를 고치면 그때 바뀐다 — 이
+ * 구간의 시작과 끝에 정확히 맞는 유일한 값이다.
+ *
+ * 배포일 당일은 아직 아니다. 그날은 배포가 도는 날이지 넘길 날이 아니다.
+ */
+export function staleFilterCycle(
+  filterCache: { fixVersion: string } | null,
+  todayYmd: string
+): string | null {
+  const fv = filterCache?.fixVersion;
+  if (!fv) return null;
+  const versionYmd = fixVersionYmd(fv);
+  if (!versionYmd || versionYmd >= todayYmd) return null;
+  return `필터는 ${fv} · 배포일 ${versionYmd} 이 지났습니다`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -580,4 +634,68 @@ export function tooSoon(
   if (!lastPollAt) return false;
   const next = Date.parse(lastPollAt) + cfg.tickIntervalSeconds * 1000;
   return now.getTime() < next;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 배포대장 페이지 제목 읽기
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 배포대장 자식 페이지 하나가 차수가 되는가.
+ *
+ * ── 왜 함수로 빼나 ──
+ *
+ * 이 규칙이 `tick.ts` 안에만 있었다. 그래서 설정 화면은 "차수 12건" 같은
+ * **숫자만** 말할 수 있었고, 그 12건이 무엇인지는 배치가 한 번 돌 때까지
+ * 알 수 없었다. 미리보기를 따로 만들면 규칙이 두 벌이 되고, 두 벌은
+ * 반드시 어긋난다 — 화면은 잡힌다고 하는데 배치는 건너뛰는 식으로.
+ *
+ * 한 곳에서 읽고 양쪽이 같이 쓴다.
+ */
+export type CyclePage =
+  | {
+      kind: 'cycle';
+      deployYmd: string;
+      fixVersion: string;
+      /** 제목의 `(정기|adhoc|hotfix)` 표기. 표기가 없으면 정기로 본다. */
+      deployKind: DeployKind;
+    }
+  | { kind: 'skip'; why: string };
+
+const KIND_LABEL: Record<DeployKind, string> = {
+  regular: '정기',
+  adhoc: 'adhoc',
+  hotfix: 'hotfix',
+};
+
+export function readCyclePageTitle(
+  title: string,
+  opts: { deployKinds?: DeployKind[] } = {}
+): CyclePage {
+  /*
+    adhoc·hotfix 는 정기배포가 아니다. QA 기간이 따로 없고 차수 번호도
+    안 붙어서, 섞이면 "이번 차수" 가 하루에 세 번 바뀐다.
+
+    그래도 보고 싶은 팀이 있어 손잡이를 열어 뒀다. **기본은 정기만**이다 —
+    안 넘기면 지금까지와 똑같이 돈다. 정기·adhoc·hotfix 는 서로 독립이라
+    "hotfix 는 보고 adhoc 은 뺀다" 도 된다.
+  */
+  const kindM = /\((정기|adhoc|hotfix)\)/i.exec(title);
+  const deployKind: DeployKind =
+    kindM?.[1] === 'adhoc' ? 'adhoc' : kindM?.[1] === 'hotfix' ? 'hotfix' : 'regular';
+  const allowed = opts.deployKinds ?? ['regular'];
+  if (!allowed.includes(deployKind)) {
+    return {
+      kind: 'skip',
+      why: `잡을 배포에서 뺐습니다 (${KIND_LABEL[deployKind]})`,
+    };
+  }
+  const dm = title.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (!dm) return { kind: 'skip', why: '제목에 날짜가 없습니다' };
+  return {
+    kind: 'cycle',
+    deployYmd: `${dm[1]}-${dm[2]}-${dm[3]}`,
+    fixVersion: `release_${dm[1]}${dm[2]}${dm[3]}`,
+    deployKind,
+  };
 }

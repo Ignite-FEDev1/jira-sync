@@ -47,7 +47,36 @@ export interface JiraIssue {
     parent?: { key?: string; fields?: { summary?: string } } | null;
     /** 공동담당자 (User Picker single) */
     customfield_10132?: { accountId?: string; displayName?: string } | null;
+    /*
+      사람 칸의 **번호는 인스턴스마다 다르다.** 이름을 코드에 박지 않으려고
+      열어 둔다. 값은 `unknown` 이라 그냥은 못 쓰고 `personAt` 을 거쳐야
+      한다 — 아무 칸이나 사람인 척 읽는 걸 막는다.
+    */
+    [customField: string]: unknown;
   };
+}
+
+/** 사람 칸 하나의 모양. 담당자든 공동담당자든 같다. */
+export interface JiraPerson {
+  accountId?: string;
+  displayName?: string;
+}
+
+/**
+ * 번호를 런타임에 정하는 사람 칸을 안전하게 읽는다.
+ *
+ * 필드 번호가 설정에서 오므로 타입으로는 무엇이 들었는지 알 수 없다.
+ * 모양을 확인하고 아니면 null 을 준다 — 엉뚱한 칸을 가리켰을 때 크래시
+ * 대신 "비어 있음" 으로 떨어지고, 그건 화면이 problems 로 이미 말한다.
+ */
+export function personAt(
+  fields: JiraIssue['fields'],
+  key: string
+): JiraPerson | null {
+  const v = fields?.[key];
+  if (!v || typeof v !== 'object') return null;
+  const p = v as JiraPerson;
+  return typeof p.accountId === 'string' ? p : null;
 }
 
 export interface JiraPort {
@@ -64,6 +93,17 @@ export const CO_ASSIGNEE_FIELD = 'customfield_10132';
  * 1건이 '스토리'(담당=기획자). 타입을 안 가리면 기획자를 담당자로 잡는다.
  */
 export const DEFAULT_DEV_ISSUE_TYPES = ['개발처리'];
+/*
+  ── 이건 **마지막 폴백**이다 ──
+
+  한동안 이 값이 유일한 기준이었다. `tick.ts` 가 `devIssueTypes` 를 안
+  넘겨서, 설정 화면에서 개발티켓을 바꿔도 판정은 늘 `개발처리` 로만 돌았다.
+  화면은 "우리 팀이 개발한 건인지 여기서 가립니다" 라고 적혀 있었다.
+
+  이제 배치가 `cfg.devIssueTypeName` 을 넘긴다. 여기 남은 이름은 설정이
+  비어 있을 때(데모·테스트)만 쓰인다. KQ 에서 나온 이름이라 다른 프로젝트에
+  그대로 맞을 이유가 없다 — 설정이 있으면 그쪽이 이긴다.
+*/
 
 // ─────────────────────────────────────────────────────────────
 // 메뉴 프리픽스
@@ -171,12 +211,17 @@ export interface JudgeEvidence {
 function tally(
   kids: JiraIssue[],
   memberIds: Set<string>,
-  names: Map<string, string>
+  names: Map<string, string>,
+  /*
+    담당자 말고 한 칸 더 보는 곳. 기본값이 지금까지 쓰던 상수라 안 넘기면
+    동작이 그대로다 — 픽스처 재생이 그걸 확인한다.
+  */
+  coField: string = CO_ASSIGNEE_FIELD
 ): Map<string, Vote> {
   const votes = new Map<string, Vote>();
   for (const kid of kids) {
     const assignee = kid.fields?.assignee?.accountId;
-    const co = kid.fields?.[CO_ASSIGNEE_FIELD]?.accountId;
+    const co = personAt(kid.fields, coField)?.accountId;
     // 담당자와 공동담당자가 같으면 한 표만 센다.
     const seen = new Set<string>();
     for (const id of [assignee, co]) {
@@ -185,7 +230,7 @@ function tally(
       const display =
         (id === assignee
           ? kid.fields?.assignee?.displayName
-          : kid.fields?.[CO_ASSIGNEE_FIELD]?.displayName) ??
+          : personAt(kid.fields, coField)?.displayName) ??
         names.get(id) ??
         id.slice(0, 12);
       const v = votes.get(id) ?? {
@@ -242,12 +287,15 @@ export async function findViaEpic(
   opts: {
     projectKey?: string;
     devIssueTypes?: string[];
+    /** 담당자 말고 한 칸 더. 안 넘기면 지금까지 쓰던 값으로 돈다. */
+    coAssigneeField?: string;
     onWarn?: (msg: string) => void;
   } = {}
 ): Promise<EpicMatch | null> {
   const memberIds = new Set(members.map((m) => m.accountId));
   const names = new Map(members.map((m) => [m.accountId, m.name]));
   const devTypes = opts.devIssueTypes ?? DEFAULT_DEV_ISSUE_TYPES;
+  const coField = opts.coAssigneeField ?? CO_ASSIGNEE_FIELD;
   const refKeys = extractRefKeys(issue.fields?.labels, opts.projectKey ?? 'KQ');
 
   for (const refKq of refKeys) {
@@ -263,7 +311,7 @@ export async function findViaEpic(
         'summary',
         'issuetype',
         'assignee',
-        CO_ASSIGNEE_FIELD,
+        coField,
       ]);
 
       // 우선 개발 이슈타입만 본다. 서비스마다 타입 이름이 달라 하나도 없으면 전체로 넓힌다.
@@ -273,7 +321,7 @@ export async function findViaEpic(
       const widened = devKids.length === 0;
       const pool = widened ? kids : devKids;
 
-      const votes = tally(pool, memberIds, names);
+      const votes = tally(pool, memberIds, names, coField);
       if (votes.size === 0) continue;
 
       /*
@@ -362,7 +410,8 @@ export interface AssignedMatch {
 export function findAssigned(
   issue: JiraIssue,
   members: DerivedMember[],
-  triageAccountId: string
+  triageAccountId: string,
+  coField: string = CO_ASSIGNEE_FIELD
 ): AssignedMatch | null {
   const memberIds = new Set(members.map((m) => m.accountId));
   const raw: [
@@ -370,7 +419,7 @@ export function findAssigned(
     { accountId?: string; displayName?: string } | null | undefined,
   ][] = [
     ['assignee', issue.fields?.assignee],
-    ['coAssignee', issue.fields?.[CO_ASSIGNEE_FIELD]],
+    ['coAssignee', personAt(issue.fields, coField)],
   ];
 
   const found: AssignedMatch[] = [];
@@ -453,6 +502,8 @@ export async function findViaRefOwner(
   opts: {
     projectKey?: string;
     devIssueTypes?: string[];
+    /** 담당자 말고 한 칸 더. 안 넘기면 지금까지 쓰던 값으로 돈다. */
+    coAssigneeField?: string;
     onWarn?: (msg: string) => void;
   } = {}
 ): Promise<RefOwnerMatch | null> {
@@ -609,6 +660,13 @@ export interface JudgeContext {
    * 배열에 없는 단계는 건너뛴다 — 끄는 방법이 곧 빼는 것이다.
    */
   tiers?: JudgeTier[];
+  /**
+   * 담당자 말고 한 칸 더 보는 곳. JQL 에서 뽑아 설정에 저장한 값이다.
+   *
+   * 안 넘기면 지금까지 쓰던 `customfield_10132` 로 돈다 — 옛 설정이 남아
+   * 있어도 동작이 안 바뀌게 하려는 것이고, 픽스처 재생이 그걸 지킨다.
+   */
+  coAssigneeField?: string;
   onWarn?: (msg: string) => void;
 }
 
@@ -616,6 +674,20 @@ export interface JudgeResult extends Judgement {
   links?: RelatedLinks;
   /** 이 판정이 어느 단계에서 나왔는지 */
   via: 'assigned' | 'epic' | 'siblings' | 'routing_map' | 'ref_owner' | 'none';
+  /**
+   * 알림을 보내지 않는다. 그래도 **기록은 남긴다.**
+   *
+   * 봇이 가져오는 티켓은 전부 `assignee = 처음 받는 사람` 이고, 판정은
+   * 그 사람을 건너뛴다. 그러니 ①단계가 답을 낸다는 건 **공동담당자 칸에
+   * 다른 사람이 들어가 있다** 는 뜻이고, 그건 1분 주기 사이에 누가 이미
+   * 가져갔다는 얘기다.
+   *
+   * 이미 가져간 사람에게 "이거 당신 겁니다" 를 보내는 건 소음이다. 다만
+   * **집계에서 빠지면 안 된다** — "QA 티켓 중 우리 건이 몇 건인가" 는
+   * 알림을 보냈는지와 무관한 숫자다. 그래서 기록은 그대로 쌓고
+   * `notified: false` 로만 구분한다.
+   */
+  silent?: boolean;
   /** 근거로 센 티켓들. 문장의 숫자를 확인할 재료다. */
   evidence?: JudgeEvidence;
 }
@@ -652,7 +724,12 @@ export async function judge(
     · prefix 는 siblings 가 쓰고, 못 찾았을 때의 문구도 이걸 본다.
     둘 다 Jira 를 더 두드리지 않는 순수 계산이라 미리 해도 손해가 없다.
   */
-  const assigned = findAssigned(issue, ctx.members, ctx.triageAccountId);
+  const assigned = findAssigned(
+    issue,
+    ctx.members,
+    ctx.triageAccountId,
+    ctx.coAssigneeField
+  );
   const prefix = extractPrefix(issue.fields?.summary);
 
   const steps: Record<JudgeTier, () => Promise<JudgeResult | null>> = {
@@ -720,8 +797,11 @@ function assignedResult(
       accountId: assigned.accountId,
       name: assigned.name,
       slackId,
-      reason: `${where}가 이미 ${assigned.name} 으로 지정돼 있음`,
+      reason:
+        `${where}가 이미 ${assigned.name} 으로 지정돼 있음` +
+        ' · 직접 가져가서 알림은 보내지 않음',
       via: 'assigned',
+      silent: true,
     };
   }
   return null;
@@ -736,6 +816,7 @@ async function epicResult(
   const epic = await findViaEpic(issue, ctx.members, jira, {
     projectKey: ctx.projectKey.startsWith('KQ') ? 'KQ' : undefined,
     devIssueTypes: ctx.devIssueTypes,
+    coAssigneeField: ctx.coAssigneeField,
     onWarn: ctx.onWarn,
   });
   if (epic) {
@@ -878,6 +959,7 @@ async function refOwnerResult(
     ref = await findViaRefOwner(issue, ctx.members, jira, {
       projectKey: ctx.projectKey.startsWith('KQ') ? 'KQ' : undefined,
       devIssueTypes: ctx.devIssueTypes,
+      coAssigneeField: ctx.coAssigneeField,
       onWarn: ctx.onWarn,
     });
   } catch (e) {

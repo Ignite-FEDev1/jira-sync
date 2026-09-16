@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 
-import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import {
+  missingCredsMessage,
+  resolveJiraAccess,
+} from '@/lib/services/qa-router/api-creds';
 import {
   createConfluenceClient,
   createJiraClient,
@@ -39,17 +42,17 @@ export async function POST(
     );
   }
 
-  const email = process.env.IGNITE_JIRA_EMAIL;
-  const token = process.env.IGNITE_JIRA_API_TOKEN;
-  if (!email || !token) {
+  const access = await resolveJiraAccess(
+    cfg.jiraInstance,
+    cfg.jiraOperatorAccountId
+  );
+  if (!access) {
     return NextResponse.json(
-      { error: 'Jira 자격증명이 없습니다.' },
+      { error: missingCredsMessage(cfg.jiraInstance) },
       { status: 500 }
     );
   }
-
-  const baseUrl =
-    cfg.jiraInstance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE;
+  const { baseUrl, email, token } = access;
 
   try {
     const state = await repo.getOrCreateState(id);

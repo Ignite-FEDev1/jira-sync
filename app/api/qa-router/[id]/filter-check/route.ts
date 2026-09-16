@@ -1,8 +1,15 @@
 import { NextResponse } from 'next/server';
 
-import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import {
+  missingCredsMessage,
+  resolveJiraAccess,
+} from '@/lib/services/qa-router/api-creds';
 import { createJiraClient } from '@/lib/services/qa-router/clients';
-import { deriveFromJql, parseFilterUrl } from '@/lib/services/qa-router/derive';
+import {
+  deriveFromJql,
+  parseFilterUrl,
+  resolvePersonFields,
+} from '@/lib/services/qa-router/derive';
 import { CO_ASSIGNEE_FIELD, type JiraPort } from '@/lib/services/qa-router/judge';
 import {
   countTypes,
@@ -10,7 +17,9 @@ import {
   judgeFits,
   type InferResult,
 } from '@/lib/services/qa-router/infer';
+import { PLAN_PREFIX } from '@/lib/services/qa-router/plan-tickets';
 import * as repo from '@/lib/services/qa-router/repository';
+import { pickTriage } from '@/lib/services/qa-router/triage';
 
 /**
  * POST /api/qa-router/{id}/filter-check — 이 필터를 넣으면 무슨 일이 생기나.
@@ -37,6 +46,12 @@ const INFER_SAMPLE = 30;
 const REF_PROBE = 8;
 /** 에픽 몇 개를 들여다볼까. 자식 조회가 이만큼 는다. */
 const EPIC_PROBE = 5;
+/**
+ * 트리아지를 알아내려고 변경이력을 볼 티켓 수.
+ * 한 번에 받으므로 왕복은 늘 1번이다. 실측 40건 0.8초.
+ * 10건이면 이미 단독 1위가 나왔지만, 표본이 얇으면 사람이 안 믿는다.
+ */
+const TRIAGE_SCAN = 50;
 
 /**
  * 표본에서 판정 경로를 알아낸다.
@@ -60,7 +75,8 @@ async function inferPaths(
   // ② 레이블이 가리킨 티켓을 연다. 하나가 실패해도 나머지로 판단한다.
   const refs = await Promise.all(
     base.refKeys.slice(0, REF_PROBE).map((k) =>
-      jira.getIssue(k, ['issuetype', 'parent']).catch(() => null)
+      // summary 를 같이 받는다. `[기획]` 프리픽스로 거르려면 필요하다.
+      jira.getIssue(k, ['issuetype', 'parent', 'summary']).catch(() => null)
     )
   );
   const seen = refs.filter((r): r is NonNullable<typeof r> => !!r);
@@ -83,13 +99,47 @@ async function inferPaths(
         .catch(() => [])
     : [];
 
-  const planTypes = countTypes(seen);
+  /*
+    ── 배치와 **같은 규칙**으로 센다 ──
+
+    전에는 레이블이 가리킨 티켓의 타입을 그냥 다 셌다. 그러면 QA 관리용
+    티켓이 섞여 들어온다. 실측:
+
+      그냥 세면   스토리 4 · 작업 3 · 개발처리 1   → 1위가 1.3배, 아슬아슬
+      배치 규칙   스토리 4                        → 단독
+
+    `작업 3건` 은 전부 `[정기배포 QA] 2026-09-14` 같은 QA 관리 티켓이었다.
+    기획티켓이 아니다. 배치는 `[기획]` 프리픽스 + 부모 있음으로 거른다
+    (`plan-tickets.ts`). 추론이 다른 규칙을 쓰니 답이 흐려졌던 것이다.
+
+    거르고 나서 하나도 안 남으면 거르지 않은 값을 쓴다 — 프리픽스 규칙이
+    없는 프로젝트에서 빈손으로 끝나는 것보다 낫다.
+  */
+  const planLike = seen.filter(
+    (r) => (r.fields?.summary ?? '').startsWith(PLAN_PREFIX) && r.fields?.parent
+  );
+  const planTypes = countTypes(planLike.length > 0 ? planLike : seen);
   /*
     에픽 아래에는 기획티켓도 같이 있다 (형제 관계). 개발티켓 후보에서
-    그것들을 뺀다 — 안 빼면 "스토리" 가 개발티켓 1순위로 올라온다.
+    그것들을 빼야 한다 — 안 빼면 "스토리" 가 개발티켓 1순위로 올라온다.
+
+    ── 그런데 통째로 빼면 안 된다 ──
+
+    전에는 기획 후보에 한 번이라도 나온 타입을 **전부** 지웠다. 그러다
+    실측으로 이런 일이 났다:
+
+      기획 후보  스토리 4 · 작업 3 · <b>개발처리 1</b>   ← 레이블이 개발처리를 가리킨 건 1개
+      개발 후보  (개발처리가 통째로 사라짐) Design Issues 2 · 운영업무 1
+
+    **표본 한 건이 20건짜리 1순위를 지워 버렸다.** 그리고 화면은 그걸
+    "표본은 Design Issues" 라는 경고로 내밀었다 — 틀린 경고다.
+
+    어느 쪽이 더 많은지로 가른다. 기획 쪽에서 더 많이 나온 타입만 뺀다.
   */
-  const planIds = new Set(planTypes.map((t) => t.id));
-  const devTypes = countTypes(kids).filter((t) => !planIds.has(t.id));
+  const planCount = new Map(planTypes.map((t) => [t.id, t.count]));
+  const devTypes = countTypes(kids).filter(
+    (t) => t.count > (planCount.get(t.id) ?? 0)
+  );
 
   return {
     sampled: base.sampled,
@@ -98,7 +148,7 @@ async function inferPaths(
     devTypes,
     fits: judgeFits({
       sampled: base.sampled,
-      assignedHits: base.assignedHits,
+      coHits: base.coHits,
       labelHits: base.labelHits,
       prefixHits: base.prefixHits,
       parentHits: epicKeys.length,
@@ -143,22 +193,24 @@ export async function POST(
     );
   }
 
-  const email = process.env.IGNITE_JIRA_EMAIL;
-  const token = process.env.IGNITE_JIRA_API_TOKEN;
-  if (!email || !token) {
+  /*
+    저장된 config 가 아니라 **붙여넣은 필터**의 인스턴스를 쓴다. 이 라우트는
+    저장 전에 도는 검사라, 지금 ignite 를 쓰는 대상이 hmg 필터로 갈아타는
+    순간이 있다. config 쪽을 보면 그 전환을 영영 확인해 줄 수 없다.
+  */
+  const access = await resolveJiraAccess(
+    parsed.instance,
+    cfg.jiraOperatorAccountId
+  );
+  if (!access) {
     return NextResponse.json(
-      { error: 'Jira 자격증명이 없습니다.' },
+      { error: missingCredsMessage(parsed.instance) },
       { status: 500 }
     );
   }
 
   try {
-    const jira = createJiraClient({
-      baseUrl:
-        parsed.instance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE,
-      email,
-      token,
-    });
+    const jira = createJiraClient(access);
 
     const filter = await jira.getFilter(parsed.filterId);
     const d = deriveFromJql(filter.jql);
@@ -189,7 +241,7 @@ export async function POST(
       이미 병렬이었는데, 그 앞의 프로젝트 조회를 기다리느라 늦었다.
       한 명 실패해도 나머지는 낸다 — 이름은 보여주기용이다.
     */
-    const [projectKey, members] = await Promise.all([
+    const [projectKey, members, allFields] = await Promise.all([
       jira.resolveProjectKey(d.projectKey),
       Promise.all(
         d.accountIds.map(async (accountId) => {
@@ -201,12 +253,30 @@ export async function POST(
           }
         })
       ),
+      // 이름을 번호로 바꾸는 데 쓴다. 실패해도 나머지 진단은 살린다.
+      jira.listFields().catch(() => []),
     ]);
+
+    /*
+      사람 칸을 **JQL 이 시킨 대로** 잡는다.
+
+      전에는 `customfield_10132` 가 코드에 박혀 있었다. 두 번째 프로젝트를
+      붙이면 그 번호가 다를 텐데, 없는 게 아니라 **다른 칸을 읽어** 늘 비어
+      보인다 — 공동담당자로 들어온 티켓을 통째로 놓치면서 오류는 한 줄도
+      안 난다. 못 고르면 찍지 않고 problems 로 말한다.
+    */
+    const person = resolvePersonFields(d.personFields, allFields);
+    problems.push(...person.problems);
+    /*
+      해석에 실패하면 지금까지 쓰던 값으로 돈다. 확인 화면이 통째로 멎는 것보다
+      낫고, 무엇을 못 골랐는지는 바로 위에서 이미 말했다.
+    */
+    const coField = person.coAssigneeField ?? CO_ASSIGNEE_FIELD;
 
     const triage = members.find((m) => m.accountId === cfg.triageAccountId);
     if (!triage) {
       problems.push(
-        '지금 트리아지로 잡힌 사람이 이 필터의 담당자 명단에 없습니다. ' +
+        '지금 처음 받는 사람으로 잡힌 사람이 이 필터의 담당자 명단에 없습니다. ' +
           '봇이 찾을 티켓이 영영 0건이 됩니다.'
       );
     }
@@ -245,11 +315,27 @@ export async function POST(
         `project = ${projectKey}` +
           (d.issueType ? ` AND issuetype = ${d.issueType}` : '') +
           ' ORDER BY created DESC',
-        ['summary', 'labels', 'assignee', CO_ASSIGNEE_FIELD]
+        ['summary', 'labels', 'assignee', coField]
       ),
     ]);
     const triageCount = triageFound?.length ?? null;
-    const infer = await inferPaths(jira, sample, projectKey);
+
+    /*
+      판정 경로와 트리아지는 서로 안 기다려도 된다.
+      경로는 티켓의 현재 모습에서, 트리아지는 변경이력에서 나온다.
+    */
+    const [infer, triageLogs] = await Promise.all([
+      inferPaths(jira, sample, projectKey),
+      jira
+        .getChangelogs(
+          sample.slice(0, TRIAGE_SCAN).map((i) => i.key),
+          [coField]
+        )
+        // 이력 조회가 실패해도 나머지 진단은 살린다. 추천이 없을 뿐이다.
+        .catch(() => []),
+    ]);
+
+    const triageGuess = pickTriage(triageLogs, members, coField);
 
     return NextResponse.json({
       filterName: filter.name,
@@ -262,8 +348,20 @@ export async function POST(
       triageName: triage?.name ?? null,
       /** 봇이 지금 이 필터로 보게 될 티켓 수. null 이면 차수를 몰라 못 셌다. */
       triageCount,
+      /**
+       * 변경이력이 말하는 트리아지. null 이면 근거를 못 찾았다는 뜻이고,
+       * 그때 화면은 추천 없이 6명 중 고르라고만 한다.
+       */
+      triageGuess,
       /** 판정 네 단계가 이 프로젝트에서 돌아갈지. 화면이 흐름도에 쓴다. */
       infer,
+      /**
+       * JQL 이 시킨 사람 칸.
+       *   coAssigneeField  담당자 말고 한 칸 더. null 이면 assignee 만 본다
+       *   personLabels     흐름도가 "어디를 보는지" 적을 이름들
+       */
+      coAssigneeField: person.coAssigneeField,
+      personLabels: person.labels,
       problems,
     });
   } catch (e) {

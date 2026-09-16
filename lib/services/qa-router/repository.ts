@@ -23,6 +23,7 @@ import {
   type StateRow,
 } from './rows';
 import type { PlanProgress } from './plan-tickets';
+import type { JiraInstance } from './derive';
 import type {
   DeployCycle,
   ActiveCycle,
@@ -74,6 +75,7 @@ function fromConfigInput(i: QaRouterConfigInput): Partial<ConfigRow> {
     row.co_assignee_field = i.coAssigneeField;
   if (i.planCollectHours !== undefined)
     row.plan_collect_hours = i.planCollectHours;
+  if (i.deployKinds !== undefined) row.deploy_kinds = i.deployKinds;
   if (i.judgeTiers !== undefined) row.judge_tiers = i.judgeTiers;
   if (i.alerts !== undefined) row.alerts = i.alerts;
   if (i.alertRules !== undefined) row.alert_rules = i.alertRules;
@@ -171,18 +173,37 @@ export interface JiraCreds {
  * users 테이블에서 Jira accountId 로 자격증명을 찾는다.
  * daily-sync 와 같은 패턴 — 자격증명을 GitHub Secret 이 아니라 DB 에 둔다.
  * 봇이 이 계정으로 행동하므로 필터 공유 권한과 재배정 감사 이력이 여기 귀속된다.
+ *
+ * 인스턴스별로 **계정 자체가 다르다**. 같은 사람이어도 ignite 의 accountId 와
+ * hmg 의 accountId 가 다르고 토큰도 따로 발급한다. 그래서 조회 컬럼 세 개
+ * (accountId · email · token) 가 함께 움직인다 — 하나만 바꾸면 남의 계정을
+ * 찾아 엉뚱한 Jira 에 붙는다.
  */
 export async function getJiraCredsByAccountId(
-  accountId: string
+  accountId: string,
+  instance: JiraInstance = 'ignite'
 ): Promise<JiraCreds | null> {
+  const col =
+    instance === 'hmg'
+      ? { id: 'hmg_account_id', email: 'hmg_jira_email', token: 'hmg_jira_api_token' }
+      : {
+          id: 'ignite_account_id',
+          email: 'ignite_jira_email',
+          token: 'ignite_jira_api_token',
+        };
+
   const { data, error } = await dbServer
     .from('users')
-    .select('ignite_jira_email, ignite_jira_api_token')
-    .eq('ignite_account_id', accountId)
+    .select(`${col.email}, ${col.token}`)
+    .eq(col.id, accountId)
     .maybeSingle();
   if (error) throw new Error(`getJiraCredsByAccountId: ${error.message}`);
-  if (!data?.ignite_jira_email || !data?.ignite_jira_api_token) return null;
-  return { email: data.ignite_jira_email, token: data.ignite_jira_api_token };
+
+  const row = data as Record<string, string | null> | null;
+  const email = row?.[col.email];
+  const token = row?.[col.token];
+  if (!email || !token) return null;
+  return { email, token };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -399,6 +420,11 @@ export async function listEvents(
  * deploy_ymd 가 키다. 같은 차수를 다시 수집하면 일정과 Jira 버전 존재 여부가
  * 갱신된다 — 배포대장의 일정은 실제로 바뀐다 (2026-10-12 페이지에
  * "배포일정 변경됨"이 적혀 있었다).
+ *
+ * `alert_rules_override` 는 아래 payload 에 **없다.** PostgREST 의 upsert 는
+ * 보낸 컬럼만 `on conflict do update set` 에 넣으므로, 사람이 그 차수에 걸어 둔
+ * 알림 덮어쓰기는 하루 한 번 도는 이 수집에 지워지지 않는다 (실측으로 확인).
+ * 새 컬럼을 payload 에 더할 때 이 칸을 같이 넣지 않도록 주의한다.
  */
 export async function upsertCycles(
   configId: string,
@@ -454,6 +480,7 @@ export async function getCycle(
     threadQaEndYmd: data.thread_qa_end_ymd ?? null,
     qaLabel: data.qa_label ?? null,
     planCollectedAt: data.plan_collected_at ?? null,
+    alertRulesOverride: data.alert_rules_override ?? null,
   };
 }
 

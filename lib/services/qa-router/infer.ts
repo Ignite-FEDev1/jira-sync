@@ -86,11 +86,20 @@ export function inferFromSample(
   projectKey: string
 ): Pick<InferResult, 'sampled' | 'prefixes'> & {
   assignedHits: number;
+  /**
+   * 공동담당자 칸이 채워진 티켓 수. **①단계의 진짜 전제다.**
+   *
+   * 봇이 가져오는 티켓은 JQL 상 담당자가 전부 처음 받는 사람이고 판정은
+   * 그 사람을 건너뛴다. 그러니 "담당자가 적혀 있나" 는 늘 100% 이면서
+   * ①이 답할지는 하나도 말해 주지 않는다.
+   */
+  coHits: number;
   labelHits: number;
   prefixHits: number;
   refKeys: string[];
 } {
   let assignedHits = 0;
+  let coHits = 0;
   let labelHits = 0;
   let prefixHits = 0;
   const prefixCount = new Map<string, number>();
@@ -102,6 +111,7 @@ export function inferFromSample(
     if (f?.assignee?.accountId || f?.customfield_10132?.accountId) {
       assignedHits++;
     }
+    if (f?.customfield_10132?.accountId) coHits++;
     // ②④ 레이블 참조
     const refs = extractRefKeys(f?.labels, projectKey);
     if (refs.length > 0) {
@@ -119,6 +129,7 @@ export function inferFromSample(
   return {
     sampled: sample.length,
     assignedHits,
+    coHits,
     labelHits,
     prefixHits,
     refKeys: [...new Set(refKeys)],
@@ -152,7 +163,12 @@ export function countTypes(
  */
 export function judgeFits(args: {
   sampled: number;
-  assignedHits: number;
+  /*
+    `assignedHits` 를 안 받는다. ①을 담당자 칸으로 재던 흔적인데, 그 숫자는
+    늘 100% 라 아무 판단에도 안 쓰인다. 받아 두면 "쓰는 값" 처럼 보인다.
+  */
+  /** 공동담당자 칸이 채워진 티켓 수. ①의 진짜 전제다. */
+  coHits: number;
   labelHits: number;
   prefixHits: number;
   /** 레이블이 가리킨 티켓 중 부모가 있던 수 */
@@ -166,7 +182,7 @@ export function judgeFits(args: {
 }): TierFit[] {
   const {
     sampled,
-    assignedHits,
+    coHits,
     labelHits,
     prefixHits,
     parentHits,
@@ -175,15 +191,27 @@ export function judgeFits(args: {
     prefixKinds,
   } = args;
 
+  /*
+    ── ①을 담당자 칸으로 재면 안 된다 ──
+
+    화면에 `모든 티켓에 담당자가 적혀 있습니다` 라고 떠 있었다. 참이지만
+    쓸모가 없다 — 봇이 보는 티켓은 담당자가 **전부 처음 받는 사람**이라
+    늘 100% 이고, ①이 답할지는 아무것도 말해 주지 않는다.
+
+    ①이 답하려면 **다른 칸에 사람이 들어와 있어야** 한다. 그 칸을 안 쓰는
+    프로젝트면 ①은 영영 안 돈다. 그래서 공동담당자 칸으로 잰다.
+  */
   const assigned: TierFit = {
     tier: 'assigned',
-    hits: assignedHits,
+    hits: coHits,
     total: sampled,
-    verdict: verdictOf(assignedHits, sampled),
+    verdict: verdictOf(coHits, sampled),
     why:
-      assignedHits === sampled
-        ? '모든 티켓에 담당자가 적혀 있습니다'
-        : `${sampled}건 중 ${assignedHits}건에 담당자가 있습니다`,
+      coHits === 0
+        ? '공동담당자 칸을 안 쓰는 프로젝트라 이 단계는 답하지 못합니다'
+        : coHits === sampled
+          ? `${sampled}건 모두 공동담당자 칸을 쓰고 있습니다`
+          : `${sampled}건 중 ${coHits}건이 공동담당자 칸을 씁니다`,
   };
 
   /*

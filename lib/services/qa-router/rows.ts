@@ -24,6 +24,7 @@ import type {
   DerivedContext,
   AlertRule,
   AlertSwitches,
+  DeployKind,
   JudgeTier,
   QaRouterConfig,
   QaRouterEvent,
@@ -55,6 +56,7 @@ export type ConfigRow = {
   dev_issue_type_name: string | null;
   co_assignee_field: string | null;
   plan_collect_hours: number[] | null;
+  deploy_kinds?: DeployKind[] | null;
   judge_tiers: JudgeTier[] | null;
   alerts: AlertSwitches | null;
   alert_rules: AlertRule[] | null;
@@ -131,6 +133,7 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
     devIssueTypeName: r.dev_issue_type_name ?? '개발처리',
     coAssigneeField: r.co_assignee_field ?? 'customfield_10132',
     planCollectHours: r.plan_collect_hours ?? [9, 17],
+    deployKinds: r.deploy_kinds?.length ? r.deploy_kinds : ['regular'],
     judgeTiers: r.judge_tiers ?? [...JUDGE_TIERS],
     alerts: r.alerts ?? {},
     // 빈 배열은 "알림을 다 껐다" 가 아니라 컬럼이 아직 없다는 뜻에 가깝다.

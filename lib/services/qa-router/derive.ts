@@ -78,6 +78,26 @@ export interface DerivedFromJql {
   accountIds: string[];
   /** 활성 차수. 여러 개면 첫 번째 */
   fixVersions: string[];
+  /**
+   * JQL 이 **사람과 비교한 칸**들.
+   *
+   * `assignee` 는 어디나 있지만 "공동담당자" 같은 칸은 인스턴스마다 번호가
+   * 다르다. 그 번호를 코드에 박아 두면 두 번째 프로젝트에서 조용히 빗나간다 —
+   * 필드가 없는 게 아니라 **다른 번호의 필드를 읽어** 늘 비어 있는 것처럼
+   * 보인다. 오류가 안 나서 더 나쁘다.
+   *
+   * JQL 은 이름을 적어 준다. 이름이 겹칠 때를 대비해 대괄호 타입 힌트까지
+   * 같이 꺼낸다 — 실측으로 `공동담당자` 라는 이름의 필드가 **2개**였고
+   * (`userpicker`, `people`) 힌트가 그 둘을 갈랐다.
+   */
+  personFields: PersonFieldRef[];
+}
+
+export interface PersonFieldRef {
+  /** JQL 에 적힌 이름. `assignee` 같은 내장 필드면 그게 곧 id 다. */
+  name: string;
+  /** 대괄호 안 타입. `User Picker (single user)` 같은 것. 없을 수 있다. */
+  typeHint: string | null;
 }
 
 /**
@@ -87,6 +107,19 @@ export interface DerivedFromJql {
  */
 const ACCOUNT_ID =
   /\b(?:[0-9a-f]{24}|\d{6,}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi;
+
+/**
+ * `칸 = accountId` 에서 칸 이름을 꺼낸다.
+ *
+ *   "공동담당자[User Picker (single user)]" = 6374…
+ *   "공동담당자" = 6374…
+ *   assignee = 6374…
+ */
+const PERSON_FIELD = new RegExp(
+  '(?:"([^"\\[\\]]+)(?:\\[([^\\]]+)\\])?"|\\b([A-Za-z_][\\w]*)\\b)' +
+    '\\s*=\\s*(?:[0-9a-f]{24}|\\d{6,}:[0-9a-f-]{36})',
+  'gi'
+);
 
 /** `= 값` 에서 값을 꺼낸다. 따옴표·홑따옴표·맨값 모두 대응 */
 function unquote(v: string): string {
@@ -135,7 +168,26 @@ export function deriveFromJql(jql: string): DerivedFromJql {
     ...new Set((q.match(ACCOUNT_ID) ?? []).map((s) => s.toLowerCase())),
   ];
 
+  /*
+    사람과 비교되는 칸 이름을 꺼낸다.
+
+      "공동담당자[User Picker (single user)]" = 6374…   →  이름 + 타입힌트
+      assignee = 6374…                                  →  이름만
+
+    `= accountId` 인 것만 본다. 그래야 `project = KQ` 같은 조건이 안 딸려
+    온다 — 이름으로 거르면 프로젝트마다 규칙을 또 만들어야 한다.
+  */
+  const personFields: PersonFieldRef[] = [];
+  const seenField = new Set<string>();
+  for (const m of q.matchAll(PERSON_FIELD)) {
+    const name = m[1] ?? m[3];
+    if (!name || seenField.has(name)) continue;
+    seenField.add(name);
+    personFields.push({ name, typeHint: m[2] ?? null });
+  }
+
   return {
+    personFields,
     projectKey: projectM ? unquote(projectM[1]) : null,
     issueType: issueTypeM ? unquote(issueTypeM[1]) : null,
     excludeStatuses: [...excludes],
@@ -350,4 +402,103 @@ export function matchSlackUsers(
     out.set(name, hits.length === 1 ? hits[0] : null);
   }
   return out;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 사람 칸 이름 → 필드 id
+// ─────────────────────────────────────────────────────────────
+
+/** `/rest/api/3/field` 응답에서 우리가 쓰는 부분만. */
+export interface JiraFieldMeta {
+  id: string;
+  name: string;
+  schema?: { custom?: string; type?: string };
+}
+
+export interface ResolvedPersonFields {
+  /**
+   * 담당자 말고 **한 칸 더** 보는 곳. 없으면 null 이고, 그때 판정은
+   * assignee 만 본다.
+   *
+   * 하나만 고르는 이유: 판정 코드가 "담당자 + 한 칸" 구조다. 두 개를
+   * 지원하는 척하면 두 번째는 조용히 무시된다.
+   */
+  coAssigneeField: string | null;
+  /** 화면에 그대로 쓰는 칸 이름들. 흐름도가 "어디를 보는지" 적는다. */
+  labels: string[];
+  /** 확정하지 못한 것. 화면이 빨간 줄로 보여준다. */
+  problems: string[];
+}
+
+/** Jira 가 JQL 대괄호에 적는 타입 이름을 `schema.custom` 꼬리와 맞춘다. */
+function hintMatches(hint: string | null, custom?: string): boolean {
+  if (!hint || !custom) return false;
+  const tail = custom.split(':').pop() ?? '';
+  // `User Picker (single user)` → `userpickersingleuser` 로 눌러 비교한다.
+  const flat = hint.toLowerCase().replace(/[^a-z]/g, '');
+  return !!tail && flat.includes(tail.toLowerCase());
+}
+
+/** assignee·reporter 처럼 번호가 없는 칸. 이름이 곧 id 다. */
+const BUILTIN_PERSON = new Set(['assignee', 'reporter', 'creator']);
+
+/**
+ * JQL 이 말한 칸 이름을 실제 필드 id 로 바꾼다.
+ *
+ * 실측(2026-09-14): `공동담당자` 라는 이름의 필드가 **2개** 있었다.
+ *   customfield_10132  userpicker
+ *   customfield_10122  people
+ * 이름만으로는 못 고른다. JQL 이 대괄호에 적어 주는
+ * `[User Picker (single user)]` 가 둘을 가른다.
+ *
+ * 못 고르면 **찍지 않는다.** 잘못 고르면 그 칸이 늘 비어 보여서, 공동담당자로
+ * 들어온 티켓을 통째로 놓치면서도 오류가 한 줄도 안 난다.
+ */
+export function resolvePersonFields(
+  refs: PersonFieldRef[],
+  fields: JiraFieldMeta[]
+): ResolvedPersonFields {
+  const problems: string[] = [];
+  const labels: string[] = [];
+  const customIds: string[] = [];
+
+  for (const ref of refs) {
+    if (BUILTIN_PERSON.has(ref.name)) {
+      labels.push(ref.name);
+      continue;
+    }
+    const cands = fields.filter((f) => f.name === ref.name);
+    if (cands.length === 0) {
+      problems.push(
+        `JQL 의 '${ref.name}' 칸을 Jira 필드 목록에서 찾지 못했습니다.`
+      );
+      continue;
+    }
+    const picked =
+      cands.length === 1
+        ? cands[0]
+        : cands.find((c) => hintMatches(ref.typeHint, c.schema?.custom));
+    if (!picked) {
+      problems.push(
+        `'${ref.name}' 이름을 가진 필드가 ${cands.length}개라 어느 것인지 ` +
+          `가릴 수 없습니다 (${cands.map((c) => c.id).join(', ')}).`
+      );
+      continue;
+    }
+    labels.push(picked.name);
+    customIds.push(picked.id);
+  }
+
+  /*
+    커스텀 사람 칸이 둘 이상이면 하나만 쓰게 된다. 조용히 첫 번째를 쓰면
+    나머지로 들어온 티켓이 영영 안 잡히므로 말해 둔다.
+  */
+  if (customIds.length > 1) {
+    problems.push(
+      `담당자 외 사람 칸이 ${customIds.length}개입니다. ` +
+        `판정은 첫 번째(${customIds[0]}) 하나만 봅니다.`
+    );
+  }
+
+  return { coAssigneeField: customIds[0] ?? null, labels, problems };
 }

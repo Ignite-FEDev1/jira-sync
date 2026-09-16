@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 
-import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import {
+  missingCredsMessage,
+  resolveJiraAccess,
+} from '@/lib/services/qa-router/api-creds';
 import {
   createJiraClient,
   createSlackReader,
@@ -64,23 +67,20 @@ export async function POST(
     );
   }
 
-  const email = process.env.IGNITE_JIRA_EMAIL;
-  const token = process.env.IGNITE_JIRA_API_TOKEN;
-  if (!email || !token) {
+  const access = await resolveJiraAccess(
+    cfg.jiraInstance,
+    cfg.jiraOperatorAccountId
+  );
+  if (!access) {
     return NextResponse.json(
-      { error: 'Jira 자격증명이 없습니다.' },
+      { error: missingCredsMessage(cfg.jiraInstance) },
       { status: 500 }
     );
   }
 
   try {
-    const jira = createJiraClient({
-      // 인스턴스 주소는 한 곳에서만 정한다 (하드코딩하면 두 곳이 어긋난다).
-      baseUrl:
-        cfg.jiraInstance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE,
-      email,
-      token,
-    });
+    // 주소와 토큰을 함께 해석한다 — 따로 두면 한쪽만 바뀌어 401 이 난다.
+    const jira = createJiraClient(access);
     /*
       ── [배포 전 전환] ──────────────────────────────────────────────
       지금은 개인 사용자 토큰(xoxp-)으로 읽는다. 발송용 봇 토큰에는 읽기

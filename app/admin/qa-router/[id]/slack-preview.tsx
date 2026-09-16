@@ -23,7 +23,15 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { List, ListOrdered } from 'lucide-react';
 
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
 /**
@@ -108,6 +116,25 @@ export function tokenize(text: string): Token[] {
   return out;
 }
 
+/**
+ * mrkdwn 을 **글자만** 남긴다. 접힌 줄의 한 줄 요약이 쓴다.
+ *
+ * 왜 정규식으로 별표를 지우지 않나: 그러면 파서가 두 벌이 되고, 링크
+ * `<url|라벨>` 처럼 규칙이 있는 것에서 곧 어긋난다. 같은 `tokenize` 를
+ * 쓰고 그리는 대신 이어 붙이기만 한다 — 화면과 요약이 같은 규칙을 본다.
+ */
+export function plainText(text: string): string {
+  const flat = (toks: Token[]): string =>
+    toks
+      .map((tk) =>
+        tk.t === 'text' || tk.t === 'emoji' || tk.t === 'code'
+          ? tk.v
+          : flat(tk.kids)
+      )
+      .join('');
+  return flat(tokenize(text));
+}
+
 /** 조각을 그린다. 파싱은 안 한다. */
 function draw(toks: Token[], key = ''): React.ReactNode[] {
   return toks.map((tk, i) => {
@@ -171,7 +198,17 @@ function SlackPreview({
   error,
 }: SlackPreviewProps) {
   return (
-    <div className="overflow-hidden rounded-lg border">
+    /*
+      ── 흰 바탕이 아래에서 끊겼다 ──
+
+      바깥 상자는 그리드가 늘려 주는데(양 칸 높이를 맞춘다) 흰 바탕은
+      내용 높이 그대로였다. 그래서 왼쪽 입력칸이 더 길면 미리보기 아래쪽에
+      바탕이 빠진 띠가 남았다 — 메시지가 거기서 잘린 것처럼 보인다.
+
+      세로 flex 로 두고 본문을 flex-1 로 늘린다. 채널을 흉내 내는 자리라
+      바탕이 끝까지 차야 "이게 채널이다" 로 읽힌다.
+    */
+    <div className="flex h-full flex-col overflow-hidden rounded-lg border">
       <div className="flex items-baseline justify-between border-b bg-muted/40 px-2.5 py-1.5">
         <span className="text-[10.5px] font-medium text-muted-foreground">
           채널에 뜨는 모습
@@ -183,7 +220,7 @@ function SlackPreview({
         )}
       </div>
 
-      <div className="bg-white px-3 py-2.5 dark:bg-[#1a1d21]">
+      <div className="flex-1 bg-white px-3 py-2.5 dark:bg-[#1a1d21]">
         {error && !text ? (
           <p className="text-[11.5px] text-muted-foreground">{error}</p>
         ) : !text ? (
@@ -319,6 +356,84 @@ function wrapSelection(
 }
 
 /**
+ * 고른 줄들 앞에 표시를 토글한다. 리스트 버튼(글머리·번호)이 쓴다.
+ *
+ * Slack mrkdwn 에는 `- ` 를 불릿으로, `1. ` 을 번호로 바꿔 주는 문법이
+ * 없다 — 그건 리치 텍스트 입력칸(rich_text 블록) 안에서만 되는
+ * 자동변환이고, 이 봇은 순수 문자열(mrkdwn `text`)로 보낸다. 그래서
+ * **문자 자체**를 줄 앞에 박는다: 불릿은 `•`, 번호는 `1.` `2.` 처럼
+ * 세는 숫자를 그대로 글자로 넣는다 — 이러면 Slack 이 그대로 그린다.
+ *
+ * ── 토글이어야 한다 ──
+ *
+ * 처음엔 누를 때마다 무조건 덧붙였다. 이미 `•` 가 붙은 줄에 다시
+ * 누르면 `• • 문구` 가 됐다 — 버튼이 "이 상태로 만든다" 가 아니라
+ * "한 번 더 찍는다" 로 동작한 것이다. 고른 줄이 **전부** 이미 그
+ * 표시로 시작하면 떼고, 아니면(하나도 없거나 일부만 있으면) 붙인다 —
+ * 워드·구글독스의 리스트 버튼과 같은 규칙이다.
+ *
+ * 선택 범위를 줄 경계까지 늘린다. 커서만 있고 아무것도 안 골랐으면
+ * 지금 줄 하나에 적용한다 — 매번 줄 전체를 고르게 시키면 손이 더 간다.
+ *
+ * 빈 줄은 건너뛴다. 문단 사이 빈 줄에마저 표시를 박으면 그 자체가
+ * 눈에 걸리는 군더더기가 된다.
+ */
+function toggleLinePrefix(
+  el: HTMLTextAreaElement | null,
+  rule: {
+    /** 이 줄이 이미 표시돼 있는가. */
+    has: (line: string) => boolean;
+    /** 표시를 뗀다. */
+    strip: (line: string) => string;
+    /** 표시를 붙인다. i 는 붙이는 줄 중 몇 번째인지(번호 매기기용). */
+    add: (line: string, i: number) => string;
+  },
+  fallback: (next: string) => void,
+  value: string
+): void {
+  if (!el) return;
+  const a = el.selectionStart ?? 0;
+  const b = el.selectionEnd ?? a;
+  const lineStart = value.lastIndexOf('\n', a - 1) + 1;
+  const lineEndFound = value.indexOf('\n', b);
+  const lineEnd = lineEndFound === -1 ? value.length : lineEndFound;
+
+  const lines = value.slice(lineStart, lineEnd).split('\n');
+  const withContent = lines.filter((ln) => ln.trim());
+  const allMarked = withContent.length > 0 && withContent.every(rule.has);
+
+  let n = 0;
+  const next = lines
+    .map((ln) => {
+      if (!ln.trim()) return ln;
+      return allMarked ? rule.strip(ln) : rule.add(ln, n++);
+    })
+    .join('\n');
+
+  el.focus();
+  el.setSelectionRange(lineStart, lineEnd);
+  typeInto(el, next, () =>
+    fallback(value.slice(0, lineStart) + next + value.slice(lineEnd))
+  );
+  requestAnimationFrame(() => {
+    const p = lineStart + next.length;
+    el.setSelectionRange(p, p);
+  });
+}
+
+const BULLET_RULE = {
+  has: (ln: string) => /^•\s/.test(ln),
+  strip: (ln: string) => ln.replace(/^•\s*/, ''),
+  add: (ln: string) => `• ${ln}`,
+};
+
+const NUMBER_RULE = {
+  has: (ln: string) => /^\d+\.\s/.test(ln),
+  strip: (ln: string) => ln.replace(/^\d+\.\s*/, ''),
+  add: (ln: string, i: number) => `${i + 1}. ${ln}`,
+};
+
+/**
  * 템플릿을 고치면서 결과를 같이 본다.
  *
  * 왜 두 칸인가 (진짜 위지윅이 아닌 이유)
@@ -345,6 +460,8 @@ export function TemplateEditor({
   stale?: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  /** 변수 Select 를 매번 새로 마운트하는 키. 주석은 아래 Select 자리에 있다. */
+  const [varMenuKey, setVarMenuKey] = useState(0);
 
   const insertVar = (name: string) => {
     const tag = `{${name}}`;
@@ -373,6 +490,76 @@ export function TemplateEditor({
             <span className="font-mono text-[10px]">{'</>'}</span>
           </MarkButton>
           <span aria-hidden className="mx-1 h-4 w-px bg-border" />
+          {/*
+            ── 글머리·번호는 감싸기가 아니라 줄 앞에 붙이기다 ──
+
+            B·I·코드는 고른 글자를 기호로 **감싼다**(`wrapSelection`).
+            리스트는 성격이 달라서 같은 함수를 못 쓴다 — 한 줄 전체 앞에
+            표시 하나를 놓는 일이고, 여러 줄을 고르면 줄마다 따로 붙는다.
+            `toggleLinePrefix` 를 따로 둔 이유다.
+          */}
+          <MarkButton
+            label="글머리 기호"
+            onClick={() =>
+              toggleLinePrefix(ref.current, BULLET_RULE, onChange, value)
+            }
+          >
+            <List className="size-3.5" />
+          </MarkButton>
+          <MarkButton
+            label="번호 매기기"
+            onClick={() =>
+              toggleLinePrefix(ref.current, NUMBER_RULE, onChange, value)
+            }
+          >
+            <ListOrdered className="size-3.5" />
+          </MarkButton>
+          <span aria-hidden className="mx-1 h-4 w-px bg-border" />
+          {/*
+            ── 변수도 툴바로 올렸다 ──
+
+            전에는 본문 칸 아래에 버튼 12개가 줄바꿈되며 늘어서 있었다.
+            B·I·코드·리스트는 툴바에 있는데 변수만 아래로 빠져 있으니
+            "같은 종류의 도구" 로 안 읽혔고, 12개가 두 줄을 먹어 본문
+            칸을 그만큼 밀어냈다. 셀렉트 하나로 접으면 자리도 줄고,
+            나머지 툴바 버튼과 한 줄에 나란히 선다.
+
+            매번 새로 고르는 동작(같은 변수를 두 번 넣을 수도 있다)인데
+            Select 는 "지금 선택된 값" 을 들고 있는 컴포넌트다. 같은
+            항목을 다시 골라도 값이 그대로면 Radix 가 변화 없음으로 보고
+            onValueChange 를 건너뛸 수 있다 — 두 번째 클릭이 씹힌다.
+            그래서 고를 때마다 `key` 를 바꿔 통째로 새로 마운트한다.
+            "선택된 적 없음" 에서 다시 시작하니 같은 값을 골라도 매번
+            변화로 잡힌다. 대신 고른 뒤엔 트리거가 placeholder("변수
+            추가")로 돌아간다 — 어차피 본문에 들어간 결과는 오른쪽
+            미리보기가 보여준다.
+          */}
+          <Select
+            key={varMenuKey}
+            onValueChange={(v) => {
+              insertVar(v);
+              setVarMenuKey((k) => k + 1);
+            }}
+          >
+            <SelectTrigger className="h-6 w-auto gap-1 border-none bg-transparent px-1.5 text-[10.5px] text-muted-foreground shadow-none hover:bg-muted focus:ring-0">
+              <SelectValue placeholder="변수 추가" />
+            </SelectTrigger>
+            <SelectContent>
+              {vars.map((v) => (
+                <SelectItem
+                  key={v.name}
+                  value={v.name}
+                  className="text-[12px]"
+                >
+                  <span className="font-mono">{`{${v.name}}`}</span>
+                  <span className="ml-1.5 text-muted-foreground">
+                    {v.desc}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <span aria-hidden className="mx-1 h-4 w-px bg-border" />
           <span className="text-[10px] text-muted-foreground">
             ⌘Z 로 되돌립니다
           </span>
@@ -397,31 +584,44 @@ export function TemplateEditor({
           rows={11}
           spellCheck={false}
           aria-label="알림 본문"
-          className="w-full resize-y rounded-b-md border bg-transparent p-2 font-mono text-[11.5px] leading-relaxed shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          /*
+            ── 흰 바탕이 아니었다 ──
+
+            `bg-transparent` 라 편집 중인 Stage 의 `bg-muted/40` 틴트가
+            그대로 비쳐, 쓰는 동안 종이가 아니라 회색 유리 위에 쓰는
+            느낌이었다. 오른쪽 "채널에 뜨는 모습" 이 이미 `bg-white
+            dark:bg-[#1a1d21]` 를 쓰고 있으니 같은 값을 준다 — 왼쪽(쓰는
+            곳)과 오른쪽(보는 곳)이 **같은 종이**여야 비교가 된다.
+
+            글자 크기도 11.5px → 13px 로 올렸다. 변수·mrkdwn 문법을 정확히
+            읽어야 하는 칸이라 작을수록 유리해 보였는데, 실제로는 작을수록
+            타이핑하며 한 글자씩 놓치기 쉬웠다.
+          */
+          /*
+            `block` 이 있어야 한다. textarea 는 기본이 inline-block 이라
+            글자 baseline 아래 여백이 5px 남는다 — 실측으로 왼쪽 칸은
+            695 에서 끝나는데 textarea 만 690 에서 끝나, 오른쪽 미리보기와
+            아래 끝이 미세하게 어긋나 보였다. 두 칸 높이는 이미 같았고
+            어긋난 건 이 5px 이었다.
+          */
+          className="block w-full resize-y rounded-b-md border bg-white p-3 font-mono text-[13px] leading-relaxed shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring dark:bg-[#1a1d21]"
         />
 
-        <p className="mt-1.5 text-[10.5px] text-muted-foreground">
-          변수를 눌러 커서 자리에 넣습니다
-        </p>
-        <div className="mt-1 flex flex-wrap gap-1">
-          {vars.map((v) => (
-            <button
-              key={v.name}
-              type="button"
-              title={v.desc}
-              onClick={() => insertVar(v.name)}
-              className="rounded border bg-muted/40 px-1.5 py-px font-mono text-[10.5px] text-muted-foreground hover:bg-muted"
-            >
-              {`{${v.name}}`}
-            </button>
-          ))}
-        </div>
-        <p className="mt-1.5 text-[10.5px] text-muted-foreground">
-          값이 없는 변수가 있는 줄은 통째로 빠집니다
-        </p>
       </div>
 
       <SlackPreview text={preview} channel={channel} stale={stale} />
+
+      {/*
+        ── 설명을 그리드 밖으로 뺐다 ──
+
+        왼쪽 칸 안에 두었더니 그 칸이 설명 높이만큼 더 길어졌고,
+        `h-full` 로 늘어나는 미리보기가 **입력칸보다 그만큼 아래로**
+        내려갔다. 둘은 같은 것을 보는 두 창이라 아래 끝이 어긋나면
+        나란히 견주기가 어렵다. 양쪽 밖으로 빼면 두 칸이 같은 높이로 선다.
+      */}
+      <p className="text-[10.5px] text-muted-foreground lg:col-span-2">
+        값이 없는 변수가 있는 줄은 통째로 빠집니다
+      </p>
     </div>
   );
 }
@@ -564,7 +764,9 @@ export function ChannelInput({
             {hit?.notInChannel && ' · 봇이 안에 없습니다. 초대해 주세요'}
           </span>
         ) : !hit ? (
-          <span className="text-muted-foreground">확인하는 중…</span>
+          // 다른 칸과 같은 말로. `확인 중`·`읽는 중`·`확인하는 중` 이 한 폼에
+          // 같이 떠 있어 서로 다른 일이 도는 것처럼 보였다.
+          <span className="text-muted-foreground">읽는 중…</span>
         ) : (
           <span className="text-amber-700 dark:text-amber-400">
             {hit.problem ?? hit.unknown ?? hit.error}

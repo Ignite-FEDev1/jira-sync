@@ -11,6 +11,14 @@ import type { PlanProgress } from './plan-tickets';
 
 export type ReassignMode = 'off' | 'self_only' | 'all_members';
 
+/**
+ * 배포대장 페이지 제목의 `(정기|adhoc|hotfix)` 표기. 차수로 잡을지를
+ * 이 셋 각각 독립적으로 켜고 끈다 — `deployKinds` 참고.
+ */
+export type DeployKind = 'regular' | 'adhoc' | 'hotfix';
+
+export const DEPLOY_KINDS: readonly DeployKind[] = ['regular', 'adhoc', 'hotfix'];
+
 export interface QuietHours {
   startHour: number;
   endHour: number;
@@ -62,9 +70,19 @@ export interface JudgeStep {
 
 export const JUDGE_STEP: Record<JudgeTier, JudgeStep> = {
   assigned: {
-    ask: '담당자 칸에 우리 팀원이 있나',
+    /*
+      칸 이름을 질문에 넣지 않는다. 아래 `look` 이 JQL 에서 읽은 실제 칸을
+      적는데, 여기서 `담당자 칸` 이라고 못 박으면 담당자를 안 쓰는 필터에서
+      두 줄이 서로 다른 말을 한다.
+    */
+    ask: '이미 배정된 우리 팀원이 있나',
     look: '담당자 · 공동담당자',
-    hit: '그 사람',
+    /*
+      알림을 안 보내는 유일한 단계다. 여기서 답이 나온다는 건 우리가 보기
+      전에 누가 이미 가져갔다는 뜻이라, 그 사람에게 "당신 겁니다" 를
+      보내는 건 소음이다. 판정과 집계에는 그대로 들어간다.
+    */
+    hit: '그 사람 · 알림 안 감',
     kind: '사실',
   },
   epic: {
@@ -74,8 +92,15 @@ export const JUDGE_STEP: Record<JudgeTier, JudgeStep> = {
     kind: '사실',
   },
   siblings: {
-    ask: '같은 메뉴를 맡은 사람이 있나',
-    look: '제목 [BO_…] → 이번 차수 QA 티켓',
+    /*
+      "메뉴" 라고 쓰지 않는다. 프리픽스가 메뉴라는 건 **우리 팀의 말**이고
+      필터 어디에도 안 적혀 있다. 다른 프로젝트에서 프리픽스가 모듈이든
+      컴포넌트든, "제목 앞머리가 같다" 는 사실은 그대로다.
+    */
+    ask: '제목 앞머리가 같은 티켓을 맡은 사람이 있나',
+    // 폴백도 KQ 말을 안 쓴다. 표본을 못 읽었을 때 `BO_` 를 보여 주면
+    // 그 프로젝트에 없는 값을 예시라고 내미는 셈이다.
+    look: '제목 앞머리 → 이번 차수 QA 티켓',
     hit: '가장 많이 맡은 사람',
     kind: '추측',
   },
@@ -276,12 +301,24 @@ export const DEFAULT_TEMPLATE = [
 ].join('\n');
 
 /**
- * 기본 규칙 네 개. **DB 컬럼 기본값과 같은 값이어야 한다**
- * (`20260911_qa_router_alert_rules.sql`).
+ * 기본 규칙 셋. **DB 컬럼 기본값과 같은 값이어야 한다**
+ * (`20260915_qa_router_drop_prod_soon.sql`).
  *
  * 컬럼이 아직 없는 DB 에 새 코드가 붙는 창에서 쓰는 폴백이다. 여기가
  * 비면 화면이 "알림 없음" 을 그리는데, 실제로는 SQL 이 제 기본값으로
  * 알림을 보내고 있어서 화면과 동작이 어긋난다.
+ *
+ * ── `{days}일 뒤 운영 배포` 를 뺐다 ──
+ *
+ * 넷째로 `운영 배포일 1일 전 · 주말이면 이전 근무일` 규칙이 있었다.
+ * 실측으로 그 규칙은 **QA 종료와 같은 날(09-09)에 걸려 한 번도 안 나갔다** —
+ * 한 날에 하나만 보내고 QA 종료가 위에 있기 때문이다.
+ *
+ * 그런데 안 나간 게 손해도 아니었다. 기본 본문이 이미 `운영 배포일` 을
+ * 적고 있어서, QA 종료 알림을 받으면 배포일을 같이 알게 된다. 같은 말을
+ * 하루 앞서 한 번 더 하려던 규칙이었고, 그 자리는 이미 채워져 있었다.
+ *
+ * 필요하면 화면에서 다시 만들 수 있다. 기본값에 두지 않을 뿐이다.
  */
 export const DEFAULT_ALERT_RULES: readonly AlertRule[] = [
   {
@@ -308,15 +345,6 @@ export const DEFAULT_ALERT_RULES: readonly AlertRule[] = [
     offset: 0,
     shift: 'next_workday',
     label: 'QA 종료',
-    enabled: true,
-    template: DEFAULT_TEMPLATE,
-  },
-  {
-    id: 'prodSoon',
-    anchor: 'prod',
-    offset: -1,
-    shift: 'prev_workday',
-    label: '{days}일 뒤 운영 배포',
     enabled: true,
     template: DEFAULT_TEMPLATE,
   },
@@ -375,6 +403,15 @@ export interface QaRouterConfig {
 
   /** 기획티켓 진행을 걷는 KST 시각들. */
   planCollectHours: number[];
+  /**
+   * 차수로 잡을 배포 종류. 정기(regular)·비정기(adhoc)·hotfix 를 각각
+   * 독립적으로 켜고 끈다.
+   *
+   * 기본 `['regular']` — 정기배포만 본다. adhoc·hotfix 는 QA 기간이
+   * 따로 없고 차수 번호도 안 붙어서, 섞이면 "이번 차수" 가 하루에 몇
+   * 번씩 바뀐다. 셋 다 빼면 차수를 한 건도 못 읽으므로 DB CHECK 가 막는다.
+   */
+  deployKinds: DeployKind[];
 
   confluenceDeployRootId: string | null;
   /** null 이면 버전 목록에서 자동 감지 */
@@ -476,6 +513,7 @@ export type QaRouterConfigInput = Pick<
       | 'devIssueTypeName'
       | 'coAssigneeField'
       | 'planCollectHours'
+      | 'deployKinds'
       | 'reassignMode'
       | 'selfAccountId'
       | 'heartbeatStaleMinutes'
@@ -690,3 +728,122 @@ export type QaRouterEventInput = Omit<
   /** 차수와 무관한 기록(system 이벤트 등)도 있으므로 optional 이다. */
   fixVersion?: string | null;
 };
+
+// ─────────────────────────────────────────────────────────────
+// 차수별 알림 기준 덮어쓰기
+// (supabase/migrations/20260915_qa_router_cycle_alert_rules.sql)
+// ─────────────────────────────────────────────────────────────
+
+/*
+  이 블록은 파일 맨 끝에 덧붙였다. 위의 선언들은 손대지 않는다 —
+  DeployCycle 은 interface 라 같은 파일에서 다시 열어 칸을 더할 수 있다
+  (선언 병합). 그래야 기존 줄을 건드리지 않고도 필드가 늘어난다.
+*/
+
+/**
+ * 차수 하나가 쓰는 알림 규칙. **null 이면 설정값을 쓴다.**
+ *
+ * 왜 차수마다 두나 (실측):
+ *   Jira 차수명은 `release_20260914` 인데 GitLab 브랜치는 `release/260910` 이고
+ *   실제 운영 배포는 09-14 였다 — 브랜치를 자른 날과 배포한 날이 4일 어긋난다.
+ *   이런 차수에 맞추려고 **설정**을 고치면 다음 차수부터 전부 틀어진다.
+ *   어긋난 것은 이 차수 하나이므로, 덮어쓰기도 이 차수 하나에 둔다.
+ */
+export interface DeployCycle {
+  /**
+   * 이 차수만 쓰는 알림 규칙. null·undefined 면 설정값(`alertRules`)을 쓴다.
+   *
+   * undefined 가 따로 있는 이유: 컬럼이 아직 없는 DB 에 새 코드가 붙는 창이
+   * 실제로 있다. 그때도 "설정값을 쓴다" 로 읽혀야 한다.
+   */
+  alertRulesOverride?: AlertRule[] | null;
+}
+
+/**
+ * 이 차수가 실제로 쓰는 규칙. **SQL 의 qa_router_alert_rules_for 와 같아야 한다.**
+ *
+ * 그쪽은 `coalesce(p_override, p_config_rules)` 한 줄이고 여기도 `??` 한 줄이다.
+ * 빈 배열을 폴백하지 **않는** 것까지 같다 — DB CHECK 가 `[]` 를 막으므로
+ * `[]` 는 애초에 저장될 수 없고, 한쪽만 폴백하면 화면과 발송이 어긋난다.
+ *
+ * 함수로 두는 이유는 grep 대상을 하나로 만들려는 것이다. 규칙을 읽는 자리마다
+ * `??` 를 흩뿌리면 한 곳이 빠져도 아무 말 없이 설정값으로 돈다.
+ */
+export function effectiveAlertRules(
+  override: AlertRule[] | null | undefined,
+  configRules: AlertRule[]
+): AlertRule[] {
+  return override ?? configRules;
+}
+
+/** 이 차수가 설정값을 벗어났나. 화면이 그 사실을 표시해야 한다. */
+export function hasAlertOverride(cycle: {
+  alertRulesOverride?: AlertRule[] | null;
+}): boolean {
+  return cycle.alertRulesOverride != null;
+}
+
+/**
+ * 알림 규칙 배열 검증. 문제가 있으면 그 사유, 없으면 null.
+ *
+ * DB CHECK(`qa_router_valid_alert_rules`)가 형태를 한 번 더 막지만, 제약이 내는
+ * 말은 `violates check constraint "..."` 다. 어느 줄의 무엇이 문제인지 사람이
+ * 알 수 있게 여기서 먼저 가른다.
+ *
+ * ⚠ `app/api/qa-router/[id]/config/route.ts` 의 `checkRules` 가 쌍둥이다.
+ *    그쪽은 라우트 파일이라 함수를 export 할 수 없어(Next 가 route 의 export 를
+ *    HTTP 메서드로만 허용한다) 가져다 쓸 수 없었다. 규칙을 고칠 때는 둘을 같이
+ *    고친다 — 다음에 그 파일을 손볼 사람은 본문을 이 함수 호출로 바꿔 두면 된다.
+ */
+export function checkAlertRules(v: unknown): string | null {
+  if (!Array.isArray(v)) return '알림 규칙 형식이 잘못됐습니다.';
+  if (v.length === 0) return '알림 규칙이 하나도 없습니다.';
+  if (v.length > 20) return '알림 규칙은 20개까지입니다.';
+
+  const anchors: AlertAnchor[] = ['qa_start', 'qa_end', 'prod'];
+  const shifts: AlertShift[] = ['none', 'next_workday', 'prev_workday'];
+  const seen = new Set<string>();
+
+  for (const [i, raw] of v.entries()) {
+    const at = `${i + 1}번째 알림`;
+    if (typeof raw !== 'object' || raw === null)
+      return `${at} 형식이 잘못됐습니다.`;
+    const r = raw as Record<string, unknown>;
+
+    const label = typeof r.label === 'string' ? r.label.trim() : '';
+    if (!label) return `${at}의 문구를 입력해 주세요.`;
+
+    const id = typeof r.id === 'string' ? r.id.trim() : '';
+    if (!id) return `${at}의 식별자가 비었습니다.`;
+    // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
+    if (seen.has(id)) return `알림 식별자가 겹칩니다: ${id}`;
+    seen.add(id);
+
+    if (!anchors.includes(r.anchor as AlertAnchor))
+      return `${at}의 기준일이 잘못됐습니다.`;
+    if (!shifts.includes(r.shift as AlertShift))
+      return `${at}의 주말 처리가 잘못됐습니다.`;
+
+    const off = Number(r.offset);
+    if (!Number.isInteger(off) || off < -60 || off > 60)
+      return `${at}의 날짜 차이는 -60 ~ 60일 사이 정수여야 합니다.`;
+
+    if (typeof r.enabled !== 'boolean')
+      return `${at}의 사용 여부가 잘못됐습니다.`;
+
+    /*
+      템플릿에 모르는 변수가 있으면 **저장을 막는다.** 통과시키면 그 줄이
+      조용히 빠진 채 채널에 나간다 — 오타를 낸 사람은 "왜 그 줄이 안 나오지"
+      를 새벽에 알게 된다.
+    */
+    if (r.template !== undefined) {
+      if (typeof r.template !== 'string')
+        return `${at}의 템플릿 형식이 잘못됐습니다.`;
+      if (!r.template.trim()) return `${at}의 본문이 비었습니다.`;
+      const bad = unknownVars(r.template);
+      if (bad.length)
+        return `${at}에 모르는 변수가 있습니다: ${bad.map((x) => `{${x}}`).join(', ')}`;
+    }
+  }
+  return null;
+}

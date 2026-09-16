@@ -20,14 +20,21 @@ import {
   milestoneOn,
   nextWorkday,
   overdueSlot,
+  readCyclePageTitle,
   tooSoon,
   prevWorkday,
   ruleDay,
   resolveDeployYmd,
   resolveQaEndYmd,
+  staleFilterCycle,
 } from '../lib/services/qa-router/status';
 import type { DeployCycle } from '../lib/services/qa-router/types';
-import { DEFAULT_ALERT_RULES } from '../lib/services/qa-router/types';
+import {
+  checkAlertRules,
+  DEFAULT_ALERT_RULES,
+  effectiveAlertRules,
+  hasAlertOverride,
+} from '../lib/services/qa-router/types';
 import {
   hasProblem,
   isMissed,
@@ -36,6 +43,9 @@ import {
   settlementBucket,
 } from '../lib/services/qa-router/outcome';
 import { demoCycles, demoEvents } from '../lib/services/qa-router/demo';
+import { pickTriage } from '../lib/services/qa-router/triage';
+import { resolvePersonFields } from '../lib/services/qa-router/derive';
+import { JUDGE_TIERS } from '../lib/services/qa-router/types';
 
 import {
   parseThreadStatus,
@@ -1842,23 +1852,42 @@ test('판정 — 빈 배열이면 기본 순서로 돈다 (알림이 멎지 않�
 
   ①이 없으면 "설정으로 뺐다" 가 조용한 동작 변경이 된다.
 */
-test('알림 규칙 — 기본값이 기존 분기점과 한 날도 다르지 않다', () => {
+test('알림 규칙 — 기본값이 기존 분기점과 다른 날은 뺀 규칙 하루뿐이다', () => {
   const s = {
     qaStartYmd: '2026-09-03',
     qaEndYmd: '2026-09-09',
     prodYmd: '2026-09-14',
   };
-  // 차수 앞뒤로 넉넉히 훑는다. 한 날이라도 어긋나면 실패한다.
+  /*
+    ── 왜 하루가 갈리나 ──
+
+    `{days}일 뒤 운영 배포`(운영 배포일 1일 전 · 주말이면 이전 근무일)를
+    기본값에서 **일부러 뺐다**. 실측에서 그 규칙은 QA 종료와 같은 날에
+    걸려 한 번도 안 나갔고, 기본 본문이 이미 운영 배포일을 적고 있어
+    같은 말을 하루 앞서 반복하려던 것이었다.
+
+    `milestoneOn` 은 옛 하드코딩 판이고 그 분기를 아직 갖고 있다. 지금은
+    SQL 어디서도 안 부르는 참고용이라 그대로 두되, **갈리는 날이 정확히
+    그 하루뿐**임을 여기서 고정한다. 다른 날이 갈리면 그건 사고다.
+  */
+  const droppedDay = '2026-09-11'; // prevWorkday(09-14 월) = 09-11 금
+  const diffs: string[] = [];
+
   for (let i = 0; i < 40; i++) {
     const day = new Date(Date.UTC(2026, 7, 25) + i * 86_400_000)
       .toISOString()
       .slice(0, 10);
-    assert.equal(
-      milestoneFrom(DEFAULT_ALERT_RULES, s, day),
-      milestoneOn(s, day),
-      `${day} 에서 갈림`
-    );
+    const now = milestoneFrom(DEFAULT_ALERT_RULES, s, day);
+    const legacy = milestoneOn(s, day);
+    if (now !== legacy) diffs.push(day);
+    else continue;
+    // 갈리는 유일한 날: 옛 판은 말하고, 지금은 아무 말도 안 한다.
+    assert.equal(day, droppedDay, `${day} 에서 예상 못 한 차이`);
+    assert.equal(now, null);
+    assert.equal(legacy, '3일 뒤 운영 배포');
   }
+
+  assert.deepEqual(diffs, [droppedDay], '갈리는 날이 하루가 아니다');
 });
 
 test('알림 규칙 — 3일 전이라고 넣으면 정확히 3일 전에 울린다', () => {
@@ -1925,6 +1954,143 @@ test('알림 규칙 — 끈 규칙은 울리지 않는다', () => {
     r.id === 'qaStart' ? { ...r, enabled: false } : r
   );
   assert.equal(milestoneFrom(off, s, '2026-09-03'), null);
+});
+
+/*
+  ── 차수별 알림 기준 덮어쓰기 ──
+
+  왜 필요했나 (실측):
+    Jira 차수명은 release_20260914 인데 GitLab 브랜치는 release/260910 이고
+    실제 운영 배포는 09-14 였다. 브랜치를 자른 날과 배포한 날이 4일 어긋난다.
+    그 차수 하나에 맞추려고 **설정**을 고치면 다음 차수부터 전부 틀어진다.
+
+  두 가지를 고정한다.
+    ① override 가 null(또는 undefined)이면 **설정값을 쓴다** — 지금 동작 그대로
+    ② 값이 있으면 그것을 쓴다
+
+  ①이 없으면 칸 하나를 더한 것이 조용한 동작 변경이 된다.
+*/
+test('차수 덮어쓰기 — null 이면 설정값을 쓴다 (한 날도 다르지 않다)', () => {
+  const s = {
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-14',
+  };
+  const configRules = [...DEFAULT_ALERT_RULES];
+
+  // 같은 배열을 그대로 돌려줘야 한다 (복사도 변형도 없다).
+  assert.equal(effectiveAlertRules(null, configRules), configRules);
+  // 컬럼이 아직 없는 DB 에 새 코드가 붙는 창에서는 undefined 가 온다.
+  assert.equal(effectiveAlertRules(undefined, configRules), configRules);
+
+  // 그리고 실제로 울리는 날이 한 날도 달라지지 않는다.
+  for (let i = 0; i < 60; i++) {
+    const day = new Date(Date.UTC(2026, 7, 20) + i * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    assert.equal(
+      milestoneFrom(effectiveAlertRules(null, configRules), s, day),
+      milestoneFrom(configRules, s, day),
+      `${day} 에서 갈림`
+    );
+  }
+});
+
+test('차수 덮어쓰기 — 값이 있으면 그것을 쓴다', () => {
+  /*
+    release_20260914 를 브랜치(release/260910) 기준으로 잡아 둔 상태를 흉내낸다.
+    설정은 09-10 을 배포일로 알고 있고, 이 차수만 09-14 로 맞춘다.
+  */
+  const s = {
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-10',
+  };
+  const configRules = [...DEFAULT_ALERT_RULES];
+  const override = [
+    {
+      id: 'prodToday',
+      anchor: 'prod' as const,
+      // 브랜치를 자른 날(09-10)보다 4일 뒤에 배포했다.
+      offset: 4,
+      shift: 'none' as const,
+      label: '오늘 운영 배포',
+      enabled: true,
+    },
+  ];
+
+  const used = effectiveAlertRules(override, configRules);
+  assert.equal(used, override);
+
+  // 설정값은 09-10 에 울리고, 덮어쓴 차수는 09-14 에 울린다.
+  assert.equal(milestoneFrom(configRules, s, '2026-09-10'), '오늘 운영 배포');
+  assert.equal(milestoneFrom(used, s, '2026-09-10'), null);
+  assert.equal(milestoneFrom(used, s, '2026-09-14'), '오늘 운영 배포');
+});
+
+test('차수 덮어쓰기 — 덮어쓴 차수인지 화면이 알 수 있다', () => {
+  // 이 값이 없으면 "왜 이 차수만 알림이 다르지" 를 나중에 아무도 못 푼다.
+  assert.equal(hasAlertOverride({}), false);
+  assert.equal(hasAlertOverride({ alertRulesOverride: null }), false);
+  assert.equal(
+    hasAlertOverride({ alertRulesOverride: [...DEFAULT_ALERT_RULES] }),
+    true
+  );
+});
+
+test('차수 덮어쓰기 — 저장 전에 깨진 규칙을 사람 말로 막는다', () => {
+  assert.equal(checkAlertRules([...DEFAULT_ALERT_RULES]), null);
+  // `[]` 는 알림을 통째로 끈 상태가 된다. DB CHECK 도 같은 것을 막는다.
+  assert.match(checkAlertRules([]) ?? '', /하나도 없습니다/);
+  assert.match(checkAlertRules('nope') ?? '', /형식이 잘못/);
+  assert.match(
+    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], anchor: 'nope' }]) ?? '',
+    /기준일이 잘못/
+  );
+  assert.match(
+    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], offset: 99 }]) ?? '',
+    /-60 ~ 60/
+  );
+  assert.match(
+    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], label: '  ' }]) ?? '',
+    /문구를 입력/
+  );
+  // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
+  assert.match(
+    checkAlertRules([DEFAULT_ALERT_RULES[0], DEFAULT_ALERT_RULES[0]]) ?? '',
+    /겹칩니다/
+  );
+  assert.match(
+    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], template: '{없는변수}' }]) ??
+      '',
+    /모르는 변수/
+  );
+});
+
+/*
+  알림 발송의 실체는 PL/pgSQL + pg_cron 이다. TS 만 고치면 화면은 새 규칙을
+  보여주는데 새벽에 나가는 것은 옛 규칙이다 — 그 어긋남은 아무도 못 본다.
+  그래서 크론 함수가 실제로 덮어쓰기를 읽는지 파일에서 확인한다.
+*/
+test('차수 덮어쓰기 — 크론 함수도 이 규칙을 읽는다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260915_qa_router_cycle_alert_rules.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 칸은 nullable 이고 기본값이 없다 — 기존 차수가 전부 null 이어야 한다.
+  assert.match(sql, /add column if not exists alert_rules_override jsonb;/);
+  assert.doesNotMatch(sql, /alert_rules_override jsonb[^;]*default/);
+  // 아침 브리핑이 설정값을 직접 읽지 않고 이 함수를 거친다.
+  const brief = sql.slice(sql.indexOf('function public.qa_router_morning_brief'));
+  assert.match(
+    brief,
+    /qa_router_alert_rules_for\(cyc\.alert_rules_override, r\.alert_rules\)/
+  );
+  // 그 함수는 coalesce 한 줄이다 — TS 의 effectiveAlertRules 와 같은 규칙.
+  assert.match(sql, /select coalesce\(p_override, p_config_rules\);/);
 });
 
 /*
@@ -2064,10 +2230,16 @@ test('확인 주기 — 한 번도 안 돌았으면 바로 돈다', () => {
     · 질문을 잇는 화살표가 하나라도 빠지면 흐름이 끊긴다.
 */
 test('판정 흐름도 — 대괄호가 든 라벨이 문법을 안 깬다', () => {
-  const src = buildDiagram(['siblings']);
-  // 날raw `[BO_…]` 가 남아 있으면 mermaid 가 노드 문법으로 읽는다.
-  assert.doesNotMatch(src, /\{"[^"]*\[BO/);
-  assert.match(src, /#91;BO_/);
+  /*
+    대괄호는 이제 **표본에서 온 프리픽스**를 감쌀 때 생긴다. 날것으로
+    남으면 mermaid 가 노드 문법으로 읽어 그림이 통째로 안 그려진다.
+    프로젝트마다 다른 값이 들어오는 자리라 이스케이프가 더 중요해졌다.
+  */
+  const src = buildDiagram(['siblings'], undefined, undefined, null, {
+    prefixes: [{ name: 'FO_팔기', count: 12 }],
+  });
+  assert.doesNotMatch(src, /\{"[^"]*\[FO/);
+  assert.match(src, /#91;FO_팔기#93;/);
 });
 
 test('판정 흐름도 — 모든 질문이 예/아니오로 이어진다', () => {
@@ -2251,7 +2423,7 @@ test('판정 회귀 — 표본이 네 단계를 충분히 덮나', (t) => {
 test('추론 — 지금 KQ 모양이면 네 단계가 다 산다', () => {
   const fits = judgeFits({
     sampled: 100,
-    assignedHits: 100,
+    coHits: 100,
     labelHits: 99,
     prefixHits: 99,
     parentHits: 6,
@@ -2270,7 +2442,7 @@ test('추론 — 지금 KQ 모양이면 네 단계가 다 산다', () => {
 test('추론 — 레이블이 없으면 ②④가 함께 죽는다', () => {
   const fits = judgeFits({
     sampled: 50,
-    assignedHits: 50,
+    coHits: 50,
     labelHits: 0,
     prefixHits: 50,
     parentHits: 0,
@@ -2294,7 +2466,7 @@ test('추론 — 레이블은 있는데 에픽이 없으면 ②만 죽는다', (
   */
   const fits = judgeFits({
     sampled: 40,
-    assignedHits: 40,
+    coHits: 40,
     labelHits: 39,
     prefixHits: 39,
     parentHits: 0,
@@ -2313,7 +2485,7 @@ test('추론 — 프리픽스가 전부 제각각이면 ③은 약하다', () =>
   // 30건에 28종류 = 거의 1건씩. 같은 메뉴가 안 모이니 다수결이 안 선다.
   const fits = judgeFits({
     sampled: 30,
-    assignedHits: 30,
+    coHits: 30,
     labelHits: 30,
     prefixHits: 30,
     parentHits: 8,
@@ -2363,4 +2535,624 @@ test('추론 — 이슈타입 분포는 id 와 이름을 같이 센다', () => {
     { id: '10205', name: '개발처리', count: 2 },
     { id: '10001', name: '스토리', count: 1 },
   ]);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 처음 받는 사람 — 변경이력에서 알아내기
+// ─────────────────────────────────────────────────────────────
+
+const TEAM = [
+  { accountId: 'kim', name: '김가빈' },
+  { accountId: 'son', name: '손현지' },
+  { accountId: 'park', name: '박성찬' },
+];
+const CO = 'customfield_10132';
+
+/** 티켓 한 건의 이력. created 는 epoch ms 문자열이다 (bulkfetch 형식). */
+function log(items: [number, string | null, string | null][]) {
+  return {
+    changeHistories: items.map(([at, from, to]) => ({
+      created: String(at),
+      items: [{ fieldId: CO, from, to }],
+    })),
+  };
+}
+
+test('처음 받는 사람 — 가장 오래된 변경을 고른다 (bulkfetch 는 최신이 먼저다)', () => {
+  /*
+    실측으로 밟은 함정이다. bulkfetch 는 최신 이력을 먼저 주는데 개별
+    changelog API 는 반대다. `[0]` 을 쓰면 **정확히 반대 값**을 집어,
+    "처음 받은 사람" 자리에 "마지막으로 넘겨받은 사람" 이 들어간다.
+    아래 입력은 최신이 앞이다 — 그래도 kim 이 나와야 한다.
+  */
+  const r = pickTriage(
+    /*
+      최신이 앞이다. 두 읽기가 **다른 답**을 내도록 데이터를 짠다 —
+      `kim → son` 처럼 이어지는 체인은 어느 쪽을 읽어도 kim 이 나와서
+      순서가 뒤집혀도 테스트가 통과해 버린다 (실제로 한 번 놓쳤다).
+        가장 오래된 것 = null → kim   이므로 정답은 kim
+        가장 최신    = son → park    이므로 뒤집히면 son
+    */
+    [log([[200, 'son', 'park'], [100, null, 'kim']])],
+    TEAM,
+    CO
+  );
+  assert.equal(r?.accountId, 'kim');
+});
+
+test('처음 받는 사람 — 생성 때 값이 있었으면 from 이 최초값이다', () => {
+  // 빈칸이 채워진 게 아니라 이미 있던 값이 바뀐 경우다.
+  const r = pickTriage([log([[100, 'son', 'park']])], TEAM, CO);
+  assert.equal(r?.accountId, 'son');
+});
+
+test('처음 받는 사람 — 팀원 밖은 세지 않는다', () => {
+  /*
+    이게 없으면 답이 통째로 뒤집힌다. 실측 80건에서 최초값 1위는 타팀
+    사람(64건)이었고 정답은 12건으로 2위였다. 팀원 명단은 필터 JQL 에서
+    나오므로 이 거르기는 하드코딩이 아니다.
+  */
+  const r = pickTriage(
+    [
+      log([[1, null, 'outsider']]),
+      log([[2, null, 'outsider']]),
+      log([[3, null, 'outsider']]),
+      log([[4, null, 'kim']]),
+    ],
+    TEAM,
+    CO
+  );
+  assert.equal(r?.accountId, 'kim');
+  assert.equal(r?.hits, 1);
+  // 타팀도 "본 건수" 에는 들어간다. 몇 건을 보고 판단했는지는 정직해야 한다.
+  assert.equal(r?.scanned, 4);
+  assert.equal(r?.teamHits, 1);
+});
+
+test('처음 받는 사람 — 다른 필드의 이력은 무시한다', () => {
+  const r = pickTriage(
+    [
+      {
+        changeHistories: [
+          { created: '50', items: [{ fieldId: 'assignee', from: null, to: 'son' }] },
+          { created: '99', items: [{ fieldId: CO, from: null, to: 'kim' }] },
+        ],
+      },
+    ],
+    TEAM,
+    CO
+  );
+  assert.equal(r?.accountId, 'kim');
+});
+
+test('처음 받는 사람 — 동점이면 추천이라 부르지 않는다', () => {
+  /*
+    Map 입력 순서로 갈린 승자를 "추천" 이라 내놓으면 안 된다. split 이면
+    화면이 확인창을 띄우지 않고 사람이 그냥 고르게 한다.
+  */
+  const r = pickTriage(
+    [
+      log([[1, null, 'kim']]),
+      log([[2, null, 'kim']]),
+      log([[3, null, 'son']]),
+      log([[4, null, 'son']]),
+    ],
+    TEAM,
+    CO
+  );
+  assert.equal(r?.strength, 'split');
+  assert.equal(r?.rivals.length, 1);
+});
+
+test('처음 받는 사람 — 근거가 얇으면 solid 라고 하지 않는다', () => {
+  const r = pickTriage([log([[1, null, 'kim']])], TEAM, CO);
+  assert.equal(r?.strength, 'thin');
+  assert.match(r?.why ?? '', /1건뿐/);
+});
+
+test('처음 받는 사람 — 충분하고 단독이면 solid', () => {
+  const r = pickTriage(
+    [1, 2, 3, 4].map((n) => log([[n, null, 'kim']])),
+    TEAM,
+    CO
+  );
+  assert.equal(r?.strength, 'solid');
+  assert.deepEqual(r?.rivals, []);
+  assert.match(r?.why ?? '', /모두 김가빈입니다/);
+});
+
+test('처음 받는 사람 — 근거가 없으면 null 이다 (아무나 찍지 않는다)', () => {
+  assert.equal(pickTriage([], TEAM, CO), null);
+  // 팀원이 한 번도 최초값이 아니었던 경우도 마찬가지다.
+  assert.equal(pickTriage([log([[1, null, 'outsider']])], TEAM, CO), null);
+});
+
+test('흐름도 — 처음 받는 사람이 시작 칸에 들어간다', () => {
+  // 설정에서 사람을 바꿨는데 그림이 그대로면 무엇을 바꿨는지 알 수 없다.
+  const withName = buildDiagram(['assigned'], undefined, undefined, '김가빈');
+  assert.match(withName, /김가빈 담당/);
+  const without = buildDiagram(['assigned'], undefined, undefined, null);
+  assert.match(without, /start\(\[QA 티켓\]\)/);
+});
+
+test('흐름도 — 표본에서 알아낸 실제 값을 쓴다', () => {
+  /*
+    이 그림의 문구는 KQ 를 보고 쓴 것이라 그대로 두면 다른 프로젝트에서
+    거짓말이 된다. 실측으로 `제목 [BO_…]` 라고 적혀 있었는데 이 필터의
+    1위 프리픽스는 `FO_팔기`(12건)였고 BO_ 는 6위권이었다.
+  */
+  const src = buildDiagram(['epic', 'siblings'], undefined, undefined, null, {
+    prefixes: [{ name: 'FO_팔기', count: 12 }, { name: 'BO_법인매입', count: 2 }],
+    planTypes: [{ name: '스토리' }],
+    devTypes: [{ name: '개발처리' }],
+  });
+  assert.match(src, /FO_팔기/);
+  assert.doesNotMatch(src, /앞머리 →/);
+  assert.match(src, /레이블 → 스토리 → 에픽 → 개발처리/);
+});
+
+test('흐름도 — 알아낸 게 없으면 일반 문구로 떨어진다', () => {
+  const src = buildDiagram(['epic', 'siblings'], undefined, undefined, null, undefined);
+  assert.match(src, /제목 앞머리 → 이번 차수/);
+  assert.match(src, /레이블 → 기획 티켓 → 에픽 → 개발 티켓/);
+  // 질문에도 KQ 말이 안 남아야 한다.
+  assert.match(src, /에픽 밑 개발 티켓에/);
+});
+
+test('흐름도 — 절반만 알면 일반 문구를 그대로 둔다', () => {
+  /*
+    "레이블 → 스토리 → 에픽 → 개발 티켓" 처럼 절반만 진짜면 어느 쪽이
+    실제 값인지 읽는 사람이 구분할 수 없다. 둘 다 알 때만 바꾼다.
+  */
+  const src = buildDiagram(['epic'], undefined, undefined, null, {
+    planTypes: [{ name: '스토리' }],
+  });
+  assert.match(src, /레이블 → 기획 티켓 → 에픽 → 개발 티켓/);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 사람 칸을 JQL 에서 알아내기 (필드 번호 하드코딩 제거)
+// ─────────────────────────────────────────────────────────────
+
+const FIELDS = [
+  { id: 'customfield_10132', name: '공동담당자', schema: { custom: 'com.atlassian.jira.plugin.system.customfieldtypes:userpicker' } },
+  { id: 'customfield_10122', name: '공동담당자', schema: { custom: 'com.atlassian.jira.plugin.system.customfieldtypes:people' } },
+  { id: 'customfield_10999', name: '검수자', schema: { custom: '...:userpicker' } },
+];
+
+test('사람 칸 — JQL 이 사람과 비교한 칸만 꺼낸다', () => {
+  const d = deriveFromJql(
+    'project = KQ AND issuetype = Bug AND ' +
+      '"공동담당자[User Picker (single user)]" = 637426199e48f2b9a6108c25 ' +
+      'OR assignee = 638d49155fce844d606c7682'
+  );
+  // project·issuetype 은 사람과 비교한 게 아니라 안 딸려온다.
+  assert.deepEqual(d.personFields, [
+    { name: '공동담당자', typeHint: 'User Picker (single user)' },
+    { name: 'assignee', typeHint: null },
+  ]);
+});
+
+test('사람 칸 — 이름이 겹치면 대괄호 타입 힌트가 가른다', () => {
+  /*
+    실측(2026-09-14): `공동담당자` 라는 이름의 필드가 2개였다.
+    이름만으로 고르면 절반의 확률로 **엉뚱한 칸**을 읽고, 그 칸은 늘 비어
+    있어서 공동담당자로 들어온 티켓을 통째로 놓치면서 오류는 안 난다.
+  */
+  const r = resolvePersonFields(
+    [
+      { name: '공동담당자', typeHint: 'User Picker (single user)' },
+      { name: 'assignee', typeHint: null },
+    ],
+    FIELDS
+  );
+  assert.equal(r.coAssigneeField, 'customfield_10132');
+  assert.deepEqual(r.labels, ['공동담당자', 'assignee']);
+  assert.deepEqual(r.problems, []);
+});
+
+test('사람 칸 — 못 가리면 찍지 않는다', () => {
+  const r = resolvePersonFields([{ name: '공동담당자', typeHint: null }], FIELDS);
+  assert.equal(r.coAssigneeField, null);
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /2개라/);
+});
+
+test('사람 칸 — 목록에 없는 이름은 문제로 남긴다', () => {
+  const r = resolvePersonFields([{ name: '없는칸', typeHint: null }], FIELDS);
+  assert.equal(r.coAssigneeField, null);
+  assert.match(r.problems[0], /찾지 못했습니다/);
+});
+
+test('사람 칸 — 커스텀 칸이 둘이면 첫 번째만 쓴다고 말한다', () => {
+  const r = resolvePersonFields(
+    [
+      { name: '공동담당자', typeHint: 'User Picker (single user)' },
+      { name: '검수자', typeHint: null },
+    ],
+    FIELDS
+  );
+  assert.equal(r.coAssigneeField, 'customfield_10132');
+  assert.match(r.problems.join(' '), /2개입니다/);
+});
+
+test('판정 — 넘겨준 칸을 실제로 읽는다', () => {
+  /*
+    이게 핵심이다. 화면만 파생값을 쓰고 봇이 상수를 쓰면, 화면이 "이 칸을
+    본다" 고 말하면서 봇은 다른 칸을 읽는다. 그 어긋남은 아무 데도 안 뜬다.
+  */
+  const issue = {
+    key: 'KQ-1',
+    fields: {
+      assignee: null,
+      // 기본 칸은 비어 있고, 다른 번호의 칸에 사람이 있다.
+      customfield_10999: { accountId: 'u-son', displayName: '손현지' },
+    },
+  };
+  const members = [{ accountId: 'u-son', name: '손현지', slackId: null }];
+
+  // 기본값(customfield_10132)으로는 못 찾는다.
+  assert.equal(findAssigned(issue, members, 'u-triage'), null);
+  // JQL 이 알려준 칸을 넘기면 찾는다.
+  const hit = findAssigned(issue, members, 'u-triage', 'customfield_10999');
+  assert.equal(hit?.accountId, 'u-son');
+  assert.equal(hit?.field, 'coAssignee');
+});
+
+test('흐름도 — 보는 칸 이름이 필터에서 온다', () => {
+  const other = buildDiagram(['assigned'], undefined, undefined, null, undefined, [
+    'assignee',
+    '검수자',
+  ]);
+  assert.match(other, /담당자 · 검수자/);
+  assert.doesNotMatch(other, /공동담당자/);
+  // 알려준 게 없으면 일반 문구로 떨어진다.
+  assert.match(buildDiagram(['assigned']), /담당자 · 공동담당자/);
+});
+
+test('흐름도 — 질문의 명사도 필터에서 온다', () => {
+  /*
+    `look` 만 파생하고 `ask` 를 그냥 두면 같은 것을 두 이름으로 부른다.
+    실측으로 "에픽 밑 **개발 티켓**에" / "레이블 → 스토리 → 에픽 → **개발처리**"
+    가 한 칸 안에 같이 있었다.
+  */
+  const src = buildDiagram(['epic'], undefined, undefined, null, {
+    planTypes: [{ name: '요구사항' }],
+    devTypes: [{ name: '구현' }],
+  });
+  assert.match(src, /에픽 밑 구현에 우리 팀원이 있나/);
+  assert.doesNotMatch(src, /개발 티켓/);
+});
+
+test('흐름도 — 우리 팀 말을 쓰지 않는다', () => {
+  /*
+    "메뉴" 는 프리픽스에 대한 **우리 팀의 해석**이지 필터가 말해 준 게
+    아니다. 다른 프로젝트에서 프리픽스가 모듈이면 그냥 틀린 말이 된다.
+    알아낼 수 없는 건 알아낼 수 있는 말로 바꾼다.
+  */
+  const src = buildDiagram(['siblings']);
+  assert.doesNotMatch(src, /메뉴/);
+  assert.doesNotMatch(src, /BO_/);
+  assert.match(src, /제목 앞머리/);
+});
+
+test('이미 가져간 건 — 알림은 안 가지만 판정은 남는다', () => {
+  /*
+    봇이 가져오는 티켓은 전부 `assignee = 처음 받는 사람` 이고 판정은 그
+    사람을 건너뛴다. 그러니 ①단계가 답한다는 건 **공동담당자 칸에 다른
+    사람이 들어갔다** 는 뜻이고, 1분 주기 사이에 누가 가져갔다는 얘기다.
+    그 사람에게 "이거 당신 겁니다" 를 보내는 건 소음이다.
+
+    다만 **판정 자체는 그대로 나와야 한다.** 상세 화면의 "QA 티켓 중 우리
+    건이 몇 건" 은 알림을 보냈는지와 상관없는 숫자다.
+  */
+  const taken = findAssigned(
+    {
+      key: 'KQ-1',
+      fields: {
+        assignee: { accountId: 'u-triage', displayName: '김가빈' },
+        customfield_10132: { accountId: 'u-son', displayName: '손현지' },
+      },
+    },
+    [{ accountId: 'u-son', name: '손현지', slackId: null }],
+    'u-triage'
+  );
+  assert.equal(taken?.accountId, 'u-son');
+  assert.equal(taken?.field, 'coAssignee');
+});
+
+test('이미 가져간 건 — 아무도 안 가져갔으면 답이 아니다', () => {
+  // 두 칸 다 처음 받는 사람이면 "아직 아무도 안 정했다" 는 표시다.
+  const none = findAssigned(
+    {
+      key: 'KQ-2',
+      fields: {
+        assignee: { accountId: 'u-triage', displayName: '김가빈' },
+        customfield_10132: { accountId: 'u-triage', displayName: '김가빈' },
+      },
+    },
+    [{ accountId: 'u-son', name: '손현지', slackId: null }],
+    'u-triage'
+  );
+  assert.equal(none, null);
+});
+
+test('단계 목록 — 갈림길이 없다는 것을 흐름도 소스가 증명한다', () => {
+  /*
+    읽기 화면에서 흐름도를 걷어낸 근거다. 모든 "아니오" 가 **다음 단계로만**
+    간다 — 갈라지는 곳이 한 군데도 없다. 다이어그램은 갈림길을 그릴 때
+    값어치가 있는데 그릴 갈림길이 없었고, 그 대가로 255px 과 가로 스크롤
+    200px 을 쓰고 있었다.
+
+    나중에 단계가 실제로 갈라지게 되면 이 테스트가 깨진다. 그때는 그림으로
+    되돌릴 이유가 생긴 것이다.
+  */
+  const src = buildDiagram(JUDGE_TIERS);
+  const no = src.split('\n').filter((l) => l.includes('|아니오|'));
+  // 아니오 화살표는 단계 수만큼 (마지막은 판정 불가로).
+  assert.equal(no.length, JUDGE_TIERS.length);
+
+  // 각 '아니오' 의 도착지가 바로 다음 질문이거나 판정 불가여야 한다.
+  no.forEach((line, i) => {
+    const to = line.split('-->')[1].replace('|아니오|', '').trim();
+    assert.equal(to, i === JUDGE_TIERS.length - 1 ? 'none' : `q${i + 1}`);
+  });
+
+  // '예' 는 전부 그 단계의 답으로만 간다 — 다른 단계로 새지 않는다.
+  src
+    .split('\n')
+    .filter((l) => l.includes('|예|'))
+    .forEach((line, i) => {
+      assert.match(line, new RegExp(`q${i} -->\\|예\\| a${i}$`));
+    });
+});
+
+test('추론 — ①은 담당자 칸이 아니라 공동담당자 칸으로 잰다', () => {
+  /*
+    봇이 가져오는 티켓은 JQL 상 담당자가 **전부 처음 받는 사람**이고 판정은
+    그 사람을 건너뛴다. 그러니 "담당자가 적혀 있나" 는 늘 100% 이면서 ①이
+    답할지는 아무것도 말해 주지 않는다. 실제로 화면에 `모든 티켓에 담당자가
+    적혀 있습니다` 라고 떠 있었다 — 참이지만 쓸모가 없었다.
+  */
+  const dead = judgeFits({
+    sampled: 30,
+    coHits: 0, // 공동담당자 칸을 안 쓰는 프로젝트
+    labelHits: 29,
+    prefixHits: 29,
+    parentHits: 7,
+    parentChecked: 8,
+    devTypeCount: 2,
+    prefixKinds: 9,
+  }).find((f) => f.tier === 'assigned')!;
+  assert.equal(dead.verdict, 'dead');
+  assert.match(dead.why, /공동담당자 칸을 안 쓰는/);
+
+  const alive = judgeFits({
+    sampled: 30,
+    coHits: 30,
+    labelHits: 29,
+    prefixHits: 29,
+    parentHits: 7,
+    parentChecked: 8,
+    devTypeCount: 2,
+    prefixKinds: 9,
+  }).find((f) => f.tier === 'assigned')!;
+  assert.equal(alive.verdict, 'ok');
+  assert.doesNotMatch(alive.why, /담당자가 적혀/);
+});
+
+test('추론 — 공동담당자 칸을 표본에서 따로 센다', () => {
+  const r = inferFromSample(
+    [
+      { key: 'A', fields: { assignee: { accountId: 'a' } } },
+      {
+        key: 'B',
+        fields: {
+          assignee: { accountId: 'a' },
+          customfield_10132: { accountId: 'b' },
+        },
+      },
+    ],
+    'KQ'
+  );
+  // 둘 다 담당자는 있지만, 공동담당자는 한 건뿐이다.
+  assert.equal(r.assignedHits, 2);
+  assert.equal(r.coHits, 1);
+});
+
+test('배포대장 — 어떤 페이지가 차수가 되나', () => {
+  /*
+    이 규칙이 tick.ts 안에만 있어서 설정 화면은 "차수 12건" 같은 숫자만
+    말할 수 있었다. 실측으로 12건을 훑어 **2건만** 잡혔는데, 숫자만 보면
+    10건이 어디로 갔는지 모른다. 규칙을 한 곳에 두고 양쪽이 같이 쓴다.
+  */
+  const ok = readCyclePageTitle('Dev) 배포 - 2026-09-14(정기)');
+  assert.equal(ok.kind, 'cycle');
+  assert.equal(ok.kind === 'cycle' && ok.fixVersion, 'release_20260914');
+  assert.equal(ok.kind === 'cycle' && ok.deployYmd, '2026-09-14');
+
+  // 정기배포가 아닌 것은 섞으면 "이번 차수" 가 하루에 몇 번씩 바뀐다.
+  for (const t of ['Dev) 배포 - 2026-09-02(adhoc)', 'Dev) 배포 - 2026-09-02(hotfix)']) {
+    const r = readCyclePageTitle(t);
+    assert.equal(r.kind, 'skip');
+    assert.match(r.kind === 'skip' ? r.why : '', /잡을 배포에서 뺐습니다/);
+  }
+
+  // 월 페이지가 손자로 섞여 들어오는 트리가 실제로 있었다.
+  const mo = readCyclePageTitle('Dev) 배포 관리 - 2026-02');
+  assert.equal(mo.kind, 'skip');
+  assert.match(mo.kind === 'skip' ? mo.why : '', /날짜가 없습니다/);
+});
+
+test('개발티켓 타입 — 설정값이 판정에 실제로 닿는다', async () => {
+  /*
+    닿지 않고 있었다. `tick.ts` 가 judge 에 `devIssueTypes` 를 안 넘겨서
+    판정은 늘 `DEFAULT_DEV_ISSUE_TYPES`(['개발처리'])로만 돌았고, 설정
+    화면에서 개발티켓을 바꿔도 판정은 하나도 안 바뀌었다. 화면에는
+    "우리 팀이 개발한 건인지 여기서 가립니다" 라고 적혀 있었다.
+  */
+  const epicKids = [
+    { key: 'X-1', fields: { issuetype: { name: '구현' }, summary: '구현 건', assignee: { accountId: 'u-son', displayName: '손현지' } } },
+    { key: 'X-2', fields: { issuetype: { name: '스토리' }, summary: '기획 건', assignee: { accountId: 'u-pm', displayName: '기획자' } } },
+  ];
+  const jira = {
+    getIssue: async () => ({
+      key: 'KQ-9',
+      fields: { issuetype: { name: 'Bug' }, parent: { key: 'E-1' } },
+    }),
+    search: async () => epicKids,
+  };
+  const issue = { key: 'KQ-9', fields: { labels: ['KQ-100'] } };
+  const members = [
+    { accountId: 'u-son', name: '손현지', slackId: null },
+    { accountId: 'u-pm', name: '기획자', slackId: null },
+  ];
+
+  // 설정에서 '구현' 을 고르면 기획자가 아니라 손현지가 나와야 한다.
+  const withCfg = await findViaEpic(issue, members, jira, {
+    projectKey: 'KQ',
+    devIssueTypes: ['구현'],
+  });
+  assert.equal(withCfg?.accountId, 'u-son');
+  assert.equal(withCfg?.widened, false);
+
+  /*
+    안 넘기면 기본값('개발처리')으로 거른다 → 걸리는 게 없어 에픽 자식
+    전체로 넓히고, 그러면 기획자까지 후보가 된다. 이게 설정을 안 넘길 때
+    실제로 벌어지던 일이다.
+  */
+  const noCfg = await findViaEpic(issue, members, jira, { projectKey: 'KQ' });
+  assert.equal(noCfg?.widened, true);
+});
+
+test('배포대장 — 비정기 건은 기본으로 건너뛴다', () => {
+  for (const t of [
+    'Dev) 배포 - 2026-09-02(adhoc)',
+    'Dev) 배포 - 2026-09-02(hotfix)',
+  ]) {
+    const r = readCyclePageTitle(t);
+    assert.equal(r.kind, 'skip');
+  }
+  // 정기 건은 옵션과 무관하게 잡힌다.
+  const reg = readCyclePageTitle('Dev) 배포 - 2026-09-14(정기)');
+  assert.equal(reg.kind, 'cycle');
+  assert.equal(reg.kind === 'cycle' && reg.deployKind, 'regular');
+});
+
+test('배포대장 — 켜면 비정기도 잡고, 종류를 표시한다', () => {
+  const r = readCyclePageTitle('Dev) 배포 - 2026-09-02(hotfix)', {
+    deployKinds: ['regular', 'adhoc', 'hotfix'],
+  });
+  assert.equal(r.kind, 'cycle');
+  assert.equal(r.kind === 'cycle' && r.fixVersion, 'release_20260902');
+  /*
+    `deployKind` 표시가 없으면 "이번 차수" 를 고를 때 정기배포를 먼저 집을
+    수 없다. 실측으로 같은 날 adhoc 과 hotfix 가 둘 다 있어 fixVersion 이
+    `release_20260902` 로 겹쳤다.
+  */
+  assert.equal(r.kind === 'cycle' && r.deployKind, 'hotfix');
+});
+
+test('배포대장 — adhoc·hotfix 를 독립적으로 켤 수 있다', () => {
+  // hotfix 만 켜면 같은 날 adhoc 은 여전히 건너뛴다.
+  const hotfixOnly = readCyclePageTitle('Dev) 배포 - 2026-09-02(adhoc)', {
+    deployKinds: ['regular', 'hotfix'],
+  });
+  assert.equal(hotfixOnly.kind, 'skip');
+});
+
+test('배포대장 — 켜도 날짜 없는 제목은 여전히 건너뛴다', () => {
+  // 월 페이지가 손자 자리에 섞여 들어오는 트리가 실제로 있었다.
+  const r = readCyclePageTitle('Dev) 배포 관리 - 2026-02', {
+    deployKinds: ['regular', 'adhoc', 'hotfix'],
+  });
+  assert.equal(r.kind, 'skip');
+});
+
+test('추론 — 기획 후보에 한 번 나왔다고 개발 후보에서 지우지 않는다', () => {
+  /*
+    실측 사고: 레이블이 가리킨 티켓 하나가 `개발처리` 타입이었는데,
+    그것 때문에 **20건짜리 1순위 개발처리가 통째로 사라졌다.**
+    화면은 그걸 "표본은 Design Issues" 라는 경고로 내밀었다 — 틀린 경고다.
+
+    양쪽에 다 나오는 타입은 **더 많이 나온 쪽**으로 친다.
+  */
+  const plan = countTypes([
+    { fields: { issuetype: { id: '10001', name: '스토리' } } },
+    { fields: { issuetype: { id: '10205', name: '개발처리' } } },
+  ]);
+  const kids = countTypes([
+    ...Array.from({ length: 20 }, () => ({
+      fields: { issuetype: { id: '10205', name: '개발처리' } },
+    })),
+    { fields: { issuetype: { id: '10001', name: '스토리' } } },
+  ]);
+
+  const planCount = new Map(plan.map((t) => [t.id, t.count]));
+  const dev = kids.filter((t) => t.count > (planCount.get(t.id) ?? 0));
+
+  assert.equal(dev[0]?.name, '개발처리');
+  assert.equal(dev[0]?.count, 20);
+  // 기획 쪽이 더 많은 스토리는 빠진다.
+  assert.equal(dev.some((t) => t.name === '스토리'), false);
+});
+
+test('알림 규칙 검증 — 저장 경로가 쓰는 함수 하나로 모았다', () => {
+  /*
+    실측: 같은 질문에 **세 답**이 있었다.
+
+      검사             SQL   config/route.ts(옛)  types.ts
+      빈 배열 금지      없음   없음                 있음
+      enabled 불린     없음   없음                 있음
+
+    느슨한 쪽이 통과시킨 값은 뒤에서 터진다. 가장 엄한 하나로 모았고,
+    여기서 그 둘을 못 박는다 — 다시 갈라지면 이 테스트가 깨진다.
+  */
+  assert.match(checkAlertRules([]) ?? '', /하나도 없습니다/);
+
+  const one = (over: Record<string, unknown>) => [
+    {
+      id: 'x',
+      label: '테스트',
+      anchor: 'prod',
+      offset: 0,
+      shift: 'none',
+      enabled: true,
+      ...over,
+    },
+  ];
+  assert.equal(checkAlertRules(one({})), null);
+  assert.match(checkAlertRules(one({ enabled: 'yes' })) ?? '', /사용 여부/);
+  assert.match(checkAlertRules(one({ anchor: 'nope' })) ?? '', /기준일/);
+  assert.match(checkAlertRules(one({ offset: 999 })) ?? '', /날짜 차이/);
+});
+
+test('전환 대기 — 차수가 끝나면 필터가 그걸 말한다', () => {
+  /*
+    ── 왜 이 테스트가 있나 ──
+
+    배포일이 지나면 tick 이 `activeCycle` 을 비운다. 안 비우면 SQL 크론이
+    죽은 차수를 계속 믿고 그 차수 QA 스레드에 매일 답글을 단다(실측).
+
+    그런데 `pendingCycleSwitch` 는 바로 그 포인터를 읽는다. 비우는 순간
+    전환 대기 신호도 같이 사라져서, **사람이 Jira 필터를 바꿔야 하는
+    구간이 시작되는 그 시점에** 화면이 초록불이 됐다.
+
+    그래서 포인터가 아니라 필터가 뭘 보고 있는지를 읽게 바꿨다.
+    여기서 경계 세 개를 못 박는다.
+  */
+  const fc = { fixVersion: 'release_20260914' };
+
+  // 배포 전날 — 아직 이 차수를 보는 게 맞다
+  assert.equal(staleFilterCycle(fc, '2026-09-13'), null);
+  // 배포 당일 — 배포가 도는 날이지 넘길 날이 아니다
+  assert.equal(staleFilterCycle(fc, '2026-09-14'), null);
+  // 다음 날부터 사람이 필터를 바꿔야 한다
+  assert.match(staleFilterCycle(fc, '2026-09-15') ?? '', /release_20260914/);
+  assert.match(staleFilterCycle(fc, '2026-09-15') ?? '', /2026-09-14/);
+
+  // 아직 한 번도 필터를 못 읽었으면 아무 말도 하지 않는다
+  assert.equal(staleFilterCycle(null, '2026-09-15'), null);
+  // 날짜가 안 박힌 이름은 판단하지 않는다 — 찍으면 가짜 경보가 된다
+  assert.equal(staleFilterCycle({ fixVersion: 'next' }, '2026-09-15'), null);
 });

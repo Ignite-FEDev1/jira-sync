@@ -4,7 +4,9 @@ import { dbServer } from '@/lib/db';
 import { parseFilterUrl } from '@/lib/services/qa-router/derive';
 import {
   ALERT_KINDS,
-  unknownVars,
+  checkAlertRules,
+  DEPLOY_KINDS,
+  type DeployKind,
 } from '@/lib/services/qa-router/types';
 
 /**
@@ -43,12 +45,25 @@ interface Body {
     "알림 종류만 고치려고 필터까지 다시 보내야 한다" 가 되면 안 고친 칸이
     다른 사람 저장을 덮는다.
   */
+  /**
+   * QA 가 티켓을 처음 넘길 때 찍는 사람. 봇이 보는 티켓이 **이 사람 담당인
+   * 것뿐이라** 틀리면 알림이 통째로 멎는다. 화면은 필터의 팀원 중에서만
+   * 고르게 한다.
+   */
+  triageAccountId?: unknown;
+  /**
+   * 담당자 말고 한 칸 더 보는 필드. **화면이 고르는 값이 아니라 JQL 에서
+   * 뽑아낸 값**이다 — 필터를 저장할 때 같이 실려 온다.
+   */
+  coAssigneeField?: unknown;
   slackOpsChannelId?: unknown;
   qaThreadChannelId?: unknown;
   planIssueTypeId?: unknown;
   devIssueTypeId?: unknown;
   confluenceDeployRootId?: unknown;
   planCollectHours?: unknown;
+  /** 차수로 잡을 배포 종류(정기·adhoc·hotfix). 기본 ['regular']. */
+  deployKinds?: unknown;
   alerts?: unknown;
   alertRules?: unknown;
   tickIntervalSeconds?: unknown;
@@ -61,8 +76,12 @@ interface Body {
     쓰이므로 여기서 update 에 넣지 않기만 하면 기존 값이 유지된다.
     받아 주면 화면 밖 경로로 다시 들어와 아무도 모르게 바뀔 수 있다.
 
-    qaThreadTitlePattern, coAssigneeField 도 받지 않는다 — 컬럼은 있지만
-    읽는 코드가 없다. 저장되는데 아무 일도 안 일어나는 값은 거짓말이다.
+    qaThreadTitlePattern 은 받지 않는다 — 컬럼은 있지만 읽는 코드가 없다.
+    저장되는데 아무 일도 안 일어나는 값은 거짓말이다.
+
+    coAssigneeField 는 **이제 받는다.** judge/outcome/tick 이 전부 이 값을
+    읽도록 바꿨다 (전에는 모듈 상수였다). 값은 사람이 고르는 게 아니라
+    필터 확인이 JQL 에서 뽑아 준다.
 
     reassign_mode 도 받지 않는다. 한 번 화면에 손잡이로 올렸다가 도로 뺐다 —
     **배정은 봇이 대신 해 줄 일이 아니라 사람이 실제로 가져가는 일이다.**
@@ -104,6 +123,8 @@ interface Body {
 export type ConfigField =
   | 'name'
   | 'jiraFilterId'
+  | 'triageAccountId'
+  | 'coAssigneeField'
   | 'slackChannelId'
   | 'slackOpsChannelId'
   | 'qaThreadChannelId'
@@ -111,6 +132,7 @@ export type ConfigField =
   | 'devIssueTypeId'
   | 'confluenceDeployRootId'
   | 'planCollectHours'
+  | 'deployKinds'
   | 'alerts'
   | 'alertRules'
   | 'tickIntervalSeconds'
@@ -157,18 +179,16 @@ function check(b: Body): Checked {
         field: 'jiraFilterId',
       };
     }
-    // 배치는 Jira 자격증명을 users 테이블의 운영 계정에서 가져오고, 그 계정은
-    // ignite 전용이다 (워크플로에 HMG_JIRA_* 시크릿이 없다). hmg 필터를 저장하면
-    // 저장은 되는데 배치가 엉뚱한 Jira 를 조회해 조용히 실패한다.
-    // 지원을 늘릴 때 이 검사만 풀면 된다.
-    if (parsed.instance !== 'ignite') {
-      return {
-        ok: false,
-        error:
-          '지금은 Ignite Jira 필터만 지원합니다. 다른 Jira 는 배치에 자격증명이 없어 조회하지 못합니다.',
-        field: 'jiraFilterId',
-      };
-    }
+    /*
+      전에는 여기서 ignite 가 아닌 필터를 되돌려보냈다. 배치가 ignite 주소를
+      상수로 박아 두고 자격증명도 ignite 컬럼만 읽어서, 저장은 되는데 조회가
+      조용히 빗나갔기 때문이다.
+
+      이제 주소와 자격증명이 둘 다 대상의 인스턴스를 따라간다
+      (`lib/constants/jira.ts` · `api-creds.ts` · `repository.ts`). 막을 이유가
+      없어져 검사를 걷어낸다. 자격증명이 없는 경우는 저장 시점이 아니라
+      **확인 버튼**이 잡는다 — 거기서 어느 칸을 채워야 하는지까지 알려 준다.
+    */
     filterId = parsed.filterId;
     row.jira_filter_id = filterId;
     // URL 에서 읽은 인스턴스도 같이 저장한다. 이 값이 틀리면 배치가 다른
@@ -246,6 +266,71 @@ function checkPipeline(
   b: Body,
   row: Record<string, unknown>
 ): (Checked & { ok: false }) | null {
+  /*
+    트리아지. 비울 수 없다 — 비면 봇이 볼 티켓이 0건이라 알림이 통째로 멎는데,
+    그 상태가 화면에서는 "저장됨" 으로 보인다.
+
+    형식만 본다. "이 사람이 정말 그 필터의 팀원인가" 는 여기서 못 판단한다 —
+    필터 JQL 을 다시 읽어야 알 수 있고, 그건 저장 경로가 Jira 에 의존하게
+    만든다. 대신 화면이 6명 중에서만 고르게 하고, 어긋나면 필터 확인
+    (filter-check) 이 "명단에 없습니다" 로 잡는다.
+  */
+  if (b.triageAccountId !== undefined) {
+    const v =
+      typeof b.triageAccountId === 'string' ? b.triageAccountId.trim() : '';
+    if (!v) {
+      return {
+        ok: false,
+        error:
+          '처음 받는 사람을 골라 주세요. 비우면 봇이 볼 티켓이 0건이 되어 알림이 멎습니다.',
+        field: 'triageAccountId',
+      };
+    }
+    row.triage_account_id = v;
+  }
+
+  /*
+    공동담당자 필드. 형태만 본다 — `customfield_숫자` 또는 내장 필드 이름.
+
+    "이 인스턴스에 그 필드가 정말 있나" 는 여기서 못 본다. Jira 를 쳐야
+    알 수 있고, 그건 이미 필터 확인이 했다 (없으면 problems 로 뜬다).
+    여기서는 오타나 빈 값만 막는다.
+  */
+  if (b.coAssigneeField !== undefined) {
+    const v =
+      typeof b.coAssigneeField === 'string' ? b.coAssigneeField.trim() : '';
+    if (!/^(customfield_\d+|[a-z][a-zA-Z]*)$/.test(v)) {
+      return {
+        ok: false,
+        error:
+          '공동담당자 필드 형식이 아닙니다. 예: customfield_10132',
+        field: 'coAssigneeField',
+      };
+    }
+    row.co_assignee_field = v;
+  }
+
+  /*
+    셋 중 아무 조합이나 되지만 **빈 배열은 막는다.** DB CHECK 도 같은
+    것을 보지만, 여기서 먼저 막아야 "저장했습니다" 뒤에 차수가 한 건도
+    안 읽히는 이유를 사람이 읽을 말로 설명할 수 있다.
+  */
+  if (b.deployKinds !== undefined) {
+    const kinds = Array.isArray(b.deployKinds)
+      ? b.deployKinds.filter((k): k is DeployKind =>
+          (DEPLOY_KINDS as string[]).includes(k as string)
+        )
+      : [];
+    if (kinds.length === 0) {
+      return {
+        ok: false,
+        error: '잡을 배포를 하나 이상 골라 주세요.',
+        field: 'deployKinds',
+      };
+    }
+    row.deploy_kinds = kinds;
+  }
+
   // ── 채널 두 개. 비우면 폴백(알림 채널)을 쓰라는 뜻이라 null 로 저장한다. ──
   for (const [key, column, label] of [
     ['slackOpsChannelId', 'slack_ops_channel_id', '운영 채널'],
@@ -346,7 +431,7 @@ function checkPipeline(
   }
 
   if (b.alertRules !== undefined) {
-    const bad = checkRules(b.alertRules);
+    const bad = checkAlertRules(b.alertRules);
     if (bad) return { ok: false, error: bad, field: 'alertRules' };
     row.alert_rules = b.alertRules;
   }
@@ -384,61 +469,24 @@ function checkPipeline(
   return null;
 }
 
-/**
- * 알림 규칙 배열. 문제가 있으면 그 사유, 없으면 null.
- *
- * DB 제약이 형태를 한 번 더 막지만, 제약이 내는 말은
- * `violates check constraint "qa_router_configs_alert_rules_check"` 다.
- * 어느 줄의 무엇이 문제인지 사람이 알 수 있게 여기서 먼저 가른다.
- */
-function checkRules(v: unknown): string | null {
-  if (!Array.isArray(v)) return '알림 규칙 형식이 잘못됐습니다.';
-  if (v.length > 20) return '알림 규칙은 20개까지입니다.';
+/*
+  ── 알림 규칙 검증은 `types.ts` 의 `checkAlertRules` 하나만 쓴다 ──
 
-  const seen = new Set<string>();
-  for (const [i, raw] of v.entries()) {
-    const at = `${i + 1}번째 알림`;
-    if (typeof raw !== 'object' || raw === null) return `${at} 형식이 잘못됐습니다.`;
-    const r = raw as Record<string, unknown>;
+  여기 같은 함수가 한 벌 더 있었다. 실측으로 **세 벌이 서로 다른 답**을
+  내고 있었다:
 
-    const label = typeof r.label === 'string' ? r.label.trim() : '';
-    if (!label) return `${at}의 문구를 입력해 주세요.`;
+    검사              SQL   여기(옛)  types.ts
+    빈 배열 금지       없음   없음      있음
+    enabled 불린      없음   없음      있음
+    템플릿 변수        없음   있음      있음
 
-    const id = typeof r.id === 'string' ? r.id.trim() : '';
-    if (!id) return `${at}의 식별자가 비었습니다.`;
-    // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
-    if (seen.has(id)) return `알림 식별자가 겹칩니다: ${id}`;
-    seen.add(id);
+  같은 질문에 세 답이면 어느 게 맞는지 아무도 모른다. 가장 엄한 것
+  하나로 모은다 — 느슨한 쪽에 맞추면 통과시킨 값이 뒤에서 터진다.
 
-    if (!ANCHORS.includes(r.anchor as never))
-      return `${at}의 기준일이 잘못됐습니다.`;
-    if (!SHIFTS.includes(r.shift as never))
-      return `${at}의 주말 처리가 잘못됐습니다.`;
-
-    const off = Number(r.offset);
-    if (!Number.isInteger(off) || off < -60 || off > 60)
-      return `${at}의 날짜 차이는 -60 ~ 60일 사이 정수여야 합니다.`;
-
-    /*
-      템플릿에 모르는 변수가 있으면 **저장을 막는다.**
-
-      통과시키면 그 줄이 조용히 빠진 채 채널에 나간다 — 오타를 낸 사람은
-      "왜 그 줄이 안 나오지" 를 새벽에 알게 된다. 여기서 이름을 대 준다.
-    */
-    if (r.template !== undefined) {
-      if (typeof r.template !== 'string')
-        return `${at}의 템플릿 형식이 잘못됐습니다.`;
-      if (!r.template.trim()) return `${at}의 본문이 비었습니다.`;
-      const bad = unknownVars(r.template);
-      if (bad.length)
-        return `${at}에 모르는 변수가 있습니다: ${bad.map((x) => `{${x}}`).join(', ')}`;
-    }
-  }
-  return null;
-}
-
-const ANCHORS = ['qa_start', 'qa_end', 'prod'] as const;
-const SHIFTS = ['none', 'next_workday', 'prev_workday'] as const;
+  SQL CHECK 는 남겨 둔다. 화면 밖 경로(직접 update)를 막는 마지막 문이다.
+  다만 **TS 보다 느슨하다** — 빈 배열과 enabled 를 안 본다. 그건 알고 두는
+  차이다: 여기를 지나온 값은 이미 더 엄한 검사를 통과했다.
+*/
 
 
 export async function PATCH(

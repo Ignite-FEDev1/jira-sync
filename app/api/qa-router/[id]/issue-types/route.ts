@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 
-import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import {
+  missingCredsMessage,
+  resolveJiraAccess,
+} from '@/lib/services/qa-router/api-creds';
 import { createJiraClient } from '@/lib/services/qa-router/clients';
 import * as repo from '@/lib/services/qa-router/repository';
 
@@ -50,22 +53,19 @@ export async function GET(
     );
   }
 
-  const email = process.env.IGNITE_JIRA_EMAIL;
-  const token = process.env.IGNITE_JIRA_API_TOKEN;
-  if (!email || !token) {
+  const access = await resolveJiraAccess(
+    cfg.jiraInstance,
+    cfg.jiraOperatorAccountId
+  );
+  if (!access) {
     return NextResponse.json(
-      { error: 'Jira 자격증명이 없습니다.' },
+      { error: missingCredsMessage(cfg.jiraInstance) },
       { status: 500 }
     );
   }
 
   try {
-    const jira = createJiraClient({
-      baseUrl:
-        cfg.jiraInstance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE,
-      email,
-      token,
-    });
+    const jira = createJiraClient(access);
     const types = await jira.getProjectIssueTypes(projectKey);
 
     /*

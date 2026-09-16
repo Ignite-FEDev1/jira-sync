@@ -18,6 +18,7 @@ import type {
   QaRouterConfig,
   QaRouterState,
 } from '@/lib/services/qa-router/types';
+import { NewRoutingDialog } from './new-routing-dialog';
 
 /** 이 화면은 브라우저에서 anon 키로 직접 읽는다 (settings/projects 와 같은 패턴). */
 interface Row {
@@ -139,14 +140,17 @@ export default function QaRouterListPage() {
           )}
         </div>
         {/*
-          "새 대상"을 뺐다. 화면에서 유일하게 진한 버튼이 눌리지 않는 버튼이면
-          어디를 눌러야 할지 알려주는 신호가 거짓이 된다. 만들 수 있게 되면
-          그때 되살린다.
+          한때 여기 "새 대상"이 있다가 빠져 있었다 — 눌러도 아무 일이 없어서,
+          화면에서 유일하게 진한 버튼이 거짓 신호였기 때문이다. 이제 만들 수
+          있으므로 되살린다.
         */}
-        <Button variant="outline" size="sm" onClick={() => void load()}>
-          <RefreshCw />
-          새로고침
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => void load()}>
+            <RefreshCw />
+            새로고침
+          </Button>
+          <NewRoutingDialog />
+        </div>
       </div>
 
       {/* 조치가 필요한 건은 표 안에서 스캔하게 하지 않고 위로 올린다 */}
@@ -299,12 +303,12 @@ function EmptyState() {
         QA 티켓이 쌓이는 Jira 필터와 알릴 Slack 채널만 있으면 됩니다.
       </p>
       {/*
-        눌리지 않는 버튼을 두지 않는다. 빈 화면에서 유일한 행동이 막혀 있으면
-        막다른 길이 된다. 지금 할 수 있는 일을 그대로 적는다.
+        빈 화면의 유일한 행동이 곧 다음 걸음이다. 전에는 "FE1 에 요청하세요"
+        라고만 적혀 있어 여기서 길이 끊겼다.
       */}
-      <p className="mt-1 text-xs text-muted-foreground">
-        만들기는 아직 화면에 없습니다. 필요하면 FE1 에 요청해 주세요.
-      </p>
+      <div className="mt-1">
+        <NewRoutingDialog />
+      </div>
     </div>
   );
 }

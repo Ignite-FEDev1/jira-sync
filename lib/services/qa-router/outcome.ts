@@ -13,7 +13,7 @@
  *      **놓친 것**이다. 통계가 아니라 사실이라 규칙을 고칠 때 근거가 된다.
  */
 
-import { CO_ASSIGNEE_FIELD, type JiraIssue } from './judge';
+import { CO_ASSIGNEE_FIELD, personAt, type JiraIssue } from './judge';
 import type { DerivedMember } from './types';
 
 export type Outcome = 'pending' | 'other_team' | 'our_team';
@@ -46,10 +46,12 @@ export const OUTCOME_CHUNK = 50;
 export function outcomeOf(
   issue: JiraIssue,
   memberIds: Set<string>,
-  triageAccountId: string
+  triageAccountId: string,
+  /** 담당자 말고 한 칸 더. 안 넘기면 지금까지 쓰던 값으로 돈다. */
+  coField: string = CO_ASSIGNEE_FIELD
 ): OutcomeResult {
   const a = issue.fields?.assignee;
-  const co = issue.fields?.[CO_ASSIGNEE_FIELD];
+  const co = personAt(issue.fields, coField);
   const holder = a?.accountId && a.accountId !== triageAccountId ? a : co;
   const id = holder?.accountId;
 
@@ -75,9 +77,14 @@ export function outcomeOf(
 export async function resolveOutcomes(
   jira: OutcomeSearch,
   issueKeys: string[],
-  opts: { members: DerivedMember[]; triageAccountId: string }
+  opts: {
+    members: DerivedMember[];
+    triageAccountId: string;
+    coAssigneeField?: string;
+  }
 ): Promise<OutcomeResult[]> {
   const memberIds = new Set(opts.members.map((m) => m.accountId));
+  const coField = opts.coAssigneeField ?? CO_ASSIGNEE_FIELD;
   const out: OutcomeResult[] = [];
 
   for (let i = 0; i < issueKeys.length; i += OUTCOME_CHUNK) {
@@ -85,11 +92,11 @@ export async function resolveOutcomes(
     if (chunk.length === 0) continue;
     const issues = await jira.searchAll(
       `key in (${chunk.join(',')})`,
-      ['assignee', CO_ASSIGNEE_FIELD],
+      ['assignee', coField],
       chunk.length
     );
     for (const issue of issues) {
-      out.push(outcomeOf(issue, memberIds, opts.triageAccountId));
+      out.push(outcomeOf(issue, memberIds, opts.triageAccountId, coField));
     }
   }
   return out;

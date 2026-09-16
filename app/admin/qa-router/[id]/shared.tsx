@@ -126,7 +126,7 @@ export function MemberChips({
           >
             {m.name}
             {isTriage && (
-              <span className="font-normal opacity-70">· QA 최초 배정</span>
+              <span className="font-normal opacity-70">· 처음 받음</span>
             )}
             {!m.slackId && (
               <span className="font-normal opacity-70">· 멘션 불가</span>
@@ -1241,6 +1241,8 @@ export function toCycle(r: Record<string, never>): DeployCycle {
     threadQaEndYmd: r.thread_qa_end_ymd ?? null,
     qaLabel: r.qa_label ?? null,
     planCollectedAt: r.plan_collected_at ?? null,
+    // null 이면 설정값(config.alertRules)을 쓴다. effectiveAlertRules 가 정한다.
+    alertRulesOverride: r.alert_rules_override ?? null,
   };
 }
 

@@ -21,7 +21,7 @@ import {
   parseFixVersion,
   type FixVersionRule,
 } from './derive';
-import { CO_ASSIGNEE_FIELD, judge, type JudgeResult } from './judge';
+import { judge, type JudgeResult } from './judge';
 import {
   collectPlanProgress,
   threadTableFrom,
@@ -41,7 +41,7 @@ import {
   type ConfigDiffEntry,
   type ReassignOutcome,
 } from './message';
-import { tooSoon } from './status';
+import { readCyclePageTitle, tooSoon } from './status';
 import * as repo from './repository';
 import type {
   DeployCycle,
@@ -361,10 +361,12 @@ export function parseSchedule(body: string, year: number) {
 /**
  * 배포대장에서 정기배포 차수를 수집한다.
  *
- * adhoc·hotfix 는 뺀다. 김가빈(트리아지)을 거친 KQ Bug 1,447건 중
- * adhoc 3건 + hotfix 18건(1.4%)뿐이라 목록에 넣으면 배정 0건인 행만 쌓인다.
+ * 기본은 정기만 잡고 adhoc·hotfix 는 뺀다(`cfg.deployKinds`). 김가빈
+ * (트리아지)을 거친 KQ Bug 1,447건 중 adhoc 3건 + hotfix 18건(1.4%)뿐이라
+ * 목록에 넣으면 배정 0건인 행만 쌓인다 — 그래서 기본값이 이렇다.
  * "정기"를 화이트리스트로 잡지 않는 이유는 제목 표기가 (정기)·(월)·(표기 없음)
- * 으로 일정하지 않아서다 — 제외 목록이 실제 데이터에 맞다.
+ * 으로 일정하지 않아서다 — 정기·adhoc·hotfix 셋을 다 구분한 뒤 설정이 고른
+ * 것만 통과시키는 지금 방식도 이 사실은 그대로 쓴다.
  *
  * 현재 차수보다 오래된 것은 담지 않는다. 지난 차수는 배포대장이 원본이고,
  * 어드민이 복제하면 두 곳이 어긋난다.
@@ -458,18 +460,21 @@ export async function collectCycles(
   for (const mo of months) {
     const kids = await deps.confluence.getChildren(mo.id);
     for (const kid of kids) {
-      if (/\((adhoc|hotfix)\)/i.test(kid.title)) continue;
-      const dm = kid.title.match(/(\d{4})-(\d{2})-(\d{2})/);
-      if (!dm) continue;
-      const deployYmd = `${dm[1]}-${dm[2]}-${dm[3]}`;
+      /*
+        규칙은 `status.ts` 에 있다. 설정 화면의 미리보기가 **같은 함수**를
+        써야 "화면은 잡힌다는데 배치는 건너뛴다" 가 안 생긴다.
+      */
+      const read = readCyclePageTitle(kid.title, {
+        deployKinds: cfg.deployKinds,
+      });
+      if (read.kind !== 'cycle') continue;
+      const { deployYmd, fixVersion } = read;
       if (deployYmd < opts.sinceYmd) continue;
-
-      const fixVersion = `release_${dm[1]}${dm[2]}${dm[3]}`;
       let schedule: ReturnType<typeof parseSchedule> | null = null;
       try {
         schedule = parseSchedule(
           await deps.confluence.getPageBody(kid.id),
-          Number(dm[1])
+          Number(deployYmd.slice(0, 4))
         );
       } catch (e) {
         // 페이지가 아직 비어 있으면 일정이 없다 — 차수는 그대로 담는다.
@@ -479,7 +484,7 @@ export async function collectCycles(
       out.push({
         deployYmd,
         fixVersion,
-        cycleLabel: `정기배포 ${dm[1].slice(2)}${dm[2]}${dm[3]}`,
+        cycleLabel: `정기배포 ${deployYmd.slice(2).replace(/-/g, '')}`,
         qaStartYmd: schedule?.qaStartYmd ?? null,
         qaEndYmd: schedule?.qaEndYmd ?? null,
         prodYmd: schedule?.prodYmd ?? deployYmd,
@@ -769,6 +774,7 @@ export async function runTick(
           const results = await resolveOutcomes(deps.jira, keys, {
             members: derived.members,
             triageAccountId: cfg.triageAccountId,
+            coAssigneeField: cfg.coAssigneeField,
           });
           await repo.saveOutcomes(cfg.id, activeFv, results);
           const done = results.filter((r) => r.outcome !== 'pending').length;
@@ -804,6 +810,24 @@ export async function runTick(
     // ── 사이클 종료 (배포일 지남) ──
     if (kstYmd(now()) > parsedFv.deployYmd) {
       log(`배포일(${parsedFv.deployYmd}) 지남 · 필터 전환 대기`);
+      /*
+        ── 끝난 차수를 가리키는 포인터를 지운다 ──
+
+        여기서 조기 반환하면 **이쪽(판정 알림)만** 멎는다. `activeCycle` 을
+        그대로 두면 SQL 크론이 그 포인터를 계속 믿는다 — 저쪽에는 멎을
+        근거가 없기 때문이다.
+
+        실측 사고: release_20260914(배포 09-14)가 끝난 09-15 에도 마감
+        요약이 **죽은 차수의 일정·참고를 붙여 그 차수의 QA 스레드에 매일
+        답글**을 달았다. 상태가 거짓말을 하고 있었던 것이고, 고칠 자리는
+        읽는 쪽이 아니라 쓰는 쪽이다.
+
+        이미 비어 있으면 쓰지 않는다 — 이 분기는 필터가 다음 차수로
+        바뀔 때까지 매 tick 지나간다.
+      */
+      if (state.activeCycle) {
+        await repo.saveState(cfg.id, { activeCycle: null });
+      }
       await finishOk(cfg, state, log, deps, opsChannel);
       return { status: 'cycle_ended', fixVersion };
     }
@@ -905,7 +929,7 @@ export async function runTick(
       'issuetype',
       'assignee',
       'reporter',
-      CO_ASSIGNEE_FIELD,
+      cfg.coAssigneeField,
     ]);
     log(`${cfg.name} · 트리아지 배정 활성 티켓 ${found.length}건`);
 
@@ -958,26 +982,79 @@ export async function runTick(
           triageAccountId: cfg.triageAccountId,
           members: derived.members,
           selfAccountId: cfg.reassignMode === 'off' ? null : cfg.selfAccountId,
-          tiers: cfg.judgeTiers,
+          /*
+            단계 순서를 설정에서 안 읽는다.
+
+            ① 순서는 취향이 아니라 원칙이다 — 사실(①②)이 추측(③)보다 앞.
+               바꿀 수 있게 두면 추측이 사실을 덮는 순서를 만들 수 있다.
+            ② 끌 이유가 없다. 전제가 없는 단계는 조회를 **아예 안 한다**
+               (레이블이 없으면 `refKeys` 가 비어 루프가 안 돈다). 껐을 때
+               아끼는 게 없다.
+            ③ 실측: DB 값이 기본값과 한 번도 달랐던 적이 없다.
+
+            어느 단계가 이 프로젝트에서 열매를 맺는지는 필터 확인이 표본으로
+            알려 주고, 흐름도가 흐리게 표시한다 — 끄지는 않는다. 표본 30건으로
+            봇을 자동으로 꺼 버리면 표본이 틀렸을 때 조용히 안 돈다.
+          */
+          /*
+            필드 번호를 코드에서 안 읽는다. 필터 확인이 JQL 에서 뽑아
+            설정에 넣어 둔 값을 그대로 쓴다 — 화면이 "이 칸을 본다" 고
+            말한 것과 봇이 실제로 보는 칸이 같아야 한다.
+          */
+          coAssigneeField: cfg.coAssigneeField,
+          /*
+            ── 개발티켓 타입을 실제로 넘긴다 ──
+
+            안 넘기고 있었다. 그래서 판정은 `DEFAULT_DEV_ISSUE_TYPES`
+            (`['개발처리']`, 코드에 박힌 이름)로만 돌았고, 설정 화면에서
+            개발티켓을 바꿔도 **판정은 하나도 안 바뀌었다.** 화면은
+            "우리 팀이 개발한 건인지 여기서 가립니다" 라고 적혀 있었다.
+
+            judge 는 이름으로 거른다 (`issuetype.name`). 그래서 id 가 아니라
+            표시용 이름을 넘긴다 — 이름이 낡으면 걸러지는 게 없어지는데,
+            그때는 `widened` 폴백이 에픽 자식 전체로 넓혀 답을 낸다.
+          */
+          devIssueTypes: cfg.devIssueTypeName
+            ? [cfg.devIssueTypeName]
+            : undefined,
           onWarn: log,
         });
 
         const reassign = await maybeReassign(cfg, issue.key, result, deps, log);
-        const msg = buildRouteMessage({
-          issueKey: issue.key,
-          summary: issue.fields?.summary ?? '(제목 없음)',
-          jiraBaseUrl: deps.jiraBaseUrl,
-          judgement: result,
-          links: result.links,
-          reassign,
-        });
 
-        const res = await deps.slack.post(
-          cfg.slackChannelId,
-          msg.text,
-          msg.blocks,
-          cycle.threadTs
-        );
+        /*
+          ── 이미 가져간 건은 알리지 않는다 ──
+
+          ①단계가 답했다는 건 공동담당자 칸에 다른 사람이 들어갔다는 뜻이고,
+          우리 조회 주기(1분)보다 먼저 누가 가져갔다는 얘기다. 그 사람에게
+          "이거 당신 겁니다" 를 보내는 건 소음이다.
+
+          그래도 **아래 appendEvent 는 그대로 탄다.** "QA 티켓 중 우리 건이
+          몇 건인가" 는 알림을 보냈는지와 상관없는 숫자다 — 여기서 빠지면
+          상세 화면의 집계가 실제보다 적게 나온다.
+        */
+        /*
+          알림을 안 보낼 때는 메시지를 만들지도 않는다. 만들어 두고 버리면
+          "왜 이 문구가 안 나가지" 를 나중에 뒤지게 된다.
+        */
+        const res = result.silent
+          ? { ok: true as const, error: undefined }
+          : await (async () => {
+              const msg = buildRouteMessage({
+                issueKey: issue.key,
+                summary: issue.fields?.summary ?? '(제목 없음)',
+                jiraBaseUrl: deps.jiraBaseUrl,
+                judgement: result,
+                links: result.links,
+                reassign,
+              });
+              return deps.slack.post(
+                cfg.slackChannelId,
+                msg.text,
+                msg.blocks,
+                cycle.threadTs
+              );
+            })();
         const ok = res.ok;
 
         // 발송 직후 즉시 기록 — 죽으면 재발송되는 창을 최소화한다.
@@ -987,8 +1064,13 @@ export async function runTick(
             c: result.classification,
             name: result.name ?? null,
           });
-          notified++;
-          log(`✓ ${issue.key} ${result.classification} · ${result.reason}`);
+          // 안 보낸 건은 발송 수에 안 넣는다. 요약이 "12건 알림" 이라고
+          // 말하면 Slack 에 12개가 있어야 한다.
+          if (!result.silent) notified++;
+          log(
+            `${result.silent ? '·' : '✓'} ${issue.key} ` +
+              `${result.classification} · ${result.reason}`
+          );
         } else {
           const prev = state.seen[issue.key];
           const failCount = (prev?.failCount ?? 0) + 1;
@@ -1021,7 +1103,12 @@ export async function runTick(
             "이 단계가 실제로 일하나" 는 말하지 못했다.
           */
           via: result.via,
-          notified: ok,
+          /*
+            보낸 적이 없으면 false 다. 기록 자체는 남으므로 상세 화면의
+            "우리 건 몇 건" 집계에는 그대로 들어간다 (거르는 곳이 없는 것을
+            확인했다).
+          */
+          notified: ok && !result.silent,
           reassigned: reassign?.kind === 'done',
           error: ok ? null : (res.error ?? '발송 실패'),
           // 어느 차수의 알림인지. 컬럼만 만들어 두고 여기서 넘기지 않아
@@ -1125,7 +1212,7 @@ export async function maybeReassign(
 ): Promise<ReassignOutcome | null> {
   const triageName =
     result.classification === 'unknown'
-      ? '트리아지 담당자'
+      ? '처음 받는 사람'
       : cfg.triageAccountId.slice(0, 12);
 
   if (!result.accountId) return null;

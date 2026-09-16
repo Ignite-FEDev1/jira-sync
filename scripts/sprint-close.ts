@@ -109,6 +109,11 @@ import {
   syncCounterpartStatuses,
   findLinkedKqKey,
 } from '@/lib/services/sprint-close/counterpart-status';
+import {
+  findExistingClone,
+  buildCloneSummary,
+  monthLabelFromSprint,
+} from '@/lib/services/sprint-close/existing-clone';
 
 // ─── 타입 ────────────────────────────────────────────────────
 
@@ -244,7 +249,9 @@ async function createCloneTicket(
 ): Promise<string> {
   const fields: Record<string, unknown> = {
     project: { key: 'FEHG' },
-    summary: `${original.fields.summary} - ${nextMonthLabel}`,
+    // buildCloneSummary가 기존 "- N월" 접미사를 걷어내고 붙인다.
+    // 그대로 이어붙이면 "- 8월 - 9월"처럼 매달 길어진다.
+    summary: buildCloneSummary(original.fields.summary, nextMonthLabel),
     issuetype: original.fields.issuetype,
     [IGNITE_CUSTOM_FIELDS.SPRINT]: nextSprintId,
     [IGNITE_CUSTOM_FIELDS.STORY_POINTS]: null, // 추정치 초기화 (프로젝트 기본값 방지)
@@ -542,12 +549,11 @@ async function main() {
   console.log(`  총 ${tickets.length}개 티켓\n`);
 
   // 신규 발행 티켓 summary suffix에 사용할 "OO월" 문자열
-  const nextPeriod = nextSprintName.split(' ')[1]; // "2605"
-  if (!nextPeriod)
+  const nextMonthLabel = monthLabelFromSprint(nextSprintName);
+  if (!nextMonthLabel)
     throw new Error(
       `스프린트 이름 형식 오류: "${nextSprintName}" (예: "FEHG 2605")`
     );
-  const nextMonthLabel = `${parseInt(nextPeriod.slice(2, 4), 10)}월`;
 
   // ── 티켓별 상태 처리 ──────────────────────────────────────
   console.log('[4/4] 티켓 처리...');
@@ -577,15 +583,59 @@ async function main() {
     try {
       if (statusKey === 'indeterminate') {
         // 진행 중: 완료 전환 -> 신규 발행 -> 링크
+
+        // 사람이 미리 다음 달 티켓을 만들어 둔 경우 배치가 또 만들면 안 된다.
+        // (2026-08-31 FEHG-4360 → FEHG-4417[사람] + FEHG-4477[배치] 중복 발생)
+        // dry-run 분기보다 먼저 판정해서 미리보기와 실행이 같은 결론을 내게 한다.
+        const existingClone = await findExistingClone({
+          client,
+          originalKey: ticket.key,
+          originalSummary: ticket.fields.summary,
+          originalAssigneeAccountId: ticket.fields.assignee?.accountId ?? null,
+          originalParentKey: ticket.fields.parent?.key ?? null,
+          issuelinks: ticket.fields.issuelinks,
+          nextSprintName,
+          monthLabel: nextMonthLabel,
+        });
+
+        // duplicate 일 때만 발행을 막는다. similar 는 발행하고 확인만 요청한다.
+        // (애매한 걸 막으면 다음 달 티켓이 유실된다 — 중복보다 나쁘다)
+        const skipClone = existingClone?.kind === 'duplicate';
+        if (existingClone) {
+          const prefix = isDryRun ? 'DRY RUN ' : '';
+          const tag = skipClone ? '중복 감지' : '유사 티켓';
+          const verb = skipClone
+            ? '신규 발행 건너뜀'
+            : '신규 발행은 진행 · 확인 필요';
+          console.log(
+            `  [${prefix}${tag}] ${ticket.key}: ${existingClone.key} — ` +
+              `${existingClone.reason} → ${verb}`
+          );
+          result.notices?.push({
+            key: ticket.key,
+            summary: ticket.fields.summary,
+            notice: skipClone
+              ? `다음 달 티켓 ${existingClone.key} ("${existingClone.summary}")가 이미 있어 ` +
+                `신규 발행을 건너뛰었습니다 (${existingClone.reason}). 원본 완료 처리는 정상 진행됩니다.`
+              : `같은 일감으로 보이는 ${existingClone.key} ("${existingClone.summary}")가 ` +
+                `${nextSprintName}에 있습니다 (${existingClone.reason}). ` +
+                `신규 발행은 그대로 진행했으니 중복인지 확인해주세요.`,
+            assigneeName,
+          });
+        }
+
         // 중복 스프린트인 경우 먼저 현재 스프린트만 남기도록 재설정 (다음 스프린트 제거)
         if (isDryRun) {
+          const dryPlan = skipClone
+            ? '완료 전환 예정 (신규 발행 없음)'
+            : '완료 전환 + 신규 발행 예정';
           if (sprints.length >= 2) {
             console.log(
-              `  [DRY RUN 중복+진행중] ${ticket.key}: 현재 스프린트 유지 → 완료 전환 + 신규 발행 예정 (변경 없음)`
+              `  [DRY RUN 중복+진행중] ${ticket.key}: 현재 스프린트 유지 → ${dryPlan} (변경 없음)`
             );
           } else {
             console.log(
-              `  [DRY RUN 진행중] ${ticket.key}: 완료 전환 + 신규 발행 예정 (변경 없음)`
+              `  [DRY RUN 진행중] ${ticket.key}: ${dryPlan} (변경 없음)`
             );
           }
           await syncCounterpartStatuses({
@@ -598,32 +648,39 @@ async function main() {
             onLog: (msg) => console.log(msg),
             dryRun: true,
           });
-          await patchAutomationKqTicket(
-            client,
-            ticket.key,
-            ticket.fields.issuelinks ?? [],
-            '(신규발행예정)',
-            nextSprintName,
-            (msg) => console.log(`    ${msg}`),
-            true
-          );
-          await cascadeLinkedTickets(
-            client,
-            hmgClient,
-            ticket,
-            '(신규발행예정)',
-            `${ticket.fields.summary} - ${nextMonthLabel}`,
-            userByAccountId,
-            true
-          );
-          // DRY RUN에서는 실제 Jira 호출을 하지 않으므로 캐스케이드 실패를 errors에 집계하지 않음
-          result.cloned.push({
-            originalKey: ticket.key,
-            originalSummary: ticket.fields.summary,
-            newKey: '(신규발행예정)',
-            newSummary: `${ticket.fields.summary} - ${nextMonthLabel}`,
-            assigneeName,
-          });
+          // 실행 경로와 같은 판정을 따른다. 여기서 건너뛰지 않으면 미리보기가
+          // 같은 티켓을 '확인 필요'와 '신규 발행 예정' 양쪽에 중복 집계한다.
+          if (!skipClone) {
+            await patchAutomationKqTicket(
+              client,
+              ticket.key,
+              ticket.fields.issuelinks ?? [],
+              '(신규발행예정)',
+              nextSprintName,
+              (msg) => console.log(`    ${msg}`),
+              true
+            );
+            await cascadeLinkedTickets(
+              client,
+              hmgClient,
+              ticket,
+              '(신규발행예정)',
+              buildCloneSummary(ticket.fields.summary, nextMonthLabel),
+              userByAccountId,
+              true
+            );
+            // DRY RUN에서는 실제 Jira 호출을 하지 않으므로 캐스케이드 실패를 errors에 집계하지 않음
+            result.cloned.push({
+              originalKey: ticket.key,
+              originalSummary: ticket.fields.summary,
+              newKey: '(신규발행예정)',
+              newSummary: buildCloneSummary(
+                ticket.fields.summary,
+                nextMonthLabel
+              ),
+              assigneeName,
+            });
+          }
         } else {
           if (sprints.length >= 2) {
             // 현재 스프린트만 남기도록 재설정 (다음 스프린트 참조 제거)
@@ -667,6 +724,11 @@ async function main() {
               assigneeName,
             });
           }
+
+          // 이미 다음 달 티켓이 있으면 신규 발행 계열 작업을 통째로 건너뛴다.
+          // (생성 · KQ 자동화 대기 · Cloners 링크 · AUTOWAY 연쇄 · 실측 검증)
+          // 원본 완료 전환과 짝꿍 동기화는 위에서 이미 끝났다.
+          if (skipClone) continue;
 
           // 원본에 Blocks→KQ 링크가 있으면 자동화가 신규 KQ를 만들어야 하는 티켓이다.
           const hasKqLink = (ticket.fields.issuelinks ?? []).some(
@@ -721,7 +783,7 @@ async function main() {
             hmgClient,
             ticket,
             newKey,
-            `${ticket.fields.summary} - ${nextMonthLabel}`,
+            buildCloneSummary(ticket.fields.summary, nextMonthLabel),
             userByAccountId,
             false
           );
@@ -771,7 +833,7 @@ async function main() {
             originalKey: ticket.key,
             originalSummary: ticket.fields.summary,
             newKey,
-            newSummary: `${ticket.fields.summary} - ${nextMonthLabel}`,
+            newSummary: buildCloneSummary(ticket.fields.summary, nextMonthLabel),
             assigneeName,
           });
         }

@@ -31,8 +31,22 @@ import {
   createSlackClient,
   createSlackReader,
 } from '@/lib/services/qa-router/clients';
+import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
 
-const JIRA_BASE = 'https://ignitecorp.atlassian.net';
+/**
+ * 대상마다 Jira 가 다르다. 전에는 여기 상수 하나로 ignite 를 박아 두었는데,
+ * 그러면 hmg 대상은 자격증명·필터 ID 가 맞아도 **다른 Jira 를 조회해** 빈
+ * 결과를 정상처럼 돌려준다 (404 가 아니라 "그런 필터 없음" 이라 조용하다).
+ */
+function jiraBaseOf(instance: 'ignite' | 'hmg'): string {
+  return instance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE;
+}
+
+/** 인스턴스별 폴백 환경변수. operator 미지정 대상에서만 쓴다. */
+const ENV_CREDS: Record<'ignite' | 'hmg', { email: string; token: string }> = {
+  ignite: { email: 'IGNITE_JIRA_EMAIL', token: 'IGNITE_JIRA_API_TOKEN' },
+  hmg: { email: 'HMG_JIRA_EMAIL', token: 'HMG_JIRA_API_TOKEN' },
+};
 
 function required(name: string): string {
   const v = process.env[name];
@@ -136,24 +150,23 @@ async function main() {
           let creds: { email: string; token: string } | null = null;
           if (cfg.jiraOperatorAccountId) {
             creds = await repo.getJiraCredsByAccountId(
-              cfg.jiraOperatorAccountId
+              cfg.jiraOperatorAccountId,
+              cfg.jiraInstance
             );
             if (!creds) {
               log(
-                `${cfg.name} · operator ${cfg.jiraOperatorAccountId.slice(0, 14)} 의 Jira 자격증명이 users 에 없음`
+                `${cfg.name} · operator ${cfg.jiraOperatorAccountId.slice(0, 14)} 의 ${cfg.jiraInstance} Jira 자격증명이 users 에 없음`
               );
             }
           }
-          if (
-            !creds &&
-            process.env.IGNITE_JIRA_EMAIL &&
-            process.env.IGNITE_JIRA_API_TOKEN
-          ) {
-            creds = {
-              email: process.env.IGNITE_JIRA_EMAIL,
-              token: process.env.IGNITE_JIRA_API_TOKEN,
-            };
-            log(`${cfg.name} · 환경변수 자격증명으로 폴백`);
+          // 폴백도 인스턴스를 따라간다. ignite 토큰으로 hmg 에 붙으면 401 이고,
+          // 그 401 은 "설정이 틀렸다" 가 아니라 "토큰이 만료됐다" 처럼 보인다.
+          const envName = ENV_CREDS[cfg.jiraInstance];
+          const envEmail = process.env[envName.email];
+          const envToken = process.env[envName.token];
+          if (!creds && envEmail && envToken) {
+            creds = { email: envEmail, token: envToken };
+            log(`${cfg.name} · ${envName.email} 환경변수 자격증명으로 폴백`);
           }
           credCache.set(cfg.id, creds);
         }
@@ -167,9 +180,10 @@ async function main() {
           continue;
         }
 
-        const jira = createJiraClient({ baseUrl: JIRA_BASE, ...creds, log });
+        const jiraBase = jiraBaseOf(cfg.jiraInstance);
+        const jira = createJiraClient({ baseUrl: jiraBase, ...creds, log });
         const confluence = createConfluenceClient({
-          baseUrl: JIRA_BASE,
+          baseUrl: jiraBase,
           ...creds,
           log,
         });
@@ -181,7 +195,7 @@ async function main() {
             confluence,
             slack,
             slackReader,
-            jiraBaseUrl: JIRA_BASE,
+            jiraBaseUrl: jiraBase,
             log,
           },
           HOLDER

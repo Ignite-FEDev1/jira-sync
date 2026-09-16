@@ -9,6 +9,8 @@
 
 import type { JiraIssue, JiraPort } from './judge';
 import type { SlackMessage, SlackReader } from './qa-thread';
+import type { JiraFieldMeta } from './derive';
+import type { ChangelogEntry } from './triage';
 
 const NET_RETRY_DELAYS_MS = [3_000, 9_000, 20_000];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -87,6 +89,28 @@ export interface JiraClient extends JiraPort {
   /** 이 프로젝트에서 고를 수 있는 이슈 타입. 설정 화면이 이름으로 묻는다. */
   getProjectIssueTypes(projectKey: string): Promise<JiraIssueType[]>;
   getUser(accountId: string): Promise<JiraUser>;
+  /**
+   * 이 인스턴스의 모든 필드. 이름을 번호로 바꾸는 데 쓴다.
+   *
+   * 실측 135개, 응답 130KB 남짓. 필터를 확인할 때만 부르므로 배치와는
+   * 상관없다.
+   */
+  listFields(): Promise<JiraFieldMeta[]>;
+  /**
+   * 여러 티켓의 변경이력을 **한 번에** 받는다.
+   *
+   * 티켓별로 `/issue/{key}/changelog` 를 치면 40건에 40왕복이다 (실측 3.1초).
+   * bulkfetch 는 같은 40건을 1왕복 0.8초에 준다. 분포가 완전히 일치하는 것을
+   * 대조해 확인했다.
+   *
+   * **순서가 반대다.** bulkfetch 는 최신 이력을 먼저 주고 개별 API 는
+   * 오래된 것을 먼저 준다. `[0]` 을 그대로 쓰면 정반대 값을 집는다 —
+   * 읽는 쪽(`triage.ts`)이 `created` 로 직접 고른다.
+   */
+  getChangelogs(
+    issueKeys: string[],
+    fieldIds: string[]
+  ): Promise<ChangelogEntry[]>;
   /** 담당자 + 공동담당자를 함께 바꾼다. */
   reassign(issueKey: string, accountId: string): Promise<void>;
   searchAll(
@@ -180,6 +204,30 @@ export function createJiraClient(opts: {
     getUser: (accountId) =>
       call<JiraUser>(`/user?accountId=${encodeURIComponent(accountId)}`),
 
+    listFields: () => call<JiraFieldMeta[]>('/field'),
+
+    /*
+      `maxResults` 는 티켓 수가 아니라 **이력 항목 수** 상한이다. 필드를
+      좁혀 받으므로 티켓당 몇 건뿐이라 넉넉히 준다. 실측 40건에서 페이징
+      토큰이 안 나왔다.
+    */
+    getChangelogs: async (issueKeys, fieldIds) =>
+      issueKeys.length === 0
+        ? []
+        : (
+            await call<{ issueChangeLogs?: ChangelogEntry[] }>(
+              '/changelog/bulkfetch',
+              {
+                method: 'POST',
+                body: JSON.stringify({
+                  issueIdsOrKeys: issueKeys,
+                  fieldIds,
+                  maxResults: 1000,
+                }),
+              }
+            )
+          ).issueChangeLogs ?? [],
+
     getIssue: (key, fields) =>
       call<JiraIssue>(`/issue/${key}?fields=${fields.join(',')}`),
 
@@ -224,9 +272,23 @@ export interface ConfluencePage {
   title: string;
 }
 
+export interface ConfluencePageWithPath extends ConfluencePage {
+  /** 뿌리부터 이 페이지 직전까지. "지금 어디를 가리키나" 를 보여준다. */
+  ancestors: ConfluencePage[];
+}
+
 export interface ConfluenceClient {
   getChildren(pageId: string, limit?: number): Promise<ConfluencePage[]>;
   getPageBody(pageId: string): Promise<string>;
+  /**
+   * 페이지 하나와 그 조상들.
+   *
+   * 배포대장 루트를 잘못 넣었을 때 **어디로 가야 하는지** 알려 주려고
+   * 쓴다. 차수 페이지를 붙여넣은 경우 답이 조상 목록에 들어 있다.
+   *
+   * v1 API 다. v2 에는 `ancestors` 확장이 없다.
+   */
+  getPage(pageId: string): Promise<ConfluencePageWithPath>;
 }
 
 export function createConfluenceClient(opts: {
@@ -253,6 +315,14 @@ export function createConfluenceClient(opts: {
         `/api/v2/pages/${pageId}/children?limit=${limit}`
       );
       return d.results ?? [];
+    },
+    async getPage(pageId) {
+      const d = await call<{
+        id: string;
+        title: string;
+        ancestors?: ConfluencePage[];
+      }>(`/rest/api/content/${pageId}?expand=ancestors`);
+      return { id: d.id, title: d.title, ancestors: d.ancestors ?? [] };
     },
     async getPageBody(pageId) {
       const d = await call<{ body?: { storage?: { value?: string } } }>(

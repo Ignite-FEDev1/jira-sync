@@ -6,7 +6,7 @@ import { useParams } from 'next/navigation';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { StatusLed } from '@/components/ui/badge';
+import { Badge, StatusLed } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   cycleStage,
@@ -16,6 +16,7 @@ import type {
   DeployCycle,
   QaRouterEvent,
 } from '@/lib/services/qa-router/types';
+import { hasAlertOverride } from '@/lib/services/qa-router/types';
 
 import {
   Code,
@@ -402,6 +403,19 @@ function CycleTable({
                         <span className={active ? 'font-medium' : ''}>
                           {st.label}
                         </span>
+                        {/*
+                          알림 기준을 이 차수만 덮어쓴 경우. 목록에서 보이지
+                          않으면 "왜 이 차수만 알림이 다르지" 를 나중에 아무도
+                          못 푼다 — 상세를 하나씩 열어 봐야 알게 된다.
+                        */}
+                        {hasAlertOverride(c) && (
+                          <Badge
+                            variant="warn"
+                            title="이 차수는 설정의 알림 기준을 쓰지 않습니다"
+                          >
+                            알림 기준 덮어씀
+                          </Badge>
+                        )}
                       </span>
                     </td>
                     <td className="px-3 py-2.5 text-right align-baseline font-mono tabular-nums">

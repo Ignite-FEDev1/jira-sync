@@ -5,11 +5,19 @@ import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { toast } from 'sonner';
-import { ArrowLeft, RefreshCw } from 'lucide-react';
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronUp,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react';
 
 import { Badge, StatusLed } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   alertYmd,
   cycleStage,
@@ -32,7 +40,16 @@ import {
   settlementBucket,
   type EventProblem,
 } from '@/lib/services/qa-router/outcome';
-import type { QaRouterEvent } from '@/lib/services/qa-router/types';
+import type {
+  AlertAnchor,
+  AlertRule,
+  AlertShift,
+  QaRouterEvent,
+} from '@/lib/services/qa-router/types';
+import {
+  effectiveAlertRules,
+  hasAlertOverride,
+} from '@/lib/services/qa-router/types';
 
 /*
   파이는 필요할 때 받는다.
@@ -82,6 +99,18 @@ import {
   useExpanded,
   useRouterTarget,
 } from '../../shared';
+/*
+  알림 규칙을 그리는 조각은 설정 화면이 이미 갖고 있다. 여기서 다시 만들면
+  같은 규칙이 두 모양으로 보이게 되므로 그대로 가져다 쓴다 —
+  `RuleList` 는 "이 차수에 실제로 언제 울리나" 까지 계산해 붙여 준다.
+*/
+import {
+  ANCHOR_OPTIONS,
+  DayStepper,
+  NativeSelect,
+  RuleList,
+  SHIFT_OPTIONS,
+} from '../../pipeline';
 
 /**
  * 차수 상세.
@@ -226,6 +255,21 @@ export default function CycleDetailPage() {
             <StatusLed tone={st.tone} pulse={st.stage === 'watching'} />
             {st.label}
           </Badge>
+          {/*
+            덮어쓴 차수라는 사실은 **제목 옆**에 둔다.
+
+            아래 알림 기준 섹션에도 같은 말이 있지만, 그건 스크롤 끝이다.
+            "왜 이 차수만 알림이 다르지" 를 나중에 풀 수 있어야 하므로,
+            차수를 열자마자 보이는 자리에 한 번 말한다.
+          */}
+          {hasAlertOverride(cycle) && (
+            <Badge
+              variant="warn"
+              title="이 차수는 설정의 알림 기준을 쓰지 않습니다. 아래 '알림 기준' 에서 확인하세요."
+            >
+              알림 기준 덮어씀
+            </Badge>
+          )}
         </div>
       </div>
 
@@ -432,6 +476,354 @@ export default function CycleDetailPage() {
           stage={st.stage}
         />
       </section>
+
+      {/*
+        알림 기준은 맨 아래다. 위의 것들은 "이 차수가 어떻게 되고 있나" 라는
+        사실이고 이건 손잡이다 — 사실을 읽으러 온 사람이 손잡이를 먼저 보면
+        안 된다. 대신 덮어쓴 경우에는 제목 옆 배지가 위에서 한 번 말한다.
+      */}
+      <Separator className="!mt-7" />
+      <AlertRulesSection
+        className="!mt-7"
+        configId={demo ? null : id}
+        configRules={config.alertRules}
+        override={cycle.alertRulesOverride ?? null}
+        deployYmd={cycle.deployYmd}
+        schedule={{
+          qaStartYmd: cycle.qaStartYmd,
+          qaEndYmd: qaEnd.ymd,
+          prodYmd: deploy.ymd,
+        }}
+        onSaved={t.reload}
+      />
+    </div>
+  );
+}
+
+/**
+ * 이 차수의 알림 기준. 기본은 **설정값을 쓴다** 이고, 이 차수만 다르게 할 수 있다.
+ *
+ * 왜 차수마다 두나 (실측):
+ *   Jira 차수명은 `release_20260914` 인데 GitLab 브랜치는 `release/260910` 이고
+ *   실제 배포는 09-14 였다 — 브랜치를 자른 날과 배포한 날이 4일 어긋난다.
+ *   이런 차수에 맞추려고 설정을 고치면 다음 차수부터 전부 틀어진다.
+ *
+ * 화면이 지켜야 하는 것:
+ *   ① 기본 상태에서 "설정값을 씁니다" 라고 **말한다.** 규칙만 그려 두면
+ *      이 차수가 따로 갖고 있는 값처럼 읽힌다.
+ *   ② 덮어쓴 차수는 그렇다는 표시가 보인다. 안 그러면 "왜 이 차수만 알림이
+ *      다르지" 를 나중에 아무도 못 푼다.
+ *   ③ 끄면 null 로 되돌아가 설정값을 다시 쓴다.
+ */
+function AlertRulesSection({
+  configId,
+  configRules,
+  override,
+  deployYmd,
+  schedule,
+  onSaved,
+  className,
+}: {
+  /** 저장 대상. 데모에서는 null 이고 편집을 열지 않는다. */
+  configId: string | null;
+  configRules: AlertRule[];
+  /** null 이면 설정값을 쓴다. */
+  override: AlertRule[] | null;
+  deployYmd: string;
+  schedule: {
+    qaStartYmd: string | null;
+    qaEndYmd: string | null;
+    prodYmd: string | null;
+  };
+  onSaved: () => void;
+  className?: string;
+}) {
+  /** 편집 중인 규칙. null 이면 읽기 상태다. */
+  const [draft, setDraft] = useState<AlertRule[] | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const live = effectiveAlertRules(override, configRules);
+  const overridden = override !== null;
+
+  /*
+    저장은 두 가지 뜻뿐이다 — "이 규칙을 쓴다"(배열) 와 "설정값으로
+    되돌린다"(null). 한 함수로 두어 되돌리기가 별도 경로가 되지 않게 한다.
+  */
+  const save = async (next: AlertRule[] | null) => {
+    if (!configId) return;
+    setSaving(true);
+    try {
+      const res = await fetch(
+        `/api/qa-router/${configId}/cycles/${deployYmd}/alert-rules`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alertRules: next }),
+        }
+      );
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        toast.error(body.error ?? '저장 실패');
+        return;
+      }
+      toast.success(
+        next === null
+          ? '설정값으로 되돌렸습니다'
+          : '이 차수 알림 기준을 저장했습니다'
+      );
+      setDraft(null);
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={className}>
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <h3 className="text-base font-semibold">알림 기준</h3>
+          <span className="text-xs text-muted-foreground">
+            이 차수 이야기를 언제 채널에 올리나
+          </span>
+        </div>
+        {/*
+          출처를 배지로 말한다. 규칙 목록만 있으면 그 값이 설정에서 온 것인지
+          이 차수가 따로 가진 것인지 구분할 방법이 없다.
+        */}
+        <Badge variant={overridden ? 'warn' : 'muted'}>
+          {overridden ? '이 차수만 다름' : '설정값을 씁니다'}
+        </Badge>
+      </div>
+
+      {draft === null ? (
+        <>
+          <RuleList rules={live} schedule={schedule} />
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            {overridden ? (
+              <>
+                이 차수는 설정의 알림 기준을 쓰지 않습니다. 되돌리면 설정값을
+                다시 씁니다.
+              </>
+            ) : (
+              <>
+                설정(대상 설정 → 언제 요약을 보내나)의 값입니다. 날짜는 이 차수
+                기준으로 계산했습니다.
+              </>
+            )}
+          </p>
+          {configId && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                /*
+                  켤 때 **설정값을 복사해 넣는다.** 빈 목록에서 시작하게 하면
+                  사람이 규칙을 처음부터 다시 쓰는데, 고치고 싶은 것은 보통
+                  날짜 하나뿐이다.
+                */
+                onClick={() =>
+                  setDraft(live.map((r) => ({ ...r })))
+                }
+              >
+                {overridden ? '이 차수 기준 고치기' : '이 차수만 다르게'}
+              </Button>
+              {overridden && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={saving}
+                  onClick={() => void save(null)}
+                >
+                  설정값으로 되돌리기
+                </Button>
+              )}
+            </div>
+          )}
+        </>
+      ) : (
+        <CycleRuleEditor
+          draft={draft}
+          setDraft={setDraft}
+          schedule={schedule}
+          saving={saving}
+          onCancel={() => setDraft(null)}
+          onSave={() => void save(draft)}
+        />
+      )}
+    </section>
+  );
+}
+
+/**
+ * 차수 규칙 편집기.
+ *
+ * 설정 화면의 `RuleCard` 보다 좁다 — **본문(template)은 여기서 안 건드린다.**
+ * 차수를 덮어쓰는 이유는 "이 차수는 날짜가 어긋났다" 이고 문구는 그대로 맞다.
+ * 복사해 온 규칙의 template 은 손대지 않은 채 같이 저장된다.
+ */
+function CycleRuleEditor({
+  draft,
+  setDraft,
+  schedule,
+  saving,
+  onCancel,
+  onSave,
+}: {
+  draft: AlertRule[];
+  setDraft: (next: AlertRule[]) => void;
+  schedule: {
+    qaStartYmd: string | null;
+    qaEndYmd: string | null;
+    prodYmd: string | null;
+  };
+  saving: boolean;
+  onCancel: () => void;
+  onSave: () => void;
+}) {
+  const patch = (i: number, next: AlertRule) =>
+    setDraft(draft.map((r, k) => (k === i ? next : r)));
+  const move = (i: number, d: number) => {
+    const j = i + d;
+    if (j < 0 || j >= draft.length) return;
+    const next = [...draft];
+    [next[i], next[j]] = [next[j], next[i]];
+    setDraft(next);
+  };
+
+  // 빈 목록은 저장할 수 없다. DB CHECK 도 같은 것을 막는다 — `[]` 는
+  // "알림을 통째로 껐다" 가 되는데, 그 뜻은 규칙을 끈 채 남겨 말해야 한다.
+  const empty = draft.length === 0;
+  const noLabel = draft.some((r) => !r.label.trim());
+
+  return (
+    <div>
+      <div className="flex flex-col gap-1.5">
+        {draft.map((r, i) => (
+          <div key={r.id} className="rounded border">
+            <div className="flex items-center gap-1.5 p-2">
+              <span className="w-3.5 shrink-0 text-center font-mono text-[10px] text-muted-foreground tabular-nums">
+                {i + 1}
+              </span>
+              <Input
+                value={r.label}
+                onChange={(e) => patch(i, { ...r, label: e.target.value })}
+                className="h-7 flex-1 text-[12.5px]"
+                aria-label={`${i + 1}번째 알림 이름`}
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6"
+                onClick={() => move(i, -1)}
+                disabled={i === 0}
+                aria-label="위로"
+              >
+                <ChevronUp />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6"
+                onClick={() => move(i, 1)}
+                disabled={i === draft.length - 1}
+                aria-label="아래로"
+              >
+                <ChevronDown />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 text-muted-foreground"
+                onClick={() => setDraft(draft.filter((_, k) => k !== i))}
+                aria-label={`${r.label} 삭제`}
+              >
+                <Trash2 />
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 px-2 pb-2 pl-[30px] text-[11.5px]">
+              <NativeSelect
+                value={r.anchor}
+                onChange={(v) => patch(i, { ...r, anchor: v as AlertAnchor })}
+                options={ANCHOR_OPTIONS}
+                label={`${i + 1}번째 알림 기준일`}
+              />
+              <DayStepper
+                value={r.offset}
+                onChange={(offset) => patch(i, { ...r, offset })}
+                label={`${i + 1}번째 알림 날짜 차이`}
+              />
+              <NativeSelect
+                value={r.shift}
+                onChange={(v) => patch(i, { ...r, shift: v as AlertShift })}
+                options={SHIFT_OPTIONS}
+                label={`${i + 1}번째 알림 주말 처리`}
+              />
+              <label className="ml-auto flex items-center gap-1.5 text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="size-3.5"
+                  checked={r.enabled}
+                  onChange={(e) => patch(i, { ...r, enabled: e.target.checked })}
+                />
+                사용
+              </label>
+            </div>
+          </div>
+        ))}
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-0.5 h-8 self-start"
+          onClick={() =>
+            setDraft([
+              ...draft,
+              {
+                id: `cycle${draft.length + 1}_${draft.length}`,
+                anchor: 'prod',
+                offset: -3,
+                shift: 'prev_workday',
+                label: '{days}일 뒤 운영 배포',
+                enabled: true,
+              },
+            ])
+          }
+        >
+          <Plus />
+          알림 추가
+        </Button>
+      </div>
+
+      {/*
+        고치는 동안 **이 차수에 실제로 걸리는 날**을 옆에 둔다. 덮어쓰는 이유가
+        날짜 어긋남이라, 넣은 값이 며칠로 떨어지는지 보이지 않으면 머릿속으로
+        달력을 그려야 한다.
+      */}
+      <div className="mt-3 rounded border border-dashed p-2">
+        <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+          저장하면 이렇게 됩니다
+        </p>
+        <RuleList rules={draft} schedule={schedule} />
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button size="sm" disabled={saving || empty || noLabel} onClick={onSave}>
+          저장
+        </Button>
+        <Button variant="ghost" size="sm" disabled={saving} onClick={onCancel}>
+          취소
+        </Button>
+        {(empty || noLabel) && (
+          <span className="text-[11px] text-amber-700 dark:text-amber-400">
+            {empty
+              ? '규칙이 하나도 없습니다 · 안 알리려면 규칙을 남긴 채 사용을 끕니다'
+              : '문구가 빈 줄이 있습니다'}
+          </span>
+        )}
+      </div>
+      <p className="mt-1.5 text-[11px] text-muted-foreground">
+        본문(메시지 문구)은 설정에서 고칩니다. 여기서는 언제 보낼지만 정합니다.
+      </p>
     </div>
   );
 }
@@ -1086,12 +1478,19 @@ function CycleAssignments({
                               ))}
                             </span>
                             {/*
-                            담당자는 정했는데 아직 안 보낸 건만 표시한다.
-                            판정 불가·발송 실패에 붙이면 같은 말을 두 번 하는 셈이다.
+                            담당자는 정했는데 Slack 에 안 나간 건.
+
+                            두 경우를 갈라야 한다 —
+                              · 아직 못 보낸 것          → 고쳐야 할 상태
+                              · 안 보내기로 한 것(①단계) → 정상
+                            둘 다 "미발송" 이라고 쓰면 정상인 건이 밀린
+                            일처럼 보인다.
                           */}
                             {e.targetName && !e.notified && !e.error && (
                               <span className="ml-1 text-xs text-muted-foreground">
-                                미발송
+                                {e.via === 'assigned'
+                                  ? '직접 가져감'
+                                  : '미발송'}
                               </span>
                             )}
                           </td>
@@ -1974,7 +2373,10 @@ function OwnerTrail({
                 ? '담당으로 판정했지만 Slack 전송 실패'
                 : event.notified
                   ? '에게 알림'
-                  : '담당으로 판정 (아직 미발송)',
+                  : event.via === 'assigned'
+                    ? // 우리가 보기 전에 이미 가져간 건. 알릴 이유가 없다.
+                      '가 직접 가져감 (알림 안 보냄)'
+                    : '담당으로 판정 (아직 미발송)',
             };
 
   /*
@@ -2013,7 +2415,7 @@ function OwnerTrail({
           head: settled
             ? // 여기도 조사를 뺀다. "차성숙가 가져감" 이 나오던 자리다.
               '실제로 가져감'
-            : '아직 아무도 가져가지 않음 (QA 트리아지가 쥐고 있음)',
+            : '아직 아무도 가져가지 않음 (QA 가 처음 넘긴 사람이 쥐고 있음)',
           detail: null,
           tone: missed
             ? ('bad' as const)
@@ -2110,7 +2512,7 @@ function FinalOwner({ event }: { event: QaRouterEvent }) {
     return (
       <span
         className="text-xs text-muted-foreground/70"
-        title="아직 QA 트리아지가 쥐고 있습니다. 아무도 가져가지 않았습니다."
+        title="QA 가 처음 넘긴 사람이 그대로 쥐고 있습니다. 아무도 가져가지 않았습니다."
       >
         미배정
       </span>

@@ -679,6 +679,7 @@ export function demoConfig(
     devIssueTypeName: '개발처리',
     coAssigneeField: 'customfield_10132',
     planCollectHours: [9, 17],
+    deployKinds: ['regular'],
     judgeTiers: [...JUDGE_TIERS],
     alerts: {},
     alertRules: [...DEFAULT_ALERT_RULES],
