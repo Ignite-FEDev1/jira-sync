@@ -31,7 +31,10 @@ export async function PUT(
   try {
     const { id } = await params;
     const body = await req.json();
-    const { name, project, deployType, gitlabProjects, teamMembers, checklist, isActive } = body;
+    const {
+      name, project, deployType, gitlabProjects, teamMembers, checklist, isActive,
+      pinnedBeforeItems, pinnedAfterItems,
+    } = body;
 
     const template = await updateTemplate(id, {
       name,
@@ -40,6 +43,8 @@ export async function PUT(
       gitlabProjects,
       teamMembers,
       checklist,
+      pinnedBeforeItems,
+      pinnedAfterItems,
       isActive,
     });
 
