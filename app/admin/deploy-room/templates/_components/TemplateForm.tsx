@@ -15,6 +15,7 @@ import {
   GripVertical,
   ChevronUp,
   ChevronDown,
+  Pin,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -145,6 +146,12 @@ export default function TemplateForm({ initialData }: Props) {
   const [checklist, setChecklist] = useState<DeployRoomTemplateChecklist[]>(
     initialData?.checklist ?? DEFAULT_CHECKLIST_WITH_ASSIGNEE
   );
+  const [pinnedBeforeItems, setPinnedBeforeItems] = useState<string[]>(
+    initialData?.pinnedBeforeItems ?? []
+  );
+  const [pinnedAfterItems, setPinnedAfterItems] = useState<string[]>(
+    initialData?.pinnedAfterItems ?? []
+  );
   const [isActive, setIsActive] = useState(initialData?.isActive ?? true);
   const [submitting, setSubmitting] = useState(false);
   const [expandedDesc, setExpandedDesc] = useState<Set<number>>(() => {
@@ -192,6 +199,19 @@ export default function TemplateForm({ initialData }: Props) {
     }).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 배포 전/후 고정 항목
+  const addPinnedBefore = () => setPinnedBeforeItems((prev) => [...prev, '']);
+  const updatePinnedBefore = (index: number, value: string) =>
+    setPinnedBeforeItems((prev) => prev.map((v, i) => (i === index ? value : v)));
+  const removePinnedBefore = (index: number) =>
+    setPinnedBeforeItems((prev) => prev.filter((_, i) => i !== index));
+
+  const addPinnedAfter = () => setPinnedAfterItems((prev) => [...prev, '']);
+  const updatePinnedAfter = (index: number, value: string) =>
+    setPinnedAfterItems((prev) => prev.map((v, i) => (i === index ? value : v)));
+  const removePinnedAfter = (index: number) =>
+    setPinnedAfterItems((prev) => prev.filter((_, i) => i !== index));
 
   // GitLab
   const addGitlabProject = () => setGitlabProjects((prev) => [...prev, '']);
@@ -334,6 +354,8 @@ export default function TemplateForm({ initialData }: Props) {
     const cleanChecklist = checklist.filter((item) => item.title.trim());
     const cleanGitlab = gitlabProjects.filter((u) => u.trim());
     const cleanMembers = teamMembers.filter((m) => m.trim());
+    const cleanPinnedBefore = pinnedBeforeItems.filter((v) => v.trim());
+    const cleanPinnedAfter = pinnedAfterItems.filter((v) => v.trim());
 
     if (!cleanChecklist.length) {
       toast.error('체크리스트 단계를 최소 1개 이상 입력하세요');
@@ -355,6 +377,8 @@ export default function TemplateForm({ initialData }: Props) {
           gitlabProjects: cleanGitlab,
           teamMembers: cleanMembers,
           checklist: cleanChecklist,
+          pinnedBeforeItems: cleanPinnedBefore,
+          pinnedAfterItems: cleanPinnedAfter,
           isActive,
         }),
       });
@@ -458,6 +482,96 @@ export default function TemplateForm({ initialData }: Props) {
                   variant="ghost"
                   size="icon"
                   onClick={() => removeGitlabProject(i)}
+                  className="shrink-0 h-9 w-9 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 배포 전 고정 항목 */}
+      <section className="bg-white rounded-xl border p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground/80">
+            <div className="h-6 w-6 rounded-md bg-amber-50 flex items-center justify-center">
+              <Pin className="h-3.5 w-3.5 text-amber-500" />
+            </div>
+            배포 전 고정 항목
+            <span className="text-xs font-normal text-muted-foreground">
+              ({pinnedBeforeItems.length})
+            </span>
+          </div>
+          <Button variant="ghost" size="sm" onClick={addPinnedBefore} className="h-7 text-xs">
+            <Plus className="h-3 w-3 mr-1" />
+            추가
+          </Button>
+        </div>
+        {pinnedBeforeItems.length === 0 ? (
+          <div className="rounded-lg border border-dashed py-6 text-center">
+            <p className="text-xs text-muted-foreground">배포 전에 항상 확인할 고정 항목을 추가하세요</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {pinnedBeforeItems.map((item, i) => (
+              <div key={i} className="flex gap-2 group">
+                <Input
+                  placeholder="고정 항목 내용을 입력하세요"
+                  value={item}
+                  onChange={(e) => updatePinnedBefore(i, e.target.value)}
+                  className="flex-1 text-xs rounded-lg h-9"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => removePinnedBefore(i)}
+                  className="shrink-0 h-9 w-9 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 배포 후 고정 항목 */}
+      <section className="bg-white rounded-xl border p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground/80">
+            <div className="h-6 w-6 rounded-md bg-amber-50 flex items-center justify-center">
+              <Pin className="h-3.5 w-3.5 text-amber-500" />
+            </div>
+            배포 후 고정 항목
+            <span className="text-xs font-normal text-muted-foreground">
+              ({pinnedAfterItems.length})
+            </span>
+          </div>
+          <Button variant="ghost" size="sm" onClick={addPinnedAfter} className="h-7 text-xs">
+            <Plus className="h-3 w-3 mr-1" />
+            추가
+          </Button>
+        </div>
+        {pinnedAfterItems.length === 0 ? (
+          <div className="rounded-lg border border-dashed py-6 text-center">
+            <p className="text-xs text-muted-foreground">배포 후에 항상 확인할 고정 항목을 추가하세요</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {pinnedAfterItems.map((item, i) => (
+              <div key={i} className="flex gap-2 group">
+                <Input
+                  placeholder="고정 항목 내용을 입력하세요"
+                  value={item}
+                  onChange={(e) => updatePinnedAfter(i, e.target.value)}
+                  className="flex-1 text-xs rounded-lg h-9"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => removePinnedAfter(i)}
                   className="shrink-0 h-9 w-9 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
                 >
                   <X className="h-3.5 w-3.5" />
@@ -800,7 +914,8 @@ export default function TemplateForm({ initialData }: Props) {
           <div className="text-xs text-muted-foreground">
             {checklist.filter((c) => c.title.trim()).length}개 단계 ·{' '}
             {teamMembers.length}명 팀원 ·{' '}
-            {gitlabProjects.filter((g) => g.trim()).length}개 저장소
+            {gitlabProjects.filter((g) => g.trim()).length}개 저장소 ·{' '}
+            {pinnedBeforeItems.filter((v) => v.trim()).length + pinnedAfterItems.filter((v) => v.trim()).length}개 고정 항목
           </div>
           <div className="flex gap-2">
             <Button

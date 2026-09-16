@@ -9,6 +9,8 @@ type TemplateRow = {
   gitlab_projects: string[];
   team_members: string[];
   checklist: DeployRoomTemplateChecklist[];
+  pinned_before_items: string[];
+  pinned_after_items: string[];
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -23,6 +25,8 @@ function toTemplate(row: TemplateRow): DeployRoomTemplate {
     gitlabProjects: row.gitlab_projects ?? [],
     teamMembers: row.team_members ?? [],
     checklist: row.checklist ?? [],
+    pinnedBeforeItems: row.pinned_before_items ?? [],
+    pinnedAfterItems: row.pinned_after_items ?? [],
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -74,6 +78,8 @@ export interface CreateTemplateInput {
   gitlabProjects: string[];
   teamMembers: string[];
   checklist: DeployRoomTemplateChecklist[];
+  pinnedBeforeItems?: string[];
+  pinnedAfterItems?: string[];
   isActive?: boolean;
 }
 
@@ -87,6 +93,8 @@ export async function createTemplate(input: CreateTemplateInput): Promise<Deploy
       gitlab_projects: input.gitlabProjects,
       team_members: input.teamMembers,
       checklist: input.checklist,
+      pinned_before_items: input.pinnedBeforeItems ?? [],
+      pinned_after_items: input.pinnedAfterItems ?? [],
       is_active: input.isActive ?? true,
     })
     .select()
@@ -103,6 +111,8 @@ export interface UpdateTemplateInput {
   gitlabProjects?: string[];
   teamMembers?: string[];
   checklist?: DeployRoomTemplateChecklist[];
+  pinnedBeforeItems?: string[];
+  pinnedAfterItems?: string[];
   isActive?: boolean;
 }
 
@@ -117,6 +127,8 @@ export async function updateTemplate(
   if (input.gitlabProjects !== undefined) patch.gitlab_projects = input.gitlabProjects;
   if (input.teamMembers !== undefined) patch.team_members = input.teamMembers;
   if (input.checklist !== undefined) patch.checklist = input.checklist;
+  if (input.pinnedBeforeItems !== undefined) patch.pinned_before_items = input.pinnedBeforeItems;
+  if (input.pinnedAfterItems !== undefined)  patch.pinned_after_items  = input.pinnedAfterItems;
   if (input.isActive !== undefined) patch.is_active = input.isActive;
 
   const { data, error } = await dbServer

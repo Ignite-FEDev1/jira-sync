@@ -19,7 +19,10 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { name, project, deployType, gitlabProjects, teamMembers, checklist, isActive } = body;
+    const {
+      name, project, deployType, gitlabProjects, teamMembers, checklist, isActive,
+      pinnedBeforeItems, pinnedAfterItems,
+    } = body;
 
     if (!name) {
       return NextResponse.json(
@@ -35,6 +38,8 @@ export async function POST(req: Request) {
       gitlabProjects: gitlabProjects ?? [],
       teamMembers: teamMembers ?? [],
       checklist: checklist ?? [],
+      pinnedBeforeItems: pinnedBeforeItems ?? [],
+      pinnedAfterItems: pinnedAfterItems ?? [],
       isActive: isActive ?? true,
     });
 

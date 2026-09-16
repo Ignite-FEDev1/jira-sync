@@ -42,6 +42,8 @@ interface TeamInfo {
   leaderName: string | null;
   gitlabToken: string;
   gitlabProjects: string[];
+  pinnedBeforeItems: string[];
+  pinnedAfterItems: string[];
 }
 
 const EMPTY_TEAM_INFO: TeamInfo = {
@@ -50,6 +52,8 @@ const EMPTY_TEAM_INFO: TeamInfo = {
   leaderName: null,
   gitlabToken: '',
   gitlabProjects: [],
+  pinnedBeforeItems: [],
+  pinnedAfterItems: [],
 };
 
 export default function DeployRoomDetailPage() {
@@ -84,6 +88,7 @@ export default function DeployRoomDetailPage() {
       ]);
 
       const sessionJson = await sessionRes.json();
+      console.log('sessionJson', sessionJson);
       if (!sessionJson.success) {
         if (sessionRes.status === 404) {
           setNotFound(true);
@@ -114,9 +119,13 @@ export default function DeployRoomDetailPage() {
       const templateData = sessionJson.template as {
         gitlabProjects?: string[];
         teamMembers?: string[];
+        pinnedBeforeItems?: string[];
+        pinnedAfterItems?: string[];
       } | null;
       if (templateData) {
         next.gitlabProjects = templateData.gitlabProjects ?? [];
+        next.pinnedBeforeItems = templateData.pinnedBeforeItems ?? [];
+        next.pinnedAfterItems = templateData.pinnedAfterItems ?? [];
         if (next.members.length === 0) {
           next.members = templateData.teamMembers ?? [];
         }
@@ -465,10 +474,12 @@ export default function DeployRoomDetailPage() {
           <ConfluenceTasksPanel
             title="2.1. 배포 전 할일"
             tasks={session.confluenceTasks?.before ?? []}
+            pinnedItems={teamInfo.pinnedBeforeItems}
           />
           <ConfluenceTasksPanel
             title="2.2. 배포 후 할일"
             tasks={session.confluenceTasks?.after ?? []}
+            pinnedItems={teamInfo.pinnedAfterItems}
           />
         </div>
 
