@@ -1,5 +1,6 @@
 import https from 'https';
 import type { ConfluenceDeployTasks } from '@/lib/types/deploy-room';
+import { basicAuthHeader } from '@/lib/jira-credentials';
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
@@ -31,7 +32,6 @@ function getCredentials(hostname: string): { email: string; token: string } {
 
 function fetchJson(hostname: string, path: string): Promise<unknown> {
   const { email, token } = getCredentials(hostname);
-  const auth = Buffer.from(`${email}:${token}`).toString('base64');
   return new Promise((resolve, reject) => {
     const req = https.request(
       {
@@ -39,7 +39,7 @@ function fetchJson(hostname: string, path: string): Promise<unknown> {
         path,
         method: 'GET',
         agent: httpsAgent,
-        headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
+        headers: { Authorization: basicAuthHeader(email, token), Accept: 'application/json' },
       },
       (res) => {
         let data = '';

@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { db } from '@/lib/db';
+import type { Team, TargetProjectConfig } from '@/lib/types/team';
 
 // --- 타입 ---
 
@@ -45,21 +46,6 @@ interface SyncProfile {
   name: string;
   sourceProjectId: string;
   targetProjectId: string;
-}
-
-interface TargetProjectConfig {
-  projectId: string;
-  syncProfileId: string | null;
-}
-
-interface Team {
-  id: string;
-  name: string;
-  createdAt: string;
-  sourceProjectId: string | null;
-  leaderId: string | null;
-  targets: TargetProjectConfig[];
-  memberIds: string[];
 }
 
 export default function TeamsPage() {

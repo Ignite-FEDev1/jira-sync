@@ -20,13 +20,13 @@ import type { Classification, Judgement, RelatedLinks } from './message';
 import type { ChangelogEntry } from './triage';
 import type { DerivedMember, JudgeTier } from './types';
 import { JUDGE_TIERS } from './types';
+import type { JiraIssue as BaseJiraIssue } from '@/lib/types/jira';
 
 // ─────────────────────────────────────────────────────────────
 // Jira 포트
 // ─────────────────────────────────────────────────────────────
 
-export interface JiraIssue {
-  key: string;
+export interface JiraIssue extends Pick<BaseJiraIssue, 'key'> {
   /**
    * 숫자 id. 변경이력 bulkfetch 응답이 키가 아니라 이 값으로 돌아온다.
    * 조회할 때 따로 요청하지 않아도 Jira 가 늘 얹어 주지만, 안 올 수도 있게 둔다.

@@ -30,7 +30,8 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { Skeleton } from '@/components/ui/skeleton';
-import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import { jiraBaseUrl } from '@/lib/constants/jira';
+export { jiraBaseUrl };
 import { useCurrentUser } from '@/contexts/user-context';
 import { db } from '@/lib/db';
 import { toConfig, toEvent, toState } from '@/lib/services/qa-router/rows';
@@ -62,14 +63,6 @@ import type {
 } from '@/lib/services/qa-router/types';
 
 export const SLACK_BASE = 'https://ignite0830.slack.com';
-
-/**
- * 팀은 Jira 인스턴스를 두 개 쓴다. 하드코딩하면 hmg 대상의 링크가
- * 존재하지 않는 곳을 가리킨다.
- */
-export function jiraBaseUrl(instance: QaRouterConfig['jiraInstance']): string {
-  return instance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE;
-}
 
 /**
  * 이벤트 시각. 같은 날이면 시:분만 보여준다 —

@@ -3,6 +3,7 @@
 
 import { JiraIssue } from '@/lib/types/jira';
 import { dbServer } from '@/lib/db';
+import { IGNITE_CUSTOM_FIELDS } from '@/lib/constants/jira';
 import { mapSprintToTarget } from './sprint-mapper';
 import { stripAdfMediaNodes } from './field-mapper';
 
@@ -89,7 +90,7 @@ export async function mapFieldsFromDb(
 
     // 안전장치: 스프린트 필드가 copy로 되어 있으면 sprint_map으로 보정
     // (프로젝트마다 스프린트 ID가 다르므로 단순 복사 불가)
-    const isSprintField = source_field === 'customfield_10020';
+    const isSprintField = source_field === IGNITE_CUSTOM_FIELDS.SPRINT;
 
     // 안전장치: cross-instance에서 사람 필드가 copy로 되어 있으면 account_map으로 보정
     const effectiveTransformType =

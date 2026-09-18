@@ -1,5 +1,17 @@
 'use client';
 
+/**
+ * ⚠️ 유지보수 중단 · 메뉴에 노출되지 않음
+ *
+ * 진입 링크는 app/create-epic/page.tsx:252 하나뿐이다 (그쪽도 노출되지 않음).
+ * 아래 다이어그램은 현재 코드와 다르다:
+ *   - STATUS_MAPPING 기반 전이로 그려져 있으나, 실제 전이는
+ *     lib/services/sync/transition-helper.ts 의 STATUS_WORKFLOW BFS 가 한다.
+ *   - ALLOWED_FEHG_TO_HMG_EPIC_IDS 로 에픽을 거른다고 설명하나, 그 상수는 미사용이다.
+ *     실제 에픽 매칭은 lib/services/sync/epic-resolver.ts 의 3단계.
+ * 고치려면 위 두 파일을 먼저 읽을 것.
+ */
+
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';

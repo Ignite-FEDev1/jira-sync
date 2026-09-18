@@ -1,5 +1,9 @@
 import { dbServer } from '@/lib/db';
 
+export function basicAuthHeader(user: string, pass: string): string {
+  return `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+}
+
 interface JiraCredentials {
   email: string;
   apiToken: string;

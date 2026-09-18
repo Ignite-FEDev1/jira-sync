@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import axios, { AxiosError } from 'axios';
 import https from 'https';
+import { basicAuthHeader } from '@/lib/jira-credentials';
 
 // SSL 인증서 검증 비활성화 (내부 네트워크용)
 const httpsAgent = new https.Agent({
@@ -48,9 +49,8 @@ function getSonarToken(): string | null {
 }
 
 function buildAuthHeader(token: string): string {
-  // SonarQube token auth = Basic base64("<token>:")
-  const basic = Buffer.from(`${token}:`).toString('base64');
-  return `Basic ${basic}`;
+  // SonarQube token auth = Basic base64("<token>:") — 패스워드 없이 토큰만
+  return basicAuthHeader(token, '');
 }
 
 export async function GET(request: NextRequest) {

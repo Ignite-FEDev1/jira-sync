@@ -49,15 +49,16 @@ export async function POST(req: NextRequest) {
     }
 
     // 현재 스프린트 ID 조회 (원복용으로 프론트에 반환)
+    const sprintField = IGNITE_CUSTOM_FIELDS.SPRINT;
     const ticketResult = await client.get<{
-      fields: { customfield_10020: Array<{ id: number; name: string }> | null };
-    }>(`issue/${ticketKey}`, { fields: 'customfield_10020' });
+      fields: { [key: string]: Array<{ id: number; name: string }> | null };
+    }>(`issue/${ticketKey}`, { fields: sprintField });
 
     if (!ticketResult.success || !ticketResult.data) {
       return NextResponse.json({ success: false, error: ticketResult.error }, { status: 500 });
     }
 
-    const currentSprints = ticketResult.data.fields.customfield_10020 ?? [];
+    const currentSprints = (ticketResult.data.fields[sprintField] ?? []) as Array<{ id: number; name: string }>;
     const prevSprint = currentSprints[0] ?? null;
 
     // 다음 달 스프린트 확인/생성

@@ -1,8 +1,10 @@
 // 동기화 관련 타입 정의
 
-export type SyncTargetProject = 'KQ' | 'AUTOWAY' | 'MEMBERSHIP';
-export type HmgTargetProject = 'AUTOWAY' | 'MEMBERSHIP';
-export type IgniteTargetProject = 'KQ';
+import { AUTO_SYNC_PROJECTS } from '@/lib/constants/jira';
+
+export type IgniteTargetProject = (typeof AUTO_SYNC_PROJECTS.IGNITE)[number];
+export type HmgTargetProject = (typeof AUTO_SYNC_PROJECTS.HMG)[number];
+export type SyncTargetProject = IgniteTargetProject | HmgTargetProject;
 
 // 동기화 모드
 export type SyncMode =

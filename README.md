@@ -110,6 +110,58 @@ fe1-web/
 
 ---
 
+## 🔧 동기화 대상 Jira 프로젝트 추가하기
+
+### 1. Jira에서 값 3개를 확인한다
+
+| 값 | 어디서 보나 | 예시 |
+|---|---|---|
+| 프로젝트 키 | 티켓 키의 앞부분 | `AUTOWAY-123` → `AUTOWAY` |
+| 프로젝트 ID | 프로젝트 설정 → 세부 정보. URL 끝의 `pid=` 숫자 | `10363` |
+| 보드 ID | 백로그/보드 화면 URL의 `rapidView=` 또는 `/boards/` 뒤 숫자 | `521` |
+
+### 2. `lib/constants/jira.ts` 세 곳에 넣는다
+
+Ignite Jira면 `IGNITE`, HMG Jira면 `HMG` 아래에 넣는다.
+
+```ts
+// ① 프로젝트 정보
+export const JIRA_PROJECTS = {
+  HMG: {
+    AUTOWAY: { ... },
+    NEWPROJ: {
+      key: 'NEWPROJ',
+      id: '12345',
+      name: '프로젝트 이름',
+      description: 'FEHG 기준으로 자동 업데이트',
+    },
+  },
+} as const;
+
+// ② 동기화 대상 목록
+export const AUTO_SYNC_PROJECTS = {
+  IGNITE: ['KQ'] as const,
+  HMG: ['AUTOWAY', 'MEMBERSHIP', 'NEWPROJ'] as const,
+} as const;
+
+// ③ 스프린트 조회용 보드
+export const BOARD_IDS = {
+  FEHG: 251,
+  AUTOWAY: 521,
+  NEWPROJ: 3300,
+} as const;
+```
+
+### 3. 웹에서 설정한다
+
+1. `/settings/projects` → 프로젝트 등록
+2. `/settings/field-mappings` → 어떤 필드를 어떻게 옮길지 매핑 등록
+
+**매핑까지 넣어야 동기화가 돈다.** 프로젝트만 등록하고 매핑을 비워두면
+에러 없이 동기화 결과가 0건으로 나온다.
+
+---
+
 ## 📚 주요 기능
 
 - ✅ FEHG → KQ/AUTOWAY/MEMBERSHIP 자동 동기화

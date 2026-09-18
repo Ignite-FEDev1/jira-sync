@@ -10,6 +10,7 @@ import {
   FileText,
   Settings,
   UserRoundCog,
+  Github,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/contexts/user-context';
@@ -100,15 +101,26 @@ export function GlobalHeaderStrip() {
               </Link>
             ))}
           </nav>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 px-3 text-xs border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
-            onClick={() => router.push('/select-user')}
-          >
-            <AlertTriangle className="mr-1 h-3 w-3" />
-            사용자 선택 필요
-          </Button>
+          <div className="flex items-center gap-2">
+            <a
+              href="https://github.com/Ignite-FEDev1/jira-sync"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                <Github className="h-4 w-4" />
+              </Button>
+            </a>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-3 text-xs border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+              onClick={() => router.push('/select-user')}
+            >
+              <AlertTriangle className="mr-1 h-3 w-3" />
+              사용자 선택 필요
+            </Button>
+          </div>
         </div>
       </header>
     );
@@ -141,21 +153,32 @@ export function GlobalHeaderStrip() {
             ))}
           </nav>
 
-          {/* 오른쪽: 사용자 정보 */}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 px-2 shrink-0"
-            onClick={handleSwitchUser}
-          >
-            <UserRoundCog className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
-            <span className="text-xs">{currentUser.name}</span>
-            {currentUser.teamName && (
-              <span className="ml-1 text-[11px] text-muted-foreground/60">
-                ({currentUser.teamName})
-              </span>
-            )}
-          </Button>
+          {/* 오른쪽: GitHub 링크 + 사용자 정보 */}
+          <div className="flex items-center gap-1">
+            <a
+              href="https://github.com/Ignite-FEDev1/jira-sync"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                <Github className="h-4 w-4" />
+              </Button>
+            </a>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 shrink-0"
+              onClick={handleSwitchUser}
+            >
+              <UserRoundCog className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
+              <span className="text-xs">{currentUser.name}</span>
+              {currentUser.teamName && (
+                <span className="ml-1 text-[11px] text-muted-foreground/60">
+                  ({currentUser.teamName})
+                </span>
+              )}
+            </Button>
+          </div>
         </div>
       </header>
 

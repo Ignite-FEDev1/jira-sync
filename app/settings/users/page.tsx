@@ -21,11 +21,9 @@ import {
 import { Plus, Pencil, Trash2, Check, Loader2, Search, CircleCheck, CircleX, RotateCcw, AlertTriangle, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
 import { useCurrentUser } from '@/contexts/user-context';
+import type { Team as BaseTeam } from '@/lib/types/team';
 
-interface Team {
-  id: string;
-  name: string;
-}
+type Team = Pick<BaseTeam, 'id' | 'name'>;
 
 interface User {
   id: string;
@@ -96,6 +94,8 @@ export default function UsersPage() {
   const [hmgVerified, setHmgVerified] = useState<JiraVerifyResult | null>(null);
   const [hmgVerifyError, setHmgVerifyError] = useState<string | null>(null);
 
+  // 중복: settings/{projects,field-mappings,teams}/page.tsx 에도 유사한 fetch+useEffect 패턴이 있음.
+  // lib/hooks/use-app-users.ts 가 같은 역할을 한다 — 통합 시 참고할 것.
   const fetchData = useCallback(async () => {
     const [teamsRes, usersRes] = await Promise.all([
       fetch('/api/teams').then((r) => r.json()),

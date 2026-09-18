@@ -1,5 +1,6 @@
 import { JiraApiResponse, JiraRequestOptions } from '@/lib/types/jira';
 import { JIRA_ENDPOINTS, JIRA_API_VERSION } from '@/lib/constants/jira';
+import { basicAuthHeader } from '@/lib/jira-credentials';
 import { toast } from 'sonner';
 // 타입 전용 import — run-log는 node:fs를 쓰므로 런타임 의존이 생기면 브라우저 번들이 깨진다
 import type { JiraCallRecord } from '@/lib/services/sprint-close/run-log';
@@ -113,16 +114,12 @@ export class JiraClient {
         : `${config.baseUrl}${JIRA_API_VERSION}`;
       const url = `${baseUrl}/${cleanPath}${queryString}`;
 
-      const authHeader = Buffer.from(
-        `${config.email}:${config.token}`
-      ).toString('base64');
-
       const response = await fetch(url, {
         method,
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          Authorization: `Basic ${authHeader}`,
+          Authorization: basicAuthHeader(config.email, config.token),
         },
         body: body ? JSON.stringify(body) : undefined,
       });
