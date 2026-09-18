@@ -1,14 +1,15 @@
 // FEHG 부모 에픽 → AUTOWAY/HMGBOARD 에픽 매칭 또는 신규 생성 + 상태 동기화
 //
-// 룰:
-//   - target summary = "[FEHG] " + FEHG 부모 summary (이미 [FEHG] 시작이면 그대로)
-//   - 대상 프로젝트에서 동일 summary 에픽이 있으면 그 키 사용
-//   - 없으면 신규 생성 (summary + description + duedate; assignee는 비워둠)
+// 조회 순서:
+//   1단계: FEHG 에픽 customfield_10306 URL → HMG key 추출 (ID 기반)
+//   2단계: [FEHG] 접두사 summary 매칭 (기존 에픽 backward compat) + URL 저장
+//   3단계: 신규 생성 ([FEHG] 접두사 포함) + URL 저장
 //   - 동일 에픽에 대한 동시 요청은 단일 Promise로 합침 (중복 생성 방지)
 //   - 매칭/생성 완료 후 FEHG 부모 에픽의 상태를 대상 에픽에도 동기화 (세션당 1회)
 //   - 대상 에픽이 closed(statusCategory.key === 'done') 상태면 transition 스킵 (보호 정책)
 
 import { jira } from '@/lib/services/jira';
+import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
 import { SyncLogger } from './logger';
 import { stripAdfMediaNodes } from './field-mapper';
 import {
@@ -41,9 +42,21 @@ export function clearEpicCache() {
   syncedStatusEpicKeys.clear();
 }
 
-function buildTargetEpicSummary(fehgParentSummary: string): string {
+// backward compat: 기존 HMG 에픽 중 [FEHG] 접두사로 생성된 것 매칭용
+function buildLegacyTargetSummary(fehgParentSummary: string): string {
   const trimmed = fehgParentSummary.trim();
   return trimmed.startsWith('[FEHG]') ? trimmed : `[FEHG] ${trimmed}`;
+}
+
+// FEHG 에픽 customfield_10306에 저장된 URL에서 HMG key 추출
+function extractHmgKeyFromUrl(
+  url: unknown,
+  targetProject: string
+): string | null {
+  if (typeof url !== 'string') return null;
+  const m = url.match(/\/browse\/([A-Z]+-\d+)/);
+  if (!m) return null;
+  return m[1].startsWith(`${targetProject}-`) ? m[1] : null;
 }
 
 async function loadTargetEpics(
@@ -118,10 +131,17 @@ async function createTargetEpic(
     return null;
   }
 
+  const newKey = result.data.key;
+  // 생성 후 FEHG 에픽에 HMG URL 저장 → 다음 동기화부터 1단계(ID 기반)에서 바로 매칭
+  const hmgUrl = `${JIRA_ENDPOINTS.HMG}/browse/${newKey}`;
+  await jira.ignite.updateIssueFields(fehgParentKey, {
+    customfield_10306: hmgUrl,
+  });
+
   logger.success(
-    `에픽 신규 생성: ${result.data.key} "${targetSummary}" (FEHG ${fehgParentKey} 기준)`
+    `에픽 신규 생성: ${newKey} "${targetSummary}" (FEHG ${fehgParentKey} 기준)`
   );
-  return result.data.key;
+  return newKey;
 }
 
 /**
@@ -142,7 +162,9 @@ async function syncEpicStatus(
     // 1. FEHG 부모 에픽 상태 조회
     const fehgEpic = await jira.ignite.getIssue(fehgParentKey, ['status']);
     if (!fehgEpic.success || !fehgEpic.data) {
-      logger.warning(`FEHG 부모 ${fehgParentKey} 상태 조회 실패 - 에픽 상태 동기화 스킵`);
+      logger.warning(
+        `FEHG 부모 ${fehgParentKey} 상태 조회 실패 - 에픽 상태 동기화 스킵`
+      );
       return;
     }
     const fehgStatusId = fehgEpic.data.fields.status?.id;
@@ -183,9 +205,14 @@ async function syncEpicStatus(
       const res = await jira.hmg.getIssueTransitions(issueKey);
       if (res.success && res.data) {
         return (
-          (res.data as {
-            transitions: Array<{ id: string; to: { id: string; name: string } }>;
-          }).transitions || []
+          (
+            res.data as {
+              transitions: Array<{
+                id: string;
+                to: { id: string; name: string };
+              }>;
+            }
+          ).transitions || []
         );
       }
       return [];
@@ -228,8 +255,8 @@ export async function ensureTargetEpic(
   logger: SyncLogger,
   syncProfileId?: string
 ): Promise<string | null> {
-  const targetSummary = buildTargetEpicSummary(fehgParent.summary);
-  const dedupKey = `${targetProjectKey}::${targetSummary}`;
+  // dedupKey를 FEHG 에픽 key 기준으로 사용
+  const dedupKey = `${targetProjectKey}::${fehgParent.key}`;
 
   const inflight = pendingResolves.get(dedupKey);
   if (inflight) {
@@ -239,24 +266,45 @@ export async function ensureTargetEpic(
   }
 
   const promise = (async () => {
-    const targetEpics = await loadTargetEpics(targetProjectKey, logger);
-    const existing = targetEpics.get(targetSummary);
-    if (existing) {
-      logger.info(
-        `에픽 매칭: ${fehgParent.key} → ${existing} "${targetSummary}"`
+    // 1단계: FEHG 에픽 customfield_10306 URL → HMG key 추출 (ID 기반)
+    const fehgDetail = await jira.ignite.getIssue(fehgParent.key, [
+      'customfield_10306',
+    ]);
+    if (fehgDetail.success && fehgDetail.data) {
+      const storedKey = extractHmgKeyFromUrl(
+        fehgDetail.data.fields['customfield_10306'],
+        targetProjectKey
       );
-      return existing;
+      if (storedKey) {
+        logger.info(`에픽 ID 기반 매칭: ${fehgParent.key} → ${storedKey}`);
+        return storedKey;
+      }
     }
 
+    const targetEpics = await loadTargetEpics(targetProjectKey, logger);
+
+    // 2단계: (1단계 실패시 fallback) [FEHG] 접두사 summary 매칭 + URL 저장
+    const legacySummary = buildLegacyTargetSummary(fehgParent.summary);
+    const legacyMatch = targetEpics.get(legacySummary);
+    if (legacyMatch) {
+      logger.info(
+        `에픽 레거시 summary 매칭: ${fehgParent.key} → ${legacyMatch}`
+      );
+      // 다음 동기화부터 1단계에서 처리되도록 URL 저장
+      await jira.ignite.updateIssueFields(fehgParent.key, {
+        customfield_10306: `${JIRA_ENDPOINTS.HMG}/browse/${legacyMatch}`,
+      });
+      return legacyMatch;
+    }
+
+    // 3단계: 신규 생성 ([FEHG] 접두사 포함) + URL 저장
     const newKey = await createTargetEpic(
       fehgParent.key,
       targetProjectKey,
-      targetSummary,
+      legacySummary,
       logger
     );
-    if (newKey) {
-      targetEpics.set(targetSummary, newKey);
-    }
+    if (newKey) targetEpics.set(legacySummary, newKey);
     return newKey;
   })();
 
