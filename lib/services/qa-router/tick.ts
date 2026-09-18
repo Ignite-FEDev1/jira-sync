@@ -162,11 +162,20 @@ export async function deriveContext(
   const d = await deriveJql(filter.jql, (q) => deps.jira.parseJql(q));
   if (!d.projectKey)
     throw new Error(`필터 ${cfg.jiraFilterId} JQL 에서 project 를 찾지 못함`);
-  if (d.fixVersions.length === 0) {
-    throw new Error(
-      `필터 ${cfg.jiraFilterId} JQL 에서 fixVersion 을 찾지 못함`
-    );
-  }
+  /*
+    ── fixVersion 이 없어도 계속 간다 ──
+
+    전에는 여기서 던졌다. 필터에 `fixVersion` 절이 있어야만 돈다는 뜻인데,
+    그건 KQ 의 필터 모양이다. 실측 GW 필터(15127)는 `parent in (…)` 로만
+    범위를 잡아 `fixVersion` 이 아예 없고, 그래서 대상이 통째로 죽었다.
+
+      치명적 오류: 필터 15127 JQL 에서 fixVersion 을 찾지 못함
+
+    차수를 모르는 것과 판정을 못 하는 것은 다른 일이다. "이 티켓 누구 것" 은
+    차수와 무관하게 답할 수 있고, 차수는 배포대장이 알려 준다
+    (`currentCycleFromLedger`). 아래 `narrowByFixVersion` 이 이미 그 두
+    경우를 갈라 놓았는데, 정작 그 앞에서 던지고 있었다.
+  */
 
   // JQL 의 프로젝트 식별자를 정식 키로 정규화한다.
   // JQL 은 이름도 받지만 REST 경로(버전 목록 등)는 키만 받는다.
@@ -456,11 +465,22 @@ export async function collectCycles(
   */
   let rule: FixVersionRule | null = null;
   try {
+    /*
+      프로젝트 키를 `deriveJql` 로 읽는다. 전에는 여기서 정규식
+      `project\s*=\s*"?([\w-]+)"?` 을 따로 돌렸는데, `project` 절이 없는
+      필터에서는 빈 문자열이 되어 조회가 통째로 실패했다.
+
+        Jira 버전 목록 조회 실패: 프로젝트 식별자 '' 를 확정할 수 없음
+                                  (후보 5건: AIACOM, AUTOWAY, CCIPRJ, …)
+
+      실측 GW 필터(15127)는 `parent in (ICTQMSCHE-…)` 로만 범위를 잡는다.
+      `deriveJql` 은 그 경우 티켓 키의 앞머리에서 프로젝트를 읽는다 —
+      같은 규칙을 두 군데 두면 한쪽만 고쳐지고 이렇게 어긋난다.
+    */
+    const filter = await deps.jira.getFilter(cfg.jiraFilterId);
+    const derived = await deriveJql(filter.jql, (q) => deps.jira.parseJql(q));
     const projectKey = await deps.jira.resolveProjectKey(
-      // 파생값이 없을 수도 있으니 필터에서 다시 읽지 않고 프로젝트 키를 직접 쓴다.
-      (await deps.jira.getFilter(cfg.jiraFilterId)).jql.match(
-        /project\s*=\s*"?([\w-]+)"?/i
-      )?.[1] ?? ''
+      derived.projectKey ?? ''
     );
     const names = (await deps.jira.getProjectVersions(projectKey)).map(
       (v) => v.name
