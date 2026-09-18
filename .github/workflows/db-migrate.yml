@@ -53,18 +53,34 @@ jobs:
           fi
 
       # 실패하면 조용히 넘어가면 안 된다 — 적용 안 된 SQL 은 다음 사고의 씨앗이다.
+      #
+      # ── 알림 문구를 env 로 뺀 이유 ──
+      #
+      # 전에는 `--arg t "…"` 안에서 줄을 바꿨다. YAML 은 그 줄바꿈에서 다음
+      # 키를 찾으려 하고, 못 찾으면 **워크플로 파일 자체가 거부된다.**
+      #
+      #   could not find expected ':' (line 69)
+      #
+      # 그래서 잡이 생성조차 안 됐다 — `jobs: []`, 시작과 종료가 같은 초.
+      # 실측: 09-14 도입부터 4회 실행 전부 실패이고 **한 번도 성공한 적이 없다.**
+      # 마이그레이션이 자동 적용되지 않았고, 이 알림도 나가지 못했다.
+      # "적용을 잊는 사고를 막는다" 는 이 워크플로의 목적이 조용히 깨져 있었다.
+      #
+      # 여러 줄 문자열은 YAML 블록 스칼라(`|`)로 env 에 담아 셸에 넘긴다.
+      # `${{ }}` 도 여기서 한 번만 펼쳐지므로 인용 규칙이 단순해진다.
       - name: 실패 알림
         if: failure()
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_QA_ROUTER_BOT_TOKEN || secrets.SLACK_BOT_TOKEN }}
+          ALERT_CHANNEL: C0BVDJEJ19C
+          ALERT_TEXT: |
+            :rotating_light: DB 마이그레이션 적용 실패
+            <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|실행 로그> · ${{ github.sha }}
+            적용되지 않은 SQL 이 있습니다. 로그를 확인하세요.
         run: |
           [ -z "$SLACK_BOT_TOKEN" ] && exit 0
           curl -sS -X POST https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H 'Content-Type: application/json; charset=utf-8' \
-            -d "$(jq -n \
-              --arg c 'C0BVDJEJ19C' \
-              --arg t ":rotating_light: DB 마이그레이션 적용 실패
-<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|실행 로그> · ${{ github.sha }}
-적용되지 않은 SQL 이 있습니다. 로그를 확인하세요." \
+            -d "$(jq -n --arg c "$ALERT_CHANNEL" --arg t "$ALERT_TEXT" \
               '{channel:$c, text:$t}')" > /dev/null
