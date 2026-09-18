@@ -364,83 +364,146 @@ async function cascadeLinkedTickets(
 ): Promise<string[]> {
   const errors: string[] = [];
 
-  // daily sync와 동일한 조건: 상위 에픽 summary에 [GW] 포함 시 AUTOWAY 생성
+  // daily sync와 동일한 조건: 상위 에픽 summary에 [GW] 또는 [HM] 포함 시 생성
   const parentKey = original.fields.parent?.key;
   const parentSummary = original.fields.parent?.fields?.summary ?? '';
   const isGwEpic =
     parentSummary.startsWith('[GW]') || parentSummary.startsWith('[GW-QA지원]');
-  if (!parentKey || !isGwEpic) {
+  const isHmEpic = parentSummary.startsWith('[HM]');
+  if (!parentKey || (!isGwEpic && !isHmEpic)) {
     console.log(
-      `    [SKIP] AUTOWAY 연쇄 생성 — [GW]/[GW-QA지원] 에픽 아님 (${parentSummary || parentKey || '부모 없음'})`
+      `    [SKIP] HMG 연쇄 생성 — [GW]/[GW-QA지원]/[HM] 에픽 아님 (${parentSummary || parentKey || '부모 없음'})`
     );
-    return errors;
-  }
-
-  if (isDryRun) {
-    console.log(
-      `    [DRY RUN] AUTOWAY 연쇄 생성 예정 ([GW]/[GW-QA지원] 에픽: ${parentSummary})`
-    );
-    return errors;
-  }
-
-  if (!hmgClient) {
-    const msg = 'AUTOWAY 연쇄 생성 불가 — HMG Jira 인증정보 없음';
-    console.log(`    [SKIP] ${msg}`);
-    errors.push(msg);
     return errors;
   }
 
   const accountId = original.fields.assignee?.accountId ?? null;
   const dbUser = accountId ? userByAccountId.get(accountId) : undefined;
 
-  try {
-    const newAutowayResult = await hmgClient.post<{ id: string; key: string }>(
-      'issue',
-      {
-        fields: {
-          project: { key: 'AUTOWAY' },
-          summary: cloneSummary,
-          issuetype: { name: '작업' },
-          ...(dbUser?.hmgAccountId
-            ? {
-                assignee: { accountId: dbUser.hmgAccountId },
-                reporter: { accountId: dbUser.hmgAccountId },
-              }
-            : {}),
-          ...(original.fields.description
-            ? { description: original.fields.description }
-            : {}),
-          ...(original.fields.labels?.length
-            ? { labels: original.fields.labels }
-            : {}),
-        },
-      }
-    );
-
-    if (!newAutowayResult.success || !newAutowayResult.data) {
-      const msg = `AUTOWAY 연쇄 생성 실패: ${newAutowayResult.error}`;
-      console.error(`    [ERROR] ${msg}`);
-      errors.push(msg);
-      return errors;
-    }
-    const newAutowayKey = newAutowayResult.data.key;
-    const autowayUrl = `${JIRA_ENDPOINTS.HMG}/browse/${newAutowayKey}`;
-    console.log(`    -> AUTOWAY 연쇄 생성: ${newAutowayKey} (${autowayUrl})`);
-
-    const saveResult = await igniteClient.put(`issue/${cloneKey}`, {
-      fields: { [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: autowayUrl },
-    });
-    if (!saveResult.success) {
-      const msg = `${cloneKey} AUTOWAY 링크 저장 실패 (${newAutowayKey}는 생성됨): ${saveResult.error}`;
-      console.warn(`    [WARN] ${msg}`);
+  // AUTOWAY 연쇄 생성 ([GW] 에픽)
+  if (isGwEpic) {
+    if (isDryRun) {
+      console.log(
+        `    [DRY RUN] AUTOWAY 연쇄 생성 예정 ([GW]/[GW-QA지원] 에픽: ${parentSummary})`
+      );
+    } else if (!hmgClient) {
+      const msg = 'AUTOWAY 연쇄 생성 불가 — HMG Jira 인증정보 없음';
+      console.log(`    [SKIP] ${msg}`);
       errors.push(msg);
     } else {
-      console.log(`    -> ${cloneKey}.customfield_10306 = ${autowayUrl}`);
+      try {
+        const newAutowayResult = await hmgClient.post<{ id: string; key: string }>(
+          'issue',
+          {
+            fields: {
+              project: { key: 'AUTOWAY' },
+              summary: cloneSummary,
+              issuetype: { name: '작업' },
+              ...(dbUser?.hmgAccountId
+                ? {
+                    assignee: { accountId: dbUser.hmgAccountId },
+                    reporter: { accountId: dbUser.hmgAccountId },
+                  }
+                : {}),
+              ...(original.fields.description
+                ? { description: original.fields.description }
+                : {}),
+              ...(original.fields.labels?.length
+                ? { labels: original.fields.labels }
+                : {}),
+            },
+          }
+        );
+
+        if (!newAutowayResult.success || !newAutowayResult.data) {
+          const msg = `AUTOWAY 연쇄 생성 실패: ${newAutowayResult.error}`;
+          console.error(`    [ERROR] ${msg}`);
+          errors.push(msg);
+        } else {
+          const newAutowayKey = newAutowayResult.data.key;
+          const autowayUrl = `${JIRA_ENDPOINTS.HMG}/browse/${newAutowayKey}`;
+          console.log(`    -> AUTOWAY 연쇄 생성: ${newAutowayKey} (${autowayUrl})`);
+
+          const saveResult = await igniteClient.put(`issue/${cloneKey}`, {
+            fields: { [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: autowayUrl },
+          });
+          if (!saveResult.success) {
+            const msg = `${cloneKey} AUTOWAY 링크 저장 실패 (${newAutowayKey}는 생성됨): ${saveResult.error}`;
+            console.warn(`    [WARN] ${msg}`);
+            errors.push(msg);
+          } else {
+            console.log(`    -> ${cloneKey}.customfield_10306 = ${autowayUrl}`);
+          }
+        }
+      } catch (err) {
+        const msg = `AUTOWAY 연쇄 처리 예외: ${err instanceof Error ? err.message : String(err)}`;
+        console.error(`    [ERROR] ${msg}`);
+        errors.push(msg);
+      }
     }
-  } catch (err) {
-    const msg = `AUTOWAY 연쇄 처리 예외: ${err instanceof Error ? err.message : String(err)}`;
-    console.error(`    [ERROR] ${msg}`);
-    errors.push(msg);
+  }
+
+  // MEMBERSHIP 연쇄 생성 ([HM] 에픽)
+  if (isHmEpic) {
+    if (isDryRun) {
+      console.log(
+        `    [DRY RUN] MEMBERSHIP 연쇄 생성 예정 ([HM] 에픽: ${parentSummary})`
+      );
+    } else if (!hmgClient) {
+      const msg = 'MEMBERSHIP 연쇄 생성 불가 — HMG Jira 인증정보 없음';
+      console.log(`    [SKIP] ${msg}`);
+      errors.push(msg);
+    } else {
+      try {
+        const newMembershipResult = await hmgClient.post<{ id: string; key: string }>(
+          'issue',
+          {
+            fields: {
+              project: { key: 'MEMBERSHIP' },
+              summary: cloneSummary,
+              issuetype: { name: '작업' },
+              ...(dbUser?.hmgAccountId
+                ? {
+                    assignee: { accountId: dbUser.hmgAccountId },
+                    reporter: { accountId: dbUser.hmgAccountId },
+                  }
+                : {}),
+              ...(original.fields.description
+                ? { description: original.fields.description }
+                : {}),
+              ...(original.fields.labels?.length
+                ? { labels: original.fields.labels }
+                : {}),
+            },
+          }
+        );
+
+        if (!newMembershipResult.success || !newMembershipResult.data) {
+          const msg = `MEMBERSHIP 연쇄 생성 실패: ${newMembershipResult.error}`;
+          console.error(`    [ERROR] ${msg}`);
+          errors.push(msg);
+        } else {
+          const newMembershipKey = newMembershipResult.data.key;
+          const membershipUrl = `${JIRA_ENDPOINTS.HMG}/browse/${newMembershipKey}`;
+          console.log(`    -> MEMBERSHIP 연쇄 생성: ${newMembershipKey} (${membershipUrl})`);
+
+          const saveResult = await igniteClient.put(`issue/${cloneKey}`, {
+            fields: { [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: membershipUrl },
+          });
+          if (!saveResult.success) {
+            const msg = `${cloneKey} MEMBERSHIP 링크 저장 실패 (${newMembershipKey}는 생성됨): ${saveResult.error}`;
+            console.warn(`    [WARN] ${msg}`);
+            errors.push(msg);
+          } else {
+            console.log(`    -> ${cloneKey}.customfield_10306 = ${membershipUrl}`);
+          }
+        }
+      } catch (err) {
+        const msg = `MEMBERSHIP 연쇄 처리 예외: ${err instanceof Error ? err.message : String(err)}`;
+        console.error(`    [ERROR] ${msg}`);
+        errors.push(msg);
+      }
+    }
   }
 
   return errors;

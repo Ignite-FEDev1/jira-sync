@@ -24,7 +24,7 @@ export interface FehgParentInfo {
   summary: string;
 }
 
-type TargetProject = 'AUTOWAY' | 'HMGBOARD';
+type TargetProject = 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP';
 
 // 대상 프로젝트 에픽 목록 캐시: projectKey → (exact summary → epic key)
 const targetEpicsCache = new Map<TargetProject, Map<string, string>>();
