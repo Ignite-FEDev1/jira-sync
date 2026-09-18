@@ -1,16 +1,15 @@
 import { NextResponse } from 'next/server';
 
-import {
-  missingCredsMessage,
-  resolveJiraAccess,
-} from '@/lib/services/qa-router/api-creds';
+import { resolveFilterInput } from '@/lib/services/qa-router/api-creds';
 import { createJiraClient } from '@/lib/services/qa-router/clients';
 import {
-  deriveFromJql,
-  parseFilterUrl,
+  deriveJql,
   resolvePersonFields,
 } from '@/lib/services/qa-router/derive';
-import { CO_ASSIGNEE_FIELD, type JiraPort } from '@/lib/services/qa-router/judge';
+import {
+  CO_ASSIGNEE_FIELD,
+  type JiraPort,
+} from '@/lib/services/qa-router/judge';
 import {
   countTypes,
   inferFromSample,
@@ -19,7 +18,8 @@ import {
 } from '@/lib/services/qa-router/infer';
 import { PLAN_PREFIX } from '@/lib/services/qa-router/plan-tickets';
 import * as repo from '@/lib/services/qa-router/repository';
-import { pickTriage } from '@/lib/services/qa-router/triage';
+import type { FilterGap } from '@/lib/services/qa-router/types';
+import { pickTriageAcross } from '@/lib/services/qa-router/triage';
 
 /**
  * POST /api/qa-router/{id}/filter-check — 이 필터를 넣으면 무슨 일이 생기나.
@@ -175,16 +175,6 @@ export async function POST(
     );
   }
 
-  const parsed = parseFilterUrl(
-    typeof body.filterUrl === 'string' ? body.filterUrl.trim() : ''
-  );
-  if (!parsed) {
-    return NextResponse.json(
-      { error: 'Jira 필터 주소가 아닙니다.' },
-      { status: 400 }
-    );
-  }
-
   const cfg = await repo.getConfig(id);
   if (!cfg) {
     return NextResponse.json(
@@ -194,42 +184,100 @@ export async function POST(
   }
 
   /*
-    저장된 config 가 아니라 **붙여넣은 필터**의 인스턴스를 쓴다. 이 라우트는
+    저장된 config 가 아니라 **붙여넣은 주소**의 인스턴스를 쓴다. 이 라우트는
     저장 전에 도는 검사라, 지금 ignite 를 쓰는 대상이 hmg 필터로 갈아타는
     순간이 있다. config 쪽을 보면 그 전환을 영영 확인해 줄 수 없다.
+
+    대시보드 차트 주소로 들어오면 여기서 필터 번호까지 풀린다 — 확인 화면이
+    저장과 **같은 해석**을 거쳐야, 확인은 됐는데 저장이 다른 필터를 잡는
+    상황이 안 생긴다.
   */
-  const access = await resolveJiraAccess(
-    parsed.instance,
+  const resolved = await resolveFilterInput(
+    typeof body.filterUrl === 'string' ? body.filterUrl : '',
     cfg.jiraOperatorAccountId
   );
-  if (!access) {
+  if (!resolved.ok) {
     return NextResponse.json(
-      { error: missingCredsMessage(parsed.instance) },
-      { status: 500 }
+      { error: resolved.error },
+      { status: resolved.status }
     );
   }
+  const { filterId, access } = resolved.value;
 
   try {
     const jira = createJiraClient(access);
 
-    const filter = await jira.getFilter(parsed.filterId);
-    const d = deriveFromJql(filter.jql);
+    const filter = await jira.getFilter(filterId);
+    const d = await deriveJql(filter.jql, (q) => jira.parseJql(q));
 
     /*
-      문제를 모아서 돌려준다. 첫 번째에서 멈추지 않는 이유는, 고칠 것이
-      둘이면 한 번에 알아야 두 번 저장하지 않기 때문이다.
-    */
-    const problems: string[] = [];
-    if (!d.projectKey) problems.push('JQL 에서 project 를 찾지 못했습니다.');
-    if (d.fixVersions.length === 0)
-      problems.push('JQL 에 fixVersion 조건이 없습니다. 차수를 알 수 없습니다.');
-    if (d.accountIds.length === 0)
-      problems.push('JQL 에 담당자 조건이 없습니다. 팀원 명단을 못 만듭니다.');
+      못 알아낸 것을 모아서 돌려준다. 첫 번째에서 멈추지 않는 이유는, 고칠
+      것이 둘이면 한 번에 알아야 두 번 저장하지 않기 때문이다.
 
+      각 항목은 "무엇을 · 왜 · 그래서 뭐가 안 되나 · 어떻게 하면 되나" 네
+      조각이다. 마지막 조각을 반드시 채운다 — 없으면 막다른 길이 된다.
+    */
+    const gaps: FilterGap[] = [];
+
+    if (!d.projectKey) {
+      gaps.push({
+        what: 'projectKey',
+        label: '프로젝트',
+        why: 'JQL 에 project 조건이 없고, 티켓 키로도 프로젝트가 하나로 좁혀지지 않았습니다.',
+        impact:
+          '에픽과 형제 티켓을 뒤지는 판정 ②③ 단계가 멎습니다. 담당자를 못 찾아 알림이 "왜 판정 못 했나" 로만 나갑니다.',
+        fix: 'Jira 필터에 `project = 키` 를 넣어 주세요. 여러 프로젝트를 한 필터에 담고 있다면 프로젝트별로 필터를 나눠야 합니다.',
+        blocking: true,
+      });
+    }
+    if (d.accountIds.length === 0) {
+      /*
+        조건이 **없는 것**과 조건이 있는데 **못 펼치는 것**은 다르다.
+        `assignee in membersOf("팀")` 은 사람을 그룹으로 가리켜서, JQL 만
+        봐서는 누가 들어 있는지 알 수 없다. 전에는 둘 다 "조건이 없습니다"
+        였고, 그러면 멀쩡히 적어 둔 사람이 "안 적었다" 는 말을 듣는다.
+      */
+      const viaGroup = d.memberFunctions.length > 0;
+      gaps.push({
+        what: 'members',
+        label: '팀원 명단',
+        why: viaGroup
+          ? `담당자를 그룹으로 지정했습니다 (${d.memberFunctions.join(', ')}). 그룹 안의 사람은 JQL 만으로 알 수 없습니다.`
+          : 'JQL 에 담당자 조건이 없습니다.',
+        impact:
+          '누가 우리 팀인지 몰라 판정이 아무도 고르지 못합니다. 처음 받는 사람도 고를 수 없습니다.',
+        fix: viaGroup
+          ? '사람을 직접 나열하는 조건으로 바꿔 주세요. 예: `assignee in (사람1, 사람2)`'
+          : 'Jira 필터에 팀원 담당자 조건을 넣어 주세요. 예: `assignee in (사람1, 사람2)`',
+        blocking: true,
+      });
+    }
+    if (d.fixVersions.length === 0) {
+      gaps.push({
+        what: 'fixVersion',
+        label: '차수',
+        why: 'JQL 에 fixVersion 조건이 없습니다.',
+        /*
+          이건 판정을 막지 않는다. 차수를 몰라도 "이 티켓 누구 것" 은 답할 수
+          있어서, 판정 알림은 그대로 돈다. 빠지는 것은 차수 현황 쪽이다.
+        */
+        // "판정 알림은 그대로 돕니다" 는 화면이 배지로 붙인다. 여기 또 쓰면
+        // 같은 문장이 한 칸 안에 두 번 나온다.
+        impact:
+          '이번 차수를 몰라 배포대장, 진행률, 아침·마감 요약이 나가지 않습니다.',
+        fix: 'Jira 필터에 `fixVersion = 버전` 을 넣거나, 차수를 안 쓰는 프로젝트라면 차수 현황을 꺼 두세요.',
+        blocking: false,
+      });
+    }
+
+    /*
+      프로젝트를 모르면 여기서 멈춘다. 다음 단계가 전부 프로젝트 키를 받아
+      Jira 에 묻는 조회라, 진행해도 같은 실패를 여러 번 보여줄 뿐이다.
+    */
     if (!d.projectKey) {
       return NextResponse.json({
         filterName: filter.name,
-        problems,
+        gaps,
         members: [],
       });
     }
@@ -263,10 +311,20 @@ export async function POST(
       전에는 `customfield_10132` 가 코드에 박혀 있었다. 두 번째 프로젝트를
       붙이면 그 번호가 다를 텐데, 없는 게 아니라 **다른 칸을 읽어** 늘 비어
       보인다 — 공동담당자로 들어온 티켓을 통째로 놓치면서 오류는 한 줄도
-      안 난다. 못 고르면 찍지 않고 problems 로 말한다.
+      안 난다. 못 고르면 찍지 않고 말한다.
     */
     const person = resolvePersonFields(d.personFields, allFields);
-    problems.push(...person.problems);
+    for (const why of person.problems) {
+      gaps.push({
+        what: 'personField',
+        label: '사람을 보는 칸',
+        why,
+        impact:
+          '공동담당자 칸으로 들어온 티켓을 못 읽어, 이미 배정된 사람이 있어도 판정 ① 단계가 빈손이 됩니다.',
+        fix: 'Jira 필터의 사람 조건에 칸 이름을 정확히 적어 주세요. 예: `"공동담당자[User Picker (single user)]" = 사람`',
+        blocking: false,
+      });
+    }
     /*
       해석에 실패하면 지금까지 쓰던 값으로 돈다. 확인 화면이 통째로 멎는 것보다
       낫고, 무엇을 못 골랐는지는 바로 위에서 이미 말했다.
@@ -275,24 +333,30 @@ export async function POST(
 
     const triage = members.find((m) => m.accountId === cfg.triageAccountId);
     if (!triage) {
-      problems.push(
-        '지금 처음 받는 사람으로 잡힌 사람이 이 필터의 담당자 명단에 없습니다. ' +
-          '봇이 찾을 티켓이 영영 0건이 됩니다.'
-      );
+      gaps.push({
+        what: 'triage',
+        label: '처음 받는 사람',
+        why: '지금 잡힌 사람이 이 필터의 담당자 명단에 없습니다.',
+        impact:
+          '봇이 찾을 티켓이 영영 0건이 됩니다. 오류 없이 알림만 안 옵니다.',
+        fix: '아래 명단에서 다시 골라 주세요. 그 사람이 정말 맞다면 필터의 담당자 조건에 그 사람을 넣어야 합니다.',
+        blocking: true,
+      });
     }
 
     /*
-      봇이 실제로 돌릴 것과 **같은 JQL** 을 만든다 (tick.ts 참고).
-      비슷한 걸 만들면 여기서는 몇 건이 나오는데 배치는 0건인 상황이 생긴다.
+      봇이 실제로 돌릴 것과 **글자까지 같은 JQL** 이다 (tick.ts 참고).
+
+      전에는 양쪽이 각자 조각을 모아 비슷한 것을 만들었다. 비슷한 것은
+      어긋난다 — 한쪽만 고치면 "여기서는 30건인데 배치는 0건" 이 되고,
+      그 차이는 둘을 나란히 놓고 보기 전엔 안 보인다.
+      이제 둘 다 필터를 그대로 실행하므로 어긋날 수가 없다.
     */
     const fixVersion = d.fixVersions[0];
-    const excl = d.excludeStatuses.map((s) => `"${s}"`).join(', ');
     const jql =
-      `project = ${projectKey}` +
-      (d.issueType ? ` AND issuetype = ${d.issueType}` : '') +
+      `filter = ${filterId}` +
       ` AND assignee = ${cfg.triageAccountId}` +
-      (fixVersion ? ` AND fixVersion = "${fixVersion}"` : '') +
-      (excl ? ` AND status not in (${excl})` : '');
+      (fixVersion ? ` AND fixVersion = "${fixVersion}"` : '');
 
     /*
       두 가지를 동시에 한다.
@@ -324,18 +388,24 @@ export async function POST(
       판정 경로와 트리아지는 서로 안 기다려도 된다.
       경로는 티켓의 현재 모습에서, 트리아지는 변경이력에서 나온다.
     */
+    /*
+      담당자 칸과 공동담당자 칸을 **둘 다** 훑는다. 창구를 적는 칸이
+      프로젝트마다 달라서(그룹웨어는 assignee, CPO 는 공동담당자) 한 칸만
+      보면 근거가 있는데도 "못 찾았습니다" 가 나온다.
+    */
+    const triageFields = ['assignee', coField];
     const [infer, triageLogs] = await Promise.all([
       inferPaths(jira, sample, projectKey),
       jira
         .getChangelogs(
           sample.slice(0, TRIAGE_SCAN).map((i) => i.key),
-          [coField]
+          triageFields
         )
         // 이력 조회가 실패해도 나머지 진단은 살린다. 추천이 없을 뿐이다.
         .catch(() => []),
     ]);
 
-    const triageGuess = pickTriage(triageLogs, members, coField);
+    const triageGuess = pickTriageAcross(triageLogs, members, triageFields);
 
     return NextResponse.json({
       filterName: filter.name,
@@ -362,7 +432,11 @@ export async function POST(
        */
       coAssigneeField: person.coAssigneeField,
       personLabels: person.labels,
-      problems,
+      /**
+       * 못 알아낸 값들. 막는 것(blocking)이 먼저 오도록 정렬해서 보낸다 —
+       * 화면이 순서를 또 정하지 않게 한다.
+       */
+      gaps: [...gaps].sort((a, b) => Number(b.blocking) - Number(a.blocking)),
     });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 502 });

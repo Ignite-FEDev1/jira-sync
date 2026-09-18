@@ -33,11 +33,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
 import { useCurrentUser } from '@/contexts/user-context';
 import { db } from '@/lib/db';
-import {
-  toConfig,
-  toEvent,
-  toState,
-} from '@/lib/services/qa-router/rows';
+import { toConfig, toEvent, toState } from '@/lib/services/qa-router/rows';
 
 import {
   PROBLEM_LABEL,
@@ -54,6 +50,7 @@ import {
   formatAgo,
   formatClock,
   isWorkingWindow,
+  kstYmdOf,
   type Health,
 } from '@/lib/services/qa-router/status';
 import type {
@@ -299,7 +296,6 @@ export const PIE_STROKE = {
   faint: '#e2e8f0',
 } as const;
 
-
 /**
  * 사람 조각 색. 상태 색과 같은 3단(50·200·700) 규칙을 쓰되 색상만 다르다.
  *
@@ -336,7 +332,6 @@ const live = (segs: Seg[]) => segs.filter((s) => s.value > 0);
  */
 
 /** 조각 안에 놓는 라벨. 이름과 값을 두 줄로 쌓는다. */
-
 
 export const PERSON_BAR = [
   'bg-blue-300',
@@ -636,7 +631,10 @@ export function BarList({
               aria-pressed={on}
               disabled={!onPick}
               onMouseEnter={(e) =>
-                onHover?.(seg, (e.currentTarget.closest('li') as HTMLElement).offsetTop)
+                onHover?.(
+                  seg,
+                  (e.currentTarget.closest('li') as HTMLElement).offsetTop
+                )
               }
               onClick={() => onPick?.(on ? null : seg.key)}
               className={`flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-xs disabled:cursor-default ${
@@ -725,7 +723,9 @@ export function CountChip({
         disabled={!onPick}
         onClick={() => onPick?.(on ? null : seg.key)}
         className={`inline-flex items-center gap-1 rounded-full border py-0.5 pr-2 pl-0.5 text-xs disabled:cursor-default ${
-          on ? 'border-foreground font-medium' : 'border-transparent hover:bg-muted'
+          on
+            ? 'border-foreground font-medium'
+            : 'border-transparent hover:bg-muted'
         }`}
       >
         <Badge variant={seg.badge}>{seg.label}</Badge>
@@ -1428,14 +1428,27 @@ export function targetHealth(
   config: QaRouterConfig,
   state: QaRouterState | null,
   events: QaRouterEvent[],
-  now: Date
+  now: Date,
+  /*
+    배포대장에서 읽은 차수들. 배포일이 지난 뒤 "끝난 것" 과 "필터를 바꿔야
+    하는 것" 을 가르는 데 쓴다. 안 넘기면 후자를 못 가려 둘 다 "차수 완료"
+    로 보인다 — 목록 화면과 답이 달라지지 않게 같이 넘기는 게 맞다.
+  */
+  cycles?: DeployCycle[]
 ): Health {
   const lastJudged =
     events.find((e) => e.classification !== 'system')?.createdAt ?? null;
   const idleDays = lastJudged
     ? Math.floor((now.getTime() - new Date(lastJudged).getTime()) / 86_400_000)
     : null;
-  return computeHealth({ config, state, now, idleDays });
+  const today = kstYmdOf(now);
+  // 아직 안 지난 것 중 가장 가까운 QA 시작일.
+  const nextQaStartYmd =
+    (cycles ?? [])
+      .map((c) => c.qaStartYmd)
+      .filter((d): d is string => !!d && d >= today)
+      .sort()[0] ?? null;
+  return computeHealth({ config, state, now, idleDays, nextQaStartYmd });
 }
 
 /**

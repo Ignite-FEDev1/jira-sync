@@ -122,7 +122,7 @@ export default function QaRouterDetailPage() {
   const todayKst = new Date(now.getTime() + 9 * 3_600_000)
     .toISOString()
     .slice(0, 10);
-  const health = targetHealth(config, state, events, now);
+  const health = targetHealth(config, state, events, now, cycles);
 
   return (
     <div className="space-y-5">

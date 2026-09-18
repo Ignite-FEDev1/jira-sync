@@ -9,11 +9,12 @@ import { Badge, StatusLed } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { db } from '@/lib/db';
+import { toConfig, toState } from '@/lib/services/qa-router/rows';
 import {
-  toConfig,
-  toState,
-} from '@/lib/services/qa-router/rows';
-import { computeHealth, type Health } from '@/lib/services/qa-router/status';
+  computeHealth,
+  kstYmdOf,
+  type Health,
+} from '@/lib/services/qa-router/status';
 import type {
   QaRouterConfig,
   QaRouterState,
@@ -33,10 +34,25 @@ const TONE_ORDER = { bad: 0, warn: 1, ok: 2, off: 3 } as const;
 
 export default function QaRouterListPage() {
   const [rows, setRows] = useState<Row[] | null>(null);
+  /*
+    새로고침이 **눌렸다는 것**을 화면이 말해야 한다.
+
+    버튼은 처음부터 멀쩡히 동작했다 (실측: 클릭 한 번에 configs·state·events·
+    cycles 네 질의가 나간다). 그런데 값이 그대로면 화면이 한 픽셀도 안 바뀌고
+    스피너도 갱신 시각도 없어서, 누른 사람은 **버튼이 죽었다**고 읽는다.
+    실제로 그 보고를 받았다.
+
+    "바뀐 게 없음" 과 "안 돌았음" 은 다른 사실이고, 화면은 그 둘을 갈라 줘야
+    한다. 상세 화면은 이미 "N초 전 갱신" 을 달고 있어 표기를 맞춘다.
+  */
+  const [loading, setLoading] = useState(false);
+  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
 
   const load = useCallback(async () => {
+    setLoading(true);
     const now = new Date();
-    const [cfgRes, stRes, evRes] = await Promise.all([
+    const todayYmd = kstYmdOf(now);
+    const [cfgRes, stRes, evRes, cycRes] = await Promise.all([
       db.from('qa_router_configs').select('*').order('name'),
       db.from('qa_router_state').select('*'),
       // 오늘 판정 건수 + 마지막 판정 시각을 함께 쓰려고 최근 것만 읽는다.
@@ -45,9 +61,27 @@ export default function QaRouterListPage() {
         .select('config_id, created_at, classification')
         .order('created_at', { ascending: false })
         .limit(500),
+      /*
+        다음 차수의 QA 시작일. 배포일이 지난 뒤 "끝난 것" 과 "필터를 바꿔야
+        하는 것" 을 가르는 데 쓴다 — 둘을 안 가르면 배포 다음 날부터 몇 주
+        내내 "조치 필요" 가 켜져 있고, 그런 경보는 곧 무시된다.
+      */
+      db
+        .from('qa_router_cycles')
+        .select('config_id, qa_start_ymd')
+        .gte('qa_start_ymd', todayYmd)
+        .order('qa_start_ymd', { ascending: true }),
     ]);
 
     if (cfgRes.error) toast.error(`설정 조회 실패: ${cfgRes.error.message}`);
+
+    // 대상마다 가장 가까운 QA 시작일 하나. 정렬해 읽었으니 처음 것이 그것이다.
+    const nextQaStart = new Map<string, string>();
+    for (const c of cycRes.data ?? []) {
+      if (c.qa_start_ymd && !nextQaStart.has(c.config_id)) {
+        nextQaStart.set(c.config_id as string, c.qa_start_ymd as string);
+      }
+    }
 
     const stateByConfig = new Map(
       (stRes.data ?? []).map((s) => [s.config_id as string, toState(s)])
@@ -79,7 +113,13 @@ export default function QaRouterListPage() {
       return {
         config,
         state,
-        health: computeHealth({ config, state, now, idleDays }),
+        health: computeHealth({
+          config,
+          state,
+          now,
+          idleDays,
+          nextQaStartYmd: nextQaStart.get(config.id) ?? null,
+        }),
         todayCount,
         idleDays,
       };
@@ -92,6 +132,8 @@ export default function QaRouterListPage() {
         a.config.name.localeCompare(b.config.name)
     );
     setRows(next);
+    setLoadedAt(new Date());
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -105,6 +147,17 @@ export default function QaRouterListPage() {
   // rows 는 한 자릿수라 메모이제이션이 필요 없다 — 매 렌더 계산이 더 단순하다.
   const counts = { ok: 0, warn: 0, bad: 0, off: 0 };
   for (const r of rows ?? []) counts[r.health.tone]++;
+  /*
+    "꺼짐" 은 **사람이 끈 것**만 센다.
+
+    tone `off` 에는 두 가지가 섞인다 — 꺼진 대상과, 차수가 끝나 쉬는 대상.
+    둘을 합쳐 세니 실측(2026-09-17)에서 켜져 있는 CPO BO 까지 묶여 `꺼짐 2`
+    가 떴다. 화면 맨 위 한 줄이 "이 팀 알림은 다 죽어 있다" 고 말한 셈이다.
+
+    쉬는 대상은 배지를 안 준다. 정상 동작이라 알릴 것이 없고, 각 행이
+    이미 "다음 QA 는 09-28 시작입니다" 로 사정을 말한다.
+  */
+  const offCount = (rows ?? []).filter((r) => !r.config.enabled).length;
 
   const alerts = (rows ?? []).filter((r) => r.health.actionable);
 
@@ -133,9 +186,7 @@ export default function QaRouterListPage() {
                   대기 {counts.warn}
                 </Badge>
               )}
-              {counts.off > 0 && (
-                <Badge variant="muted">꺼짐 {counts.off}</Badge>
-              )}
+              {offCount > 0 && <Badge variant="muted">꺼짐 {offCount}</Badge>}
             </>
           )}
         </div>
@@ -145,8 +196,27 @@ export default function QaRouterListPage() {
           있으므로 되살린다.
         */}
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void load()}>
-            <RefreshCw />
+          {loadedAt && (
+            <span
+              className="text-xs tabular-nums text-muted-foreground"
+              // 갱신 시각은 초까지 보여준다. 분 단위면 연달아 눌렀을 때 안 바뀐다.
+              title={loadedAt.toLocaleString('ko-KR')}
+            >
+              {loadedAt.toLocaleTimeString('ko-KR', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })}{' '}
+              갱신
+            </span>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void load()}
+            disabled={loading}
+          >
+            <RefreshCw className={loading ? 'animate-spin' : undefined} />
             새로고침
           </Button>
           <NewRoutingDialog />
@@ -241,12 +311,25 @@ function ConfigRow({ row }: { row: Row }) {
           </span>
         )}
       </td>
+      {/*
+        ── 빈 칸이 아니라 **이유**를 적는다 ──
+
+        이 열은 `state.derived` 와 `state.activeCycle` 을 읽는데, 둘 다 배치가
+        한 바퀴 돌아야 채워진다. 그래서 새로 만든 대상은 `-` 와 `차수 미확인`
+        만 뜬다. 실측으로 "GW QA 는 왜 대상이 비어 있냐" 는 질문을 받았다 —
+        설정이 잘못된 것처럼 읽히지만 실제로는 **아직 안 돌았을 뿐**이다.
+
+        그래서 파생값이 없으면 설정에 적힌 필터를 대신 보여 준다. 사람이 방금
+        입력한 값이라 알아볼 수 있고, "설정은 됐고 배치를 기다리는 중" 이라는
+        뜻이 그대로 전해진다.
+      */}
       <td className="px-3 py-2.5 text-muted-foreground">
         <span className="font-mono text-xs">
-          {state?.derived?.projectKey ?? '-'}
+          {state?.derived?.projectKey ?? `필터 ${c.jiraFilterId}`}
         </span>
         <span className="block text-xs">
-          {state?.activeCycle?.fixVersion ?? '차수 미확인'}
+          {state?.activeCycle?.fixVersion ??
+            (state?.lastPollAt ? '차수 미확인' : '첫 실행 대기')}
         </span>
       </td>
       <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-muted-foreground">

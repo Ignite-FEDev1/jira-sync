@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 
+import { jiraBaseUrl } from '@/lib/constants/jira';
 import { dbServer } from '@/lib/db';
-import { parseFilterUrl } from '@/lib/services/qa-router/derive';
+import { resolveFilterInput } from '@/lib/services/qa-router/api-creds';
+import { parseFilterUrl, parseGadgetUrl } from '@/lib/services/qa-router/derive';
 import {
   ALERT_KINDS,
   checkAlertRules,
@@ -199,7 +201,13 @@ function check(b: Body): Checked {
   if (b.slackChannelId !== undefined) {
     const channel =
       typeof b.slackChannelId === 'string' ? b.slackChannelId.trim() : '';
-    if (!CHANNEL_RE.test(channel)) {
+    /*
+      비우는 것은 허용한다. 만들 때 나중으로 미룰 수 있게 열어 둔 칸이라,
+      설정 화면에서도 다시 비울 수 있어야 앞뒤가 맞는다.
+      채널 없이 **켜지는** 것은 DB 제약이 막는다
+      (20260916_qa_router_enabled_needs_channel.sql).
+    */
+    if (channel && !CHANNEL_RE.test(channel)) {
       return {
         ok: false,
         error: '알림 채널 ID 형식이 아닙니다. C 로 시작합니다. 예: C0BVDJEJ19C',
@@ -503,6 +511,33 @@ export async function PATCH(
       { error: '요청 본문을 읽지 못했습니다.' },
       { status: 400 }
     );
+  }
+
+  /*
+    대시보드 차트 주소(`…/dashboards/10542?maximized=17305`)로 들어오면 먼저
+    필터 번호로 바꾼다. 아래 check() 는 순수 검사라 Jira 를 부를 수 없어서,
+    부르는 일은 여기서 끝내고 check() 에는 평범한 필터 주소를 넘긴다.
+  */
+  if (
+    typeof body.jiraFilterId === 'string' &&
+    parseGadgetUrl(body.jiraFilterId)
+  ) {
+    const owner = await dbServer
+      .from('qa_router_configs')
+      .select('jira_operator_account_id')
+      .eq('id', id)
+      .maybeSingle();
+    const resolved = await resolveFilterInput(
+      body.jiraFilterId,
+      owner.data?.jira_operator_account_id ?? null
+    );
+    if (!resolved.ok) {
+      return NextResponse.json(
+        { error: resolved.error, field: 'jiraFilterId' },
+        { status: resolved.status }
+      );
+    }
+    body.jiraFilterId = `${jiraBaseUrl(resolved.value.instance)}/issues?filter=${resolved.value.filterId}`;
   }
 
   const checked = check(body);

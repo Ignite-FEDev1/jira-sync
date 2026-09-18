@@ -18,7 +18,10 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { db } from '@/lib/db';
-import { parseFilterUrl } from '@/lib/services/qa-router/derive';
+import {
+  isFilterInput,
+  parseFilterUrl,
+} from '@/lib/services/qa-router/derive';
 import {
   formatAgo,
   isWorkingWindow,
@@ -42,6 +45,7 @@ import {
   type AlertSwitches,
   type DeployCycle,
   type DeployKind,
+  type FilterGap,
   type JudgeTier,
   type QaRouterConfig,
   type SideEffectResult,
@@ -192,6 +196,21 @@ export default function QaRouterSettingsPage() {
    * 한쪽만 묻는 근거가 없다.
    */
   const toggleEnabled = async (next: boolean) => {
+    /*
+      채널 없이 켜면 봇이 1분마다 빈 채널로 발송을 시도한다. Slack 은
+      `channel_not_found` 를 돌려주고 그건 화면 어디에도 안 뜨므로, 사람은
+      켜 뒀다고 믿는데 알림만 안 온다.
+
+      DB 제약이 이미 막지만(20260916_qa_router_enabled_needs_channel.sql),
+      제약에 걸리면 Postgres 오류 문구가 그대로 토스트에 뜬다. 여기서 먼저
+      **무엇을 채워야 하는지** 로 말한다. 끄는 것은 언제나 막지 않는다.
+    */
+    if (next && !config.slackChannelId?.trim()) {
+      toast.error('알림 채널을 먼저 넣어 주세요', {
+        description: '채널이 없으면 켜도 알림이 나가지 않습니다',
+      });
+      return;
+    }
     const ok = window.confirm(
       next
         ? `${config.name} 을 켤까요?\n\n` +
@@ -213,7 +232,7 @@ export default function QaRouterSettingsPage() {
     t.reload();
   };
 
-  const health = targetHealth(config, t.state, t.events, now);
+  const health = targetHealth(config, t.state, t.events, now, t.cycles);
   /** 트리아지가 누구인지. 명단에 없으면 필터가 잘못 걸린 것이다. */
   const triageName =
     derived?.members?.find((m) => m.accountId === config.triageAccountId)
@@ -554,17 +573,10 @@ export default function QaRouterSettingsPage() {
                 로 온 사람은 읽기만 보고 돌아가는데, 정작 답이 연필 뒤에
                 숨어 있었던 셈이다. 문제가 없으면 이 줄은 아예 없다.
               */}
-              {savedCheck.data?.problems?.length ? (
-                <ul className="mt-2 flex flex-col gap-1 rounded-md border border-red-200 bg-red-50/60 px-2.5 py-2 dark:border-red-900 dark:bg-red-950/30">
-                  {savedCheck.data.problems.map((x) => (
-                    <li
-                      key={x}
-                      className="text-[11.5px] leading-snug text-red-700 dark:text-red-300"
-                    >
-                      {x}
-                    </li>
-                  ))}
-                </ul>
+              {savedCheck.data?.gaps?.length ? (
+                <div className="mt-2">
+                  <GapList gaps={savedCheck.data.gaps} />
+                </div>
               ) : null}
 
               {derived?.members?.length ? (
@@ -1589,6 +1601,8 @@ interface FilterCheck {
   coAssigneeField?: string | null;
   /** 사람을 보는 칸 이름들. 흐름도가 "어디를 보는지" 적는다. */
   personLabels?: string[];
+  /** 못 알아낸 값들. 막는 것이 앞에 온다. */
+  gaps?: FilterGap[];
   /** 표본으로 추론한 판정 경로. ② 흐름도와 ⑤ 이슈타입이 같이 쓴다. */
   infer?: {
     sampled: number;
@@ -1597,8 +1611,65 @@ interface FilterCheck {
     devTypes: { id: string; name: string; count: number }[];
     prefixes: { name: string; count: number }[];
   };
-  problems?: string[];
   error?: string;
+}
+
+/**
+ * 못 알아낸 값 목록. 네 줄로 나눠 보여준다.
+ *
+ * 한 줄짜리 빨간 문구였을 때는 "그래서 내가 뭘 해야 하나" 가 안 적혀 있어서,
+ * 읽고도 그냥 두는 경우가 있었다. 무엇이 안 되는지(impact)와 고치는
+ * 법(fix)을 항상 같이 붙인다.
+ */
+/**
+ * 받침을 보고 조사를 고른다. `차수 을(를)` 처럼 둘 다 적으면 읽는 속도가
+ * 떨어지고, 화면에서 그 괄호만 눈에 띈다.
+ */
+function withJosa(word: string, withBatchim: string, without: string): string {
+  const last = word.trim().slice(-1);
+  const code = last.charCodeAt(0);
+  // 한글 음절이 아니면(영문·숫자) 판단하지 않고 받침 없는 쪽으로 둔다.
+  if (code < 0xac00 || code > 0xd7a3) return `${word}${without}`;
+  return `${word}${(code - 0xac00) % 28 === 0 ? without : withBatchim}`;
+}
+
+function GapList({ gaps }: { gaps: FilterGap[] }) {
+  if (gaps.length === 0) return null;
+  return (
+    <ul className="mt-1.5 flex flex-col gap-2">
+      {gaps.map((g) => {
+        // 판정이 멎는 것과 기능 일부가 빠지는 것은 급한 정도가 다르다.
+        const tone = g.blocking
+          ? 'border-red-200 bg-red-50/60 dark:border-red-900 dark:bg-red-950/30'
+          : 'border-amber-200 bg-amber-50/70 dark:border-amber-900 dark:bg-amber-950/30';
+        const text = g.blocking
+          ? 'text-red-700 dark:text-red-300'
+          : 'text-amber-800 dark:text-amber-300';
+        return (
+          <li
+            key={`${g.what}-${g.why}`}
+            className={`rounded-md border px-2.5 py-2 ${tone}`}
+          >
+            <p className={`text-[11.5px] font-semibold ${text}`}>
+              {withJosa(g.label, '을', '를')} 못 알아냈습니다
+              {!g.blocking && (
+                <span className="ml-1 font-normal opacity-80">
+                  · 판정 알림은 그대로 돕니다
+                </span>
+              )}
+            </p>
+            <p className={`text-[11.5px] leading-snug ${text} opacity-90`}>
+              {g.why} {g.impact}
+            </p>
+            <p className={`mt-1 text-[11.5px] leading-snug ${text}`}>
+              <span className="font-semibold">이렇게 하면 됩니다 </span>
+              {g.fix}
+            </p>
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 /**
@@ -1627,7 +1698,8 @@ const filterCache = new Map<string, FilterCheck>();
 
 function useFilterCheck(id: string, filterUrl: string) {
   const trimmed = filterUrl.trim();
-  const valid = !!parseFilterUrl(trimmed);
+  // 대시보드 차트 주소도 받는다. 필터 번호는 서버가 Jira 에 물어 풀어 준다.
+  const valid = isFilterInput(trimmed);
   const cacheKey = `${id}|${trimmed}`;
 
   const [res, setRes] = useState<{ key: string; data: FilterCheck } | null>(
@@ -1950,7 +2022,7 @@ function FilterCheckResult({
     );
   }
 
-  const problems = data.problems ?? [];
+  const gaps = data.gaps ?? [];
 
   /*
     ── 한 줄로 줄였다 ──
@@ -1986,17 +2058,8 @@ function FilterCheckResult({
       </div>
 
       {/* 고칠 것이 있으면 조건 바로 아래. 조건보다 늦게 보이면 안 된다. */}
-      {problems.length > 0 && (
-        <ul className="mt-1.5 flex flex-col gap-1 rounded-md border border-red-200 bg-red-50/60 px-2.5 py-2 dark:border-red-900 dark:bg-red-950/30">
-          {problems.map((p) => (
-            <li
-              key={p}
-              className="text-[11.5px] leading-snug text-red-700 dark:text-red-300"
-            >
-              {p}
-            </li>
-          ))}
-        </ul>
+      {gaps.length > 0 && (
+        <GapList gaps={gaps} />
       )}
     </div>
   );
