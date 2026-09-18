@@ -132,6 +132,7 @@ function convertToFullYearMonth(period: string): string {
 function getSprintNamePrefix(projectKey: string): string {
   if (projectKey === 'HMGBOARD') return 'HB';
   if (projectKey === 'AUTOWAY') return 'GW';
+  if (projectKey === 'MEMBERSHIP') return 'HM';
   return projectKey;
 }
 
@@ -148,7 +149,7 @@ function buildTargetSprintName(projectKey: string, yearMonth: string): string {
  */
 export async function mapSprintToTarget(
   fehgSprintName: string | null,
-  targetProject: 'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'
+  targetProject: 'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY' | 'MEMBERSHIP'
 ): Promise<number | null> {
   if (!fehgSprintName) return null;
 
@@ -190,7 +191,7 @@ export function initSprintCache() {
  * 스프린트 캐시 프리로드 (선택적)
  */
 export async function preloadSprintCache(
-  projects: Array<'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'>
+  projects: Array<'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY' | 'MEMBERSHIP'>
 ): Promise<void> {
   const infos = await Promise.all(projects.map((p) => getBoardInfo(p)));
   await Promise.all(

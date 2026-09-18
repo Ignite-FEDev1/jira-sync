@@ -45,6 +45,12 @@ export const JIRA_PROJECTS = {
       name: 'hmg-Board',
       description: 'FEHG 기준으로 자동 업데이트 (구 Ignite HB 이관)',
     },
+    MEMBERSHIP: {
+      key: 'MEMBERSHIP',
+      id: '13904',
+      name: '5.5-(Service Component)-Membership',
+      description: 'FEHG 기준으로 자동 업데이트',
+    },
     ICTQMSCHE: {
       key: 'ICTQMSCHE',
       id: '10464',
@@ -57,7 +63,7 @@ export const JIRA_PROJECTS = {
 // 자동화 대상 프로젝트 (FEHG 제외, HB는 HMGBOARD로 이관)
 export const AUTO_SYNC_PROJECTS = {
   IGNITE: ['HDD', 'KQ'] as const,
-  HMG: ['AUTOWAY', 'HMGBOARD'] as const,
+  HMG: ['AUTOWAY', 'HMGBOARD', 'MEMBERSHIP'] as const,
 } as const;
 
 // 읽기 전용 프로젝트
@@ -364,6 +370,7 @@ export const BOARD_IDS = {
   HDD: 37,
   AUTOWAY: 521,
   HMGBOARD: 3752,
+  MEMBERSHIP: 5447,
 } as const;
 
 // FEHG 스프린트 마감용 transition ID

@@ -72,6 +72,12 @@ export class SyncOrchestrator {
           `HMGBOARD 프로필 로드 완료: link_field=${hmgboardProfile.linkField}, 에픽 필터=[HB] 접두사 기반`
         );
       }
+      const membershipProfile = await this.findHmgProfileByTarget('MEMBERSHIP');
+      if (membershipProfile) {
+        this.logger.info(
+          `MEMBERSHIP 프로필 로드 완료: link_field=${membershipProfile.linkField}, 에픽 필터=[HM] 접두사 기반`
+        );
+      }
 
       // 1. 대상 프로젝트 결정
       let targetProjects = options.targetProjects;
@@ -104,12 +110,12 @@ export class SyncOrchestrator {
 
       // 기본값: 전체 프로젝트 (HB는 HMGBOARD로 이관)
       if (!targetProjects) {
-        targetProjects = ['KQ', 'HDD', 'AUTOWAY', 'HMGBOARD'];
+        targetProjects = ['KQ', 'HDD', 'AUTOWAY', 'HMGBOARD', 'MEMBERSHIP'];
       }
 
       // 2. 스프린트 캐시 프리로드 (병렬) - 모든 대상 프로젝트
       const sprintProjects = targetProjects as Array<
-        'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'
+        'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY' | 'MEMBERSHIP'
       >;
       if (sprintProjects.length > 0) {
         this.logger.info('스프린트 정보 프리로드 중...');
@@ -271,8 +277,8 @@ export class SyncOrchestrator {
       }
     }
 
-    // HMG 프로필(AUTOWAY/HMGBOARD)이 있으면 해당 매핑 필드도 추가
-    const hmgTargets: Array<'AUTOWAY' | 'HMGBOARD'> = ['AUTOWAY', 'HMGBOARD'];
+    // HMG 프로필(AUTOWAY/HMGBOARD/MEMBERSHIP)이 있으면 해당 매핑 필드도 추가
+    const hmgTargets: Array<'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP'> = ['AUTOWAY', 'HMGBOARD', 'MEMBERSHIP'];
     for (const target of hmgTargets) {
       const prof = await this.findHmgProfileByTarget(target);
       if (prof) {
@@ -311,6 +317,8 @@ export class SyncOrchestrator {
     if (autowayProf) return autowayProf.sourceProjectKey;
     const hmgboardProf = await this.findHmgProfileByTarget('HMGBOARD');
     if (hmgboardProf) return hmgboardProf.sourceProjectKey;
+    const membershipProf = await this.findHmgProfileByTarget('MEMBERSHIP');
+    if (membershipProf) return membershipProf.sourceProjectKey;
     return 'FEHG'; // 최종 폴백
   }
 
@@ -319,10 +327,10 @@ export class SyncOrchestrator {
    */
   private async classifyTicketsByTargetProject(
     fehgTickets: JiraIssue[],
-    targetProjects: Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD'>
-  ): Promise<Map<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD', JiraIssue[]>> {
+    targetProjects: Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP'>
+  ): Promise<Map<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP', JiraIssue[]>> {
     const classification = new Map<
-      'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD',
+      'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP',
       JiraIssue[]
     >();
 
@@ -331,7 +339,7 @@ export class SyncOrchestrator {
 
     // 1회 순회로 각 티켓의 대상 프로젝트 결정
     for (const ticket of fehgTickets) {
-      const targets: Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD'> = [];
+      const targets: Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP'> = [];
 
       // 1. 연결된 티켓 확인 (issuelinks - KQ/HDD)
       if (ticket.fields.issuelinks) {
@@ -389,7 +397,23 @@ export class SyncOrchestrator {
         }
       }
 
-      // 4. 각 대상 프로젝트에 티켓 추가
+      // 4. MEMBERSHIP 확인 (link field 또는 에픽 이름 [HM] 접두사)
+      if (targetProjects.includes('MEMBERSHIP')) {
+        const membershipProf = await this.findHmgProfileByTarget('MEMBERSHIP');
+        const linkFieldId = membershipProf?.linkField || 'customfield_10306';
+        const targetKey = membershipProf?.targetProjectKey || 'MEMBERSHIP';
+
+        const hmgLink = ticket.fields[linkFieldId] as string | undefined;
+        const hasTargetLink = hmgLink && new RegExp(`${targetKey}-\\d+`).test(hmgLink);
+
+        const isHmEpic = parentSummary.startsWith('[HM]');
+
+        if (hasTargetLink || isHmEpic) {
+          targets.push('MEMBERSHIP');
+        }
+      }
+
+      // 5. 각 대상 프로젝트에 티켓 추가
       targets.forEach((target) => {
         classification.get(target)?.push(ticket);
       });
@@ -412,19 +436,19 @@ export class SyncOrchestrator {
    */
   private async syncToProject(
     fehgTickets: JiraIssue[],
-    targetProject: 'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD',
+    targetProject: 'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP',
     assigneeAccountId: string,
     chunkSize: number,
     teamUsers?: SyncOptions['teamUsers'],
     syncProfileId?: string
   ): Promise<SyncResult[]> {
-    const isHmgInstance = targetProject === 'AUTOWAY' || targetProject === 'HMGBOARD';
+    const isHmgInstance = targetProject === 'AUTOWAY' || targetProject === 'HMGBOARD' || targetProject === 'MEMBERSHIP';
 
     // syncProfileId가 없으면 소스/타겟 프로젝트 기준으로 DB에서 자동 검색
     let effectiveProfileId = syncProfileId;
     if (!effectiveProfileId) {
       if (isHmgInstance) {
-        const prof = await this.findHmgProfileByTarget(targetProject);
+        const prof = await this.findHmgProfileByTarget(targetProject as 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP');
         if (prof) effectiveProfileId = prof.id;
       } else {
         effectiveProfileId = await this.findProfileForTarget(targetProject);
@@ -511,7 +535,7 @@ export class SyncOrchestrator {
    */
   private async determineTargetProjectsForTicket(
     ticketId: string
-  ): Promise<Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD'>> {
+  ): Promise<Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP'>> {
     const srcKey = this.getSourceProjectKey();
     try {
       // 티켓 조회
@@ -524,7 +548,7 @@ export class SyncOrchestrator {
       }
 
       const ticket = ticketResult.data;
-      const targets: Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD'> = [];
+      const targets: Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP'> = [];
 
       // 1. 연결된 티켓 확인 (issuelinks - KQ/HDD)
       // HB-* 링크는 무시 (옛 Ignite HB는 HMGBOARD로 이관됨)
@@ -570,6 +594,9 @@ export class SyncOrchestrator {
       if (parentSummary.startsWith('[HB]') && !targets.includes('HMGBOARD')) {
         targets.push('HMGBOARD');
       }
+      if (parentSummary.startsWith('[HM]') && !targets.includes('MEMBERSHIP')) {
+        targets.push('MEMBERSHIP');
+      }
 
       if (targets.length > 0) {
         this.logger.info(
@@ -579,7 +606,7 @@ export class SyncOrchestrator {
       }
 
       this.logger.warning(
-        `${srcKey}-${ticketId}: 동기화 대상 아님 (연결 티켓 없음, link field 없음, [GW]/[HB] 에픽 아님)`
+        `${srcKey}-${ticketId}: 동기화 대상 아님 (연결 티켓 없음, link field 없음, [GW]/[HB]/[HM] 에픽 아님)`
       );
       return [];
     } catch (error) {
@@ -595,7 +622,7 @@ export class SyncOrchestrator {
    */
   private async determineTargetProjectsForEpic(
     epicId: string
-  ): Promise<Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD'>> {
+  ): Promise<Array<'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP'>> {
     const srcKey = this.getSourceProjectKey();
     try {
       const epicKey = `${srcKey}-${epicId}`;
@@ -625,6 +652,10 @@ export class SyncOrchestrator {
       if (epicSummary.startsWith('[HB]')) {
         this.logger.info('에픽 summary [HB] 접두사 → HMGBOARD만 동기화');
         return ['HMGBOARD'];
+      }
+      if (epicSummary.startsWith('[HM]')) {
+        this.logger.info('에픽 summary [HM] 접두사 → MEMBERSHIP만 동기화');
+        return ['MEMBERSHIP'];
       }
       if (epicSummary.includes('[KQ]')) {
         this.logger.info('에픽 summary에 [KQ] 발견 → KQ만 동기화');
@@ -686,7 +717,7 @@ export class SyncOrchestrator {
    */
   private hmgProfileCache: Map<string, Awaited<ReturnType<typeof getSyncProfileInfo>>> = new Map();
 
-  private async findHmgProfileByTarget(targetProjectKey: 'AUTOWAY' | 'HMGBOARD') {
+  private async findHmgProfileByTarget(targetProjectKey: 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP') {
     if (this.hmgProfileCache.has(targetProjectKey)) {
       return this.hmgProfileCache.get(targetProjectKey)!;
     }
