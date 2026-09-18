@@ -7,6 +7,7 @@
 //   - 동일 에픽에 대한 동시 요청은 단일 Promise로 합침 (중복 생성 방지)
 //   - 매칭/생성 완료 후 FEHG 부모 에픽의 상태를 대상 에픽에도 동기화 (세션당 1회)
 //   - 대상 에픽이 closed(statusCategory.key === 'done') 상태면 transition 스킵 (보호 정책)
+//   - 1단계 매칭 시 HMG 에픽명이 "[FEHG] {FEHG 에픽명}"과 다르면 HMG 쪽을 업데이트 (FEHG → HMG 단방향)
 
 import { jira } from '@/lib/services/jira';
 import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
@@ -277,6 +278,20 @@ export async function ensureTargetEpic(
       );
       if (storedKey) {
         logger.info(`에픽 ID 기반 매칭: ${fehgParent.key} → ${storedKey}`);
+        // HMG 에픽명이 "[FEHG] {FEHG 에픽명}"과 다르면 동기화
+        const expectedSummary = buildLegacyTargetSummary(fehgParent.summary);
+        const hmgEpic = await jira.hmg.getIssue(storedKey, ['summary']);
+        if (hmgEpic.success && hmgEpic.data) {
+          const currentSummary = hmgEpic.data.fields.summary as string | undefined;
+          if (currentSummary && currentSummary !== expectedSummary) {
+            await jira.hmg.updateIssue(storedKey, {
+              fields: { summary: expectedSummary },
+            });
+            logger.info(
+              `에픽명 동기화: ${storedKey} "${currentSummary}" → "${expectedSummary}"`
+            );
+          }
+        }
         return storedKey;
       }
     }
