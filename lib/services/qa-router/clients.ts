@@ -11,8 +11,15 @@ import type { JiraIssue, JiraPort } from './judge';
 import type { SlackMessage, SlackReader } from './qa-thread';
 import type { JiraFieldMeta, JqlClause } from './derive';
 import type { ChangelogEntry } from './triage';
+import type {
+  JiraUser as BaseJiraUser,
+  JiraIssueType as BaseJiraIssueType,
+} from '@/lib/types/jira';
+import { basicAuthHeader } from '@/lib/jira-credentials';
 
 const NET_RETRY_DELAYS_MS = [3_000, 9_000, 20_000];
+// 중복: scripts/qa-router.ts, scripts/meeting-reminder.ts
+//       한쪽을 고치면 나머지도 확인할 것.
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export type Logger = (...args: unknown[]) => void;
@@ -63,18 +70,10 @@ export interface JiraVersion {
  * 바뀐다. 하지만 **사람에게 10001 을 물어보면 안 된다.** 이 목록이 있어야
  * 화면이 "스토리" 라고 묻고 `10001` 을 저장할 수 있다.
  */
-export interface JiraIssueType {
-  id: string;
-  name: string;
-  /** 하위 작업 타입은 고를 이유가 없어 화면이 걸러 낸다. */
-  subtask?: boolean;
-  description?: string;
-}
-
-export interface JiraUser {
-  accountId: string;
-  displayName?: string;
-}
+export type JiraIssueType = Pick<BaseJiraIssueType, 'id' | 'name'> &
+  Partial<Pick<BaseJiraIssueType, 'subtask' | 'description'>>;
+export type JiraUser = Pick<BaseJiraUser, 'accountId'> &
+  Partial<Pick<BaseJiraUser, 'displayName'>>;
 
 export interface JiraClient extends JiraPort {
   getFilter(filterId: string): Promise<JiraFilter>;
@@ -146,9 +145,8 @@ export function createJiraClient(opts: {
 }): JiraClient {
   const { baseUrl, email, token } = opts;
   const log = opts.log ?? (() => {});
-  const auth = 'Basic ' + Buffer.from(`${email}:${token}`).toString('base64');
   const headers = {
-    Authorization: auth,
+    Authorization: basicAuthHeader(email, token),
     Accept: 'application/json',
     'Content-Type': 'application/json',
   };
@@ -350,9 +348,10 @@ export function createConfluenceClient(opts: {
   log?: Logger;
 }): ConfluenceClient {
   const log = opts.log ?? (() => {});
-  const auth =
-    'Basic ' + Buffer.from(`${opts.email}:${opts.token}`).toString('base64');
-  const headers = { Authorization: auth, Accept: 'application/json' };
+  const headers = {
+    Authorization: basicAuthHeader(opts.email, opts.token),
+    Accept: 'application/json',
+  };
   const wiki = `${opts.baseUrl.replace(/\/$/, '')}/wiki`;
 
   async function call<T>(path: string): Promise<T> {

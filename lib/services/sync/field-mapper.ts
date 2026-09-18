@@ -1,12 +1,8 @@
 // 필드 매핑 및 변환 로직
 
 import { JiraIssue } from '@/lib/types/jira';
-import {
-  STATUS_MAPPING,
-  IGNITE_CUSTOM_FIELDS,
-  HMG_CUSTOM_FIELDS,
-} from '@/lib/constants/jira';
-import { SyncTargetProject, SyncOptions } from './types';
+import { IGNITE_CUSTOM_FIELDS, HMG_CUSTOM_FIELDS } from '@/lib/constants/jira';
+import { SyncOptions } from './types';
 import { mapSprintToTarget } from './sprint-mapper';
 
 /**
@@ -151,26 +147,6 @@ export async function mapFieldsForAutoway(
   return fields;
 }
 
-/**
- * FEHG 상태 ID를 대상 프로젝트의 transition ID로 변환
- */
-export function mapStatusTransition(
-  fehgStatusId: string,
-  targetProject: SyncTargetProject
-): string | null {
-  if (targetProject === 'AUTOWAY') {
-    return (
-      STATUS_MAPPING.HMG[fehgStatusId as keyof typeof STATUS_MAPPING.HMG] ||
-      null
-    );
-  } else {
-    return (
-      STATUS_MAPPING.IGNITE[
-        fehgStatusId as keyof typeof STATUS_MAPPING.IGNITE
-      ] || null
-    );
-  }
-}
 
 /**
  * customfield_10306에서 AUTOWAY 티켓 키 추출

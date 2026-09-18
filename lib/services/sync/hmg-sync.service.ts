@@ -8,12 +8,11 @@ import { mapFieldsFromDb, getSyncProfileInfo } from './db-field-mapper';
 import { SyncOptions } from './types';
 import { syncStatusWithPath, syncStatusWithPathFromDb } from './transition-helper';
 import { jira } from '@/lib/services/jira';
-import { IGNITE_CUSTOM_FIELDS, JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import { IGNITE_CUSTOM_FIELDS, HMG_CUSTOM_FIELDS, JIRA_ENDPOINTS } from '@/lib/constants/jira';
 import { ensureTargetEpic } from './epic-resolver';
 import { describeFetchError } from '@/lib/services/jira/client';
 
-// HMG 인스턴스의 Epic Link 커스텀 필드 (자식 → 부모 에픽 연결)
-const HMG_EPIC_LINK_FIELD = 'customfield_10014';
+const HMG_EPIC_LINK_FIELD = HMG_CUSTOM_FIELDS.EPIC_LINK;
 
 /**
  * HMG 프로젝트별 이슈타입 ID 캐시

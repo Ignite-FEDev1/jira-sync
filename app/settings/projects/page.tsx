@@ -14,11 +14,9 @@ import { Plus, Pencil, Trash2, Check, Loader2, Search, CircleCheck, CircleX } fr
 import { toast } from 'sonner';
 import { db } from '@/lib/db';
 import { jiraFetch } from '@/lib/jira-fetch';
+import type { Team as BaseTeam } from '@/lib/types/team';
 
-interface Team {
-  id: string;
-  name: string;
-}
+type Team = Pick<BaseTeam, 'id' | 'name'>;
 
 interface Project {
   id: string;

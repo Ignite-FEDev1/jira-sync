@@ -75,11 +75,6 @@ export const AUTO_SYNC_PROJECTS = {
   HMG: ['AUTOWAY', 'MEMBERSHIP'] as const,
 } as const;
 
-// 읽기 전용 프로젝트
-export const READ_ONLY_PROJECTS = {
-  HMG: ['ICTQMSCHE'] as const,
-} as const;
-
 export const JIRA_ROUTES = {
   // 서버 정보
   SERVER_INFO: '/serverInfo',
@@ -142,43 +137,6 @@ export const JIRA_CONFIG = {
 
 // 사용자 정보는 users 테이블에서 조회한다.
 // 서버: lib/services/user-lookup.ts / 클라이언트: lib/hooks/use-app-users.ts
-
-// 동기화 필드 설정
-export const SYNC_FIELDS = {
-  FEHG_TO_KQ: [
-    'summary',
-    'duedate',
-    'customfield_10015', // 시작일
-    'assignee',
-    'timetracking',
-    'customfield_10020', // 스프린트
-  ] as const,
-  FEHG_TO_AUTOWAY: [
-    'summary',
-    'duedate',
-    'customfield_10015', // 시작일
-    'assignee',
-    'timetracking',
-    'customfield_10020', // 스프린트
-  ] as const,
-} as const;
-
-// 상태 매핑 (FEHG status ID → 대상 프로젝트 transition ID)
-// @deprecated - STATUS_TARGET_MAPPING + STATUS_WORKFLOW 조합으로 대체
-export const STATUS_MAPPING = {
-  // FEHG → KQ (이그나이트 프로젝트)
-  IGNITE: {
-    '10373': '161', // 해야 할 일 → ToDo
-    '10374': '171', // 진행 중 → In Progress
-    '10375': '181', // 완료 → 완료
-  },
-  // FEHG → AUTOWAY (HMG 프로젝트 전용)
-  HMG: {
-    '10373': '41', // 해야 할 일 → 해야 할 일
-    '10374': '11', // 진행 중 → 진행 중
-    '10375': '31', // 완료 → 완료
-  },
-} as const;
 
 /**
  * FEHG 상태 ID → 타겟 인스턴스 상태 ID 매핑
@@ -266,103 +224,13 @@ export const KQ_CUSTOM_FIELDS = {
 
 // HMG Jira 커스텀 필드 (AUTOWAY 프로젝트)
 export const HMG_CUSTOM_FIELDS = {
+  EPIC_LINK: 'customfield_10014',  // Epic Link (HMG 인스턴스)
   START_DATE: 'customfield_10187', // Start Date
   START_DATE_ALT: 'customfield_10753', // Start Date (duplicate)
   START_DATE_590: 'customfield_10590', // Start Date (세 번째 중복 필드)
   GANTT_START_DATE: 'customfield_10995', // Gantt Start Date
   GANTT_END_DATE: 'customfield_10996', // Gantt End Date
 } as const;
-
-// FEHG → AUTOWAY 동기화 허용 에픽 목록
-export const ALLOWED_FEHG_TO_HMG_EPIC_IDS = [
-  1519, // [GW] 디자인 QA(FO/BO) - 수시 업무
-  1637, // [GW] 메인터넌스, DevOps - 수시 업무
-  1617, // [GW] [오픈 신규 스펙] F&B(11월 오픈 스펙아웃)
-  1618, // [GW] [오픈 신규 스펙] 게시판 확장 변수(11월 오픈 스펙아웃)
-  1619, // [GW] [오픈 신규 스펙] 홈 UX/디자인 개선
-  1620, // [GW] [오픈 신규 스펙] 협력사 외부망 접속 허용
-  1621, // [GW] [오픈 신규 스펙] 회사별 접속 차단 권한 개선 : url 리다이렉트
-  1622, // [GW] [오픈 신규 스펙] 메뉴 4depth까지 제공
-  1623, // [GW] [오픈 신규 스펙] 홈 진입시 팝업 공지 기능 제공
-  1624, // [GW] [오픈 신규 스펙] 블라인드 정책 개선
-  1625, // [GW] [오픈 신규 스펙] 임직원 보직 정렬 순서 변경
-  1626, // [GW] [오픈 신규 스펙] 이미지 뷰어 기능 제공
-  1627, // [GW] [오픈 신규 스펙] 게시글 작성 최대 글자수 조정
-  1628, // [GW] [오픈 신규 스펙] 태그 기능 개선 : 최대 5개 지정
-  1629, // [GW] [오픈 신규 스펙] 모바일 뷰어 제공
-  1630, // [GW] [오픈 신규 스펙] 에디터 개선
-  1631, // [GW] [오픈 신규 스펙] BO : 영문 필드 최대 글자수 점검 및 개선
-  1632, // [GW] [오픈 신규 스펙] BO : 뉴스 컴포넌트 PC/Mo 동기화
-  1633, // [GW] [오픈 신규 스펙] BO : 배너 하이퍼링크 동작 개선
-  1634, // [GW] [오픈 신규 스펙] BO : 권한 설정 내 조직 검색 방식 개선
-  1635, // [GW] [오픈 신규 스펙] BO : 인원수 호출 UX 개선
-  1640, // [GW] [오픈 신규 스펙] 메일 알림 뱃지 숫자 정책 개선
-  1748, // [GW] [오픈 신규 스펙] 중복 로그인
-  2171,
-  2273,
-  2530,
-] as const;
-
-// FEHG → AUTOWAY 동기화 허용 에픽 상세 정보
-export const ALLOWED_FEHG_TO_HMG_EPIC_DATA = [
-  { id: 1519, summary: '[GW] 디자인 QA(FO/BO) - 수시 업무' },
-  { id: 1637, summary: '[GW] 메인터넌스, DevOps - 수시 업무' },
-  { id: 1617, summary: '[GW] [오픈 신규 스펙] F&B(11월 오픈 스펙아웃)' },
-  {
-    id: 1618,
-    summary: '[GW] [오픈 신규 스펙] 게시판 확장 변수(11월 오픈 스펙아웃)',
-  },
-  { id: 1619, summary: '[GW] [오픈 신규 스펙] 홈 UX/디자인 개선' },
-  { id: 1620, summary: '[GW] [오픈 신규 스펙] 협력사 외부망 접속 허용' },
-  {
-    id: 1621,
-    summary:
-      '[GW] [오픈 신규 스펙] 회사별 접속 차단 권한 개선 : url 리다이렉트',
-  },
-  { id: 1622, summary: '[GW] [오픈 신규 스펙] 메뉴 4depth까지 제공' },
-  {
-    id: 1623,
-    summary: '[GW] [오픈 신규 스펙] 홈 진입시 팝업 공지 기능 제공',
-  },
-  { id: 1624, summary: '[GW] [오픈 신규 스펙] 블라인드 정책 개선' },
-  { id: 1625, summary: '[GW] [오픈 신규 스펙] 임직원 보직 정렬 순서 변경' },
-  { id: 1626, summary: '[GW] [오픈 신규 스펙] 이미지 뷰어 기능 제공' },
-  {
-    id: 1627,
-    summary: '[GW] [오픈 신규 스펙] 게시글 작성 최대 글자수 조정',
-  },
-  {
-    id: 1628,
-    summary: '[GW] [오픈 신규 스펙] 태그 기능 개선 : 최대 5개 지정',
-  },
-  { id: 1629, summary: '[GW] [오픈 신규 스펙] 모바일 뷰어 제공' },
-  { id: 1630, summary: '[GW] [오픈 신규 스펙] 에디터 개선' },
-  {
-    id: 1631,
-    summary: '[GW] [오픈 신규 스펙] BO : 영문 필드 최대 글자수 점검 및 개선',
-  },
-  {
-    id: 1632,
-    summary: '[GW] [오픈 신규 스펙] BO : 뉴스 컴포넌트 PC/Mo 동기화',
-  },
-  {
-    id: 1633,
-    summary: '[GW] [오픈 신규 스펙] BO : 배너 하이퍼링크 동작 개선',
-  },
-  {
-    id: 1634,
-    summary: '[GW] [오픈 신규 스펙] BO : 권한 설정 내 조직 검색 방식 개선',
-  },
-  { id: 1635, summary: '[GW] [오픈 신규 스펙] BO : 인원수 호출 UX 개선' },
-  {
-    id: 1640,
-    summary: '[GW] [오픈 신규 스펙] 메일 알림 뱃지 숫자 정책 개선',
-  },
-  { id: 1748, summary: '[GW] [오픈 신규 스펙] 중복 로그인' },
-  { id: 2171, summary: '[GW] 오픈 전 Task 검토 리스트 (11/18 ~)' },
-  { id: 2273, summary: '[GW] 12/xx 비정기배포' },
-  { id: 2530, summary: '[GW] 26/01 비정기배포' },
-] as const;
 
 // 보드 ID (스프린트 조회용)
 export const BOARD_IDS = {
@@ -393,51 +261,3 @@ export const HMG_STATUS_IDS = {
   CLOSED: '6',
 } as const;
 
-// 헬퍼 함수
-export const JiraProjectHelpers = {
-  /**
-   * 프로젝트 키로 프로젝트 정보 조회
-   */
-  getProjectInfo: (projectKey: string) => {
-    // Ignite 프로젝트 검색
-    const igniteProject = Object.values(JIRA_PROJECTS.IGNITE).find(
-      (p) => p.key === projectKey
-    );
-    if (igniteProject) return { ...igniteProject, instance: 'ignite' as const };
-
-    // HMG 프로젝트 검색
-    const hmgProject = Object.values(JIRA_PROJECTS.HMG).find(
-      (p) => p.key === projectKey
-    );
-    if (hmgProject) return { ...hmgProject, instance: 'hmg' as const };
-
-    return null;
-  },
-
-  /**
-   * 자동 동기화 대상 프로젝트인지 확인
-   */
-  isAutoSyncProject: (projectKey: string) => {
-    return (
-      AUTO_SYNC_PROJECTS.IGNITE.includes(projectKey as never) ||
-      AUTO_SYNC_PROJECTS.HMG.includes(projectKey as never)
-    );
-  },
-
-  /**
-   * 읽기 전용 프로젝트인지 확인
-   */
-  isReadOnlyProject: (projectKey: string) => {
-    return READ_ONLY_PROJECTS.HMG.includes(projectKey as never);
-  },
-
-  /**
-   * 모든 자동 동기화 대상 프로젝트 목록 가져오기
-   */
-  getAllAutoSyncProjects: () => {
-    return [
-      ...AUTO_SYNC_PROJECTS.IGNITE.map((key) => JIRA_PROJECTS.IGNITE[key]),
-      ...AUTO_SYNC_PROJECTS.HMG.map((key) => JIRA_PROJECTS.HMG[key]),
-    ];
-  },
-} as const;

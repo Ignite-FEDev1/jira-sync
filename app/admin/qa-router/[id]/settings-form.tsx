@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch';
 
 import { SettingRow, SettingRows } from './setting-row';
 import type { ConfigField } from '@/app/api/qa-router/[id]/config/route';
-import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import { jiraBaseUrl } from '@/lib/constants/jira';
 import { parseFilterUrl } from '@/lib/services/qa-router/derive';
 import type { QaRouterConfig } from '@/lib/services/qa-router/types';
 
@@ -23,11 +23,6 @@ import type { QaRouterConfig } from '@/lib/services/qa-router/types';
  * 저장은 API Route 를 거친다 — 필터를 바꾸면 파생 캐시를 함께 버려야 하는데
  * 그 테이블은 브라우저 권한으로 못 지운다.
  */
-
-/** 인스턴스별 Jira 주소. 하드코딩하면 hmg 필터가 없는 곳을 가리킨다. */
-function jiraBaseUrl(instance: QaRouterConfig['jiraInstance']): string {
-  return instance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE;
-}
 
 export interface SettingsFormProps {
   config: QaRouterConfig;

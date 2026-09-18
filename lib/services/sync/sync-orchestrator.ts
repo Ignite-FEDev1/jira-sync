@@ -12,6 +12,7 @@ import { clearTransitionCache } from './transition-helper';
 import { clearEpicCache } from './epic-resolver';
 import { jira } from '@/lib/services/jira';
 import { dbServer } from '@/lib/db';
+import { IGNITE_CUSTOM_FIELDS } from '@/lib/constants/jira';
 import { describeFetchError } from '@/lib/services/jira/client';
 
 /**
@@ -350,7 +351,7 @@ export class SyncOrchestrator {
       // 2. AUTOWAY 확인 (link field 또는 에픽 이름 [GW] 접두사)
       if (targetProjects.includes('AUTOWAY')) {
         const autowayProf = await this.findHmgProfileByTarget('AUTOWAY');
-        const linkFieldId = autowayProf?.linkField || 'customfield_10306';
+        const linkFieldId = autowayProf?.linkField || IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK;
         const targetKey = autowayProf?.targetProjectKey || 'AUTOWAY';
 
         const hmgLink = ticket.fields[linkFieldId] as string | undefined;
@@ -369,7 +370,7 @@ export class SyncOrchestrator {
       // 3. MEMBERSHIP 확인 (link field 또는 에픽 이름 [HM] 접두사)
       if (targetProjects.includes('MEMBERSHIP')) {
         const membershipProf = await this.findHmgProfileByTarget('MEMBERSHIP');
-        const linkFieldId = membershipProf?.linkField || 'customfield_10306';
+        const linkFieldId = membershipProf?.linkField || IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK;
         const targetKey = membershipProf?.targetProjectKey || 'MEMBERSHIP';
 
         const hmgLink = ticket.fields[linkFieldId] as string | undefined;
@@ -531,7 +532,7 @@ export class SyncOrchestrator {
 
       // 2. AUTOWAY link field 확인 (DB 기반)
       const autowayProf = await this.findHmgProfileByTarget('AUTOWAY');
-      const autowayLinkFieldId = autowayProf?.linkField || 'customfield_10306';
+      const autowayLinkFieldId = autowayProf?.linkField || IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK;
       const autowayTargetKey = autowayProf?.targetProjectKey || 'AUTOWAY';
 
       const autowayLink = ticket.fields[autowayLinkFieldId] as string | undefined;

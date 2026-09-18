@@ -159,15 +159,15 @@ async function fetchActiveSprintTickets(
   const fields = [
     'summary',
     'status',
-    'customfield_10020', // 스프린트
+    IGNITE_CUSTOM_FIELDS.SPRINT,
     'description',
     'assignee',
     'priority',
     'issuetype',
     'parent',
     'labels',
-    'customfield_10015', // 시작일
-    'customfield_10306', // HMG Jira 링크 (AUTOWAY)
+    IGNITE_CUSTOM_FIELDS.START_DATE,
+    IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK,
     'issuelinks', // Blocks → KQ-* (KQ 연쇄 생성용)
   ].join(',');
 

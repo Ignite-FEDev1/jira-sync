@@ -1,5 +1,12 @@
 'use client';
 
+/**
+ * ⚠️ 유지보수 중단 · 메뉴에 노출되지 않음
+ *
+ * 진입 링크는 app/flow-chart/page.tsx:338 하나뿐이다 (그쪽도 노출되지 않음).
+ * 에픽 생성은 홈(app/page.tsx)의 에픽 동기화와 역할이 겹친다.
+ */
+
 import { useState } from 'react';
 import Link from 'next/link';
 import { jiraFetch } from '@/lib/jira-fetch';

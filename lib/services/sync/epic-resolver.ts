@@ -10,7 +10,8 @@
 //   - 1단계 매칭 시 HMG 에픽명이 "[FEHG] {FEHG 에픽명}"과 다르면 HMG 쪽을 업데이트 (FEHG → HMG 단방향)
 
 import { jira } from '@/lib/services/jira';
-import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
+import { JIRA_ENDPOINTS, IGNITE_CUSTOM_FIELDS } from '@/lib/constants/jira';
+import type { HmgTargetProject } from './types';
 import { SyncLogger } from './logger';
 import { stripAdfMediaNodes } from './field-mapper';
 import {
@@ -26,10 +27,8 @@ export interface FehgParentInfo {
   summary: string;
 }
 
-type TargetProject = 'AUTOWAY' | 'MEMBERSHIP';
-
 // 대상 프로젝트 에픽 목록 캐시: projectKey → (exact summary → epic key)
-const targetEpicsCache = new Map<TargetProject, Map<string, string>>();
+const targetEpicsCache = new Map<HmgTargetProject, Map<string, string>>();
 
 // 매칭/생성 중복 방지: dedupKey → in-flight Promise
 const pendingResolves = new Map<string, Promise<string | null>>();
@@ -61,7 +60,7 @@ function extractHmgKeyFromUrl(
 }
 
 async function loadTargetEpics(
-  projectKey: TargetProject,
+  projectKey: HmgTargetProject,
   logger: SyncLogger
 ): Promise<Map<string, string>> {
   const cached = targetEpicsCache.get(projectKey);
@@ -90,7 +89,7 @@ async function loadTargetEpics(
 
 async function createTargetEpic(
   fehgParentKey: string,
-  targetProjectKey: TargetProject,
+  targetProjectKey: HmgTargetProject,
   targetSummary: string,
   logger: SyncLogger
 ): Promise<string | null> {
@@ -136,7 +135,7 @@ async function createTargetEpic(
   // 생성 후 FEHG 에픽에 HMG URL 저장 → 다음 동기화부터 1단계(ID 기반)에서 바로 매칭
   const hmgUrl = `${JIRA_ENDPOINTS.HMG}/browse/${newKey}`;
   await jira.ignite.updateIssueFields(fehgParentKey, {
-    customfield_10306: hmgUrl,
+    [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: hmgUrl,
   });
 
   logger.success(
@@ -252,7 +251,7 @@ async function syncEpicStatus(
  */
 export async function ensureTargetEpic(
   fehgParent: FehgParentInfo,
-  targetProjectKey: TargetProject,
+  targetProjectKey: HmgTargetProject,
   logger: SyncLogger,
   syncProfileId?: string
 ): Promise<string | null> {
@@ -269,11 +268,11 @@ export async function ensureTargetEpic(
   const promise = (async () => {
     // 1단계: FEHG 에픽 customfield_10306 URL → HMG key 추출 (ID 기반)
     const fehgDetail = await jira.ignite.getIssue(fehgParent.key, [
-      'customfield_10306',
+      IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK,
     ]);
     if (fehgDetail.success && fehgDetail.data) {
       const storedKey = extractHmgKeyFromUrl(
-        fehgDetail.data.fields['customfield_10306'],
+        fehgDetail.data.fields[IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK],
         targetProjectKey
       );
       if (storedKey) {
@@ -307,7 +306,7 @@ export async function ensureTargetEpic(
       );
       // 다음 동기화부터 1단계에서 처리되도록 URL 저장
       await jira.ignite.updateIssueFields(fehgParent.key, {
-        customfield_10306: `${JIRA_ENDPOINTS.HMG}/browse/${legacyMatch}`,
+        [IGNITE_CUSTOM_FIELDS.HMG_JIRA_LINK]: `${JIRA_ENDPOINTS.HMG}/browse/${legacyMatch}`,
       });
       return legacyMatch;
     }

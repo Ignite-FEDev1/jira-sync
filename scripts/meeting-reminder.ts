@@ -458,6 +458,8 @@ export async function loadTeamEmails(): Promise<Set<string>> {
   return toSet(emails);
 }
 
+// 중복: lib/services/qa-router/clients.ts:21, scripts/qa-router.ts:64
+//       한쪽을 고치면 나머지도 확인할 것.
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {

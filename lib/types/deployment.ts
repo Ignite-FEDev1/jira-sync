@@ -65,6 +65,7 @@ export interface MyTicketsResponse {
 
 /**
  * 프로젝트별 Jira 프로젝트 키 매핑
+ * 동기화 대상(AUTO_SYNC_PROJECTS)과 별개 목록 — 배포방 화면 노출용
  */
 export const PROJECT_TO_JIRA_KEY: Record<ProjectKey, string> = {
   groupware: 'AUTOWAY',

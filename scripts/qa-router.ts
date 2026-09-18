@@ -61,6 +61,8 @@ function required(name: string): string {
 
 const log = (...a: unknown[]) =>
   console.log(`[${new Date().toISOString()}]`, ...a);
+// 중복: lib/services/qa-router/clients.ts:21, scripts/meeting-reminder.ts:461
+//       한쪽을 고치면 나머지도 확인할 것.
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 리스 보유자 ID. Actions 실행 ID 가 있으면 그걸 쓴다. */
