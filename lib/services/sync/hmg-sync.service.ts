@@ -1,4 +1,4 @@
-// HMG Jira 프로젝트 동기화 (FEHG → AUTOWAY)
+// HMG Jira 프로젝트 동기화 (FEHG → AUTOWAY/MEMBERSHIP)
 
 import { JiraIssue, JiraIssueCreatePayload } from '@/lib/types/jira';
 import { SyncResult } from './types';
@@ -12,12 +12,12 @@ import { IGNITE_CUSTOM_FIELDS, JIRA_ENDPOINTS } from '@/lib/constants/jira';
 import { ensureTargetEpic } from './epic-resolver';
 import { describeFetchError } from '@/lib/services/jira/client';
 
-// AUTOWAY/HMGBOARD의 Epic Link 커스텀 필드 (자식 → 부모 에픽 연결)
+// HMG 인스턴스의 Epic Link 커스텀 필드 (자식 → 부모 에픽 연결)
 const HMG_EPIC_LINK_FIELD = 'customfield_10014';
 
 /**
  * HMG 프로젝트별 이슈타입 ID 캐시
- * - 프로젝트마다 허용되는 이슈타입이 다름 (AUTOWAY: 작업/Task, HMGBOARD: 개발처리 등)
+ * - 프로젝트마다 허용되는 이슈타입이 다름 (AUTOWAY: 작업/Task 등)
  */
 const createIssueTypeIdCache: Map<string, string> = new Map();
 
@@ -26,7 +26,6 @@ const createIssueTypeIdCache: Map<string, string> = new Map();
  */
 const PREFERRED_ISSUETYPE_NAMES: Record<string, string[]> = {
   AUTOWAY: ['작업', 'Task', '업무', '스토리', 'Story', '버그', 'Bug'],
-  HMGBOARD: ['개발처리', '스토리', 'Story', '운영업무', '버그', 'Bug'],
 };
 
 const DEFAULT_PREFERRED_NAMES = [
@@ -41,7 +40,7 @@ const DEFAULT_PREFERRED_NAMES = [
 
 /**
  * HMG 프로젝트 동기화 서비스
- * FEHG → AUTOWAY/HMGBOARD 동기화 담당
+ * FEHG → AUTOWAY/MEMBERSHIP 동기화 담당
  */
 export class HMGSyncService {
   constructor(private logger: SyncLogger) {}
@@ -53,7 +52,7 @@ export class HMGSyncService {
    */
   private async injectEpicLink(
     fehgTicket: JiraIssue,
-    targetProjectKey: 'AUTOWAY' | 'HMGBOARD',
+    targetProjectKey: 'AUTOWAY' | 'MEMBERSHIP',
     mappedFields: Record<string, unknown>,
     syncProfileId?: string
   ): Promise<void> {
@@ -238,13 +237,13 @@ export class HMGSyncService {
             fehgTicket,
             assigneeAccountId,
             teamUsers,
-            targetProjectKey as 'AUTOWAY' | 'HMGBOARD'
+            targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP'
           );
 
       // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성/상태동기화)
       await this.injectEpicLink(
         fehgTicket,
-        targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
+        targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP',
         mappedFields,
         syncProfileId
       );
@@ -302,7 +301,7 @@ export class HMGSyncService {
       return {
         fehgKey: fehgTicket.key,
         targetKey: createdKey,
-        targetProject: targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
+        targetProject: targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP',
         success: true,
         message: '신규 생성 및 동기화 완료',
         isNewlyCreated: true,
@@ -317,7 +316,7 @@ export class HMGSyncService {
       return {
         fehgKey: fehgTicket.key,
         targetKey: '',
-        targetProject: targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
+        targetProject: targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP',
         success: false,
         error: errorMessage,
       };
@@ -347,13 +346,13 @@ export class HMGSyncService {
             fehgTicket,
             assigneeAccountId,
             teamUsers,
-            targetProjectKey as 'AUTOWAY' | 'HMGBOARD'
+            targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP'
           );
 
       // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성/상태동기화)
       await this.injectEpicLink(
         fehgTicket,
-        targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
+        targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP',
         mappedFields,
         syncProfileId
       );
@@ -392,7 +391,7 @@ export class HMGSyncService {
       return {
         fehgKey: fehgTicket.key,
         targetKey,
-        targetProject: targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
+        targetProject: targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP',
         success: true,
         message: '동기화 완료',
         isNewlyCreated: false,
@@ -405,7 +404,7 @@ export class HMGSyncService {
       return {
         fehgKey: fehgTicket.key,
         targetKey,
-        targetProject: targetProjectKey as 'AUTOWAY' | 'HMGBOARD',
+        targetProject: targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP',
         success: false,
         error: errorMessage,
       };

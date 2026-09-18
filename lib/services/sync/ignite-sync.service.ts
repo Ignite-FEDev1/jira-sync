@@ -1,4 +1,4 @@
-// Ignite Jira 프로젝트 동기화 (FEHG → KQ/HDD)
+// Ignite Jira 프로젝트 동기화 (FEHG → KQ)
 
 import { JiraIssue } from '@/lib/types/jira';
 import { SyncResult, SyncTargetProject } from './types';
@@ -14,7 +14,7 @@ import { describeFetchError } from '@/lib/services/jira/client';
 
 /**
  * Ignite 프로젝트 동기화 서비스
- * FEHG → KQ/HDD 동기화 담당
+ * FEHG → KQ 동기화 담당
  */
 export class IgniteSyncService {
   constructor(private logger: SyncLogger) {}
@@ -53,7 +53,7 @@ export class IgniteSyncService {
    */
   async syncTicket(
     fehgTicket: JiraIssue,
-    targetProject: 'KQ' | 'HDD',
+    targetProject: 'KQ',
     syncProfileId?: string
   ): Promise<SyncResult[]> {
     const results: SyncResult[] = [];
@@ -99,7 +99,7 @@ export class IgniteSyncService {
   private async updateTargetTicket(
     fehgTicket: JiraIssue,
     targetKey: string,
-    targetProject: 'KQ' | 'HDD',
+    targetProject: 'KQ',
     syncProfileId?: string
   ): Promise<SyncResult> {
     try {
@@ -162,7 +162,7 @@ export class IgniteSyncService {
   private async syncIgniteStatus(
     fehgTicket: JiraIssue,
     targetKey: string,
-    targetProject: 'KQ' | 'HDD',
+    targetProject: 'KQ',
     syncProfileId?: string
   ): Promise<void> {
     const fehgStatusId = fehgTicket.fields.status?.id;
@@ -192,12 +192,6 @@ export class IgniteSyncService {
         this.logger.info(
           `${targetKey}: KQ 상태가 "Verify in QA" → 동기화 스킵`
         );
-        return;
-      }
-
-      // HDD는 상태 동기화 권한 문제로 인해 스킵
-      if (targetProject === 'HDD') {
-        this.logger.info(`${targetKey}: HDD → 상태 동기화 권한 문제로 스킵`);
         return;
       }
 

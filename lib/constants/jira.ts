@@ -39,12 +39,6 @@ export const JIRA_PROJECTS = {
       name: '[FE1] 프로젝트 통합 JIRA',
       description: '기준 프로젝트 - 개발자들이 직접 관리',
     },
-    HDD: {
-      key: 'HDD',
-      id: '10135',
-      name: '현대디벨로퍼',
-      description: 'FEHG 기준으로 자동 업데이트',
-    },
     KQ: {
       key: 'KQ',
       id: '10109',
@@ -59,12 +53,6 @@ export const JIRA_PROJECTS = {
       id: '10363',
       name: '[프로젝트] 차세대 그룹웨어 포털 구축',
       description: 'FEHG 기준으로 자동 업데이트',
-    },
-    HMGBOARD: {
-      key: 'HMGBOARD',
-      id: '12608',
-      name: 'hmg-Board',
-      description: 'FEHG 기준으로 자동 업데이트 (구 Ignite HB 이관)',
     },
     MEMBERSHIP: {
       key: 'MEMBERSHIP',
@@ -81,10 +69,10 @@ export const JIRA_PROJECTS = {
   },
 } as const;
 
-// 자동화 대상 프로젝트 (FEHG 제외, HB는 HMGBOARD로 이관)
+// 자동화 대상 프로젝트 (FEHG 제외)
 export const AUTO_SYNC_PROJECTS = {
-  IGNITE: ['HDD', 'KQ'] as const,
-  HMG: ['AUTOWAY', 'HMGBOARD', 'MEMBERSHIP'] as const,
+  IGNITE: ['KQ'] as const,
+  HMG: ['AUTOWAY', 'MEMBERSHIP'] as const,
 } as const;
 
 // 읽기 전용 프로젝트
@@ -165,14 +153,6 @@ export const SYNC_FIELDS = {
     'timetracking',
     'customfield_10020', // 스프린트
   ] as const,
-  FEHG_TO_HDD: [
-    'summary',
-    'duedate',
-    'customfield_10015', // 시작일
-    'assignee',
-    'timetracking',
-    'customfield_10020', // 스프린트
-  ] as const,
   FEHG_TO_AUTOWAY: [
     'summary',
     'duedate',
@@ -186,7 +166,7 @@ export const SYNC_FIELDS = {
 // 상태 매핑 (FEHG status ID → 대상 프로젝트 transition ID)
 // @deprecated - STATUS_TARGET_MAPPING + STATUS_WORKFLOW 조합으로 대체
 export const STATUS_MAPPING = {
-  // FEHG → HB/KQ/HDD (이그나이트 프로젝트)
+  // FEHG → KQ (이그나이트 프로젝트)
   IGNITE: {
     '10373': '161', // 해야 할 일 → ToDo
     '10374': '171', // 진행 중 → In Progress
@@ -208,7 +188,7 @@ export const STATUS_TARGET_MAPPING: Record<
   'IGNITE' | 'HMG',
   Record<string, string>
 > = {
-  // FEHG status ID → Ignite 타겟 프로젝트(KQ/HB/HDD) status ID
+  // FEHG status ID → Ignite 타겟 프로젝트(KQ) status ID
   IGNITE: {
     '10373': '1', // 해야 할 일 → TO_DO
     '10374': '3', // 진행 중 → 진행 중
@@ -232,7 +212,7 @@ export const STATUS_WORKFLOW: Record<
   'IGNITE' | 'HMG',
   Record<string, Record<string, string>>
 > = {
-  // Ignite 프로젝트 워크플로우 (KQ/HB/HDD)
+  // Ignite 프로젝트 워크플로우 (KQ)
   // 모든 상태에서 모든 상태로 직접 전이 가능 (매우 유연함)
   IGNITE: {
     '1': {
@@ -388,9 +368,7 @@ export const ALLOWED_FEHG_TO_HMG_EPIC_DATA = [
 export const BOARD_IDS = {
   FEHG: 251,
   KQ: 20,
-  HDD: 37,
   AUTOWAY: 521,
-  HMGBOARD: 3752,
   MEMBERSHIP: 5447,
 } as const;
 
@@ -408,7 +386,7 @@ export const FEHG_STATUS_IDS = {
   DONE: '10375',
 } as const;
 
-// HMG(AUTOWAY/HMGBOARD) status ID — 종료 여부 판정용
+// HMG(AUTOWAY) status ID — 종료 여부 판정용
 export const HMG_STATUS_IDS = {
   OPEN: '1',
   IN_PROGRESS: '3',

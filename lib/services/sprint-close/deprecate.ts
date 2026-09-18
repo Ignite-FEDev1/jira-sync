@@ -20,9 +20,9 @@ export interface DeprecateResult {
   error?: string;
 }
 
-/** AUTOWAY, HMGBOARD는 HMG 인스턴스 소속 */
+/** AUTOWAY, MEMBERSHIP는 HMG 인스턴스 소속 */
 export function isHmgKey(key: string): boolean {
-  return key.startsWith('AUTOWAY-') || key.startsWith('HMGBOARD-');
+  return key.startsWith('AUTOWAY-') || key.startsWith('MEMBERSHIP-');
 }
 
 export async function deprecateTicket(params: {

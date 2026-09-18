@@ -130,7 +130,7 @@ async function main() {
         assigneeAccountId: user.igniteAccountId,
         assigneeName: user.name,
         teamUsers: users,
-        targetProjects: undefined, // 전체 (KQ, HDD, AUTOWAY, HMGBOARD)
+        targetProjects: undefined, // 전체 (KQ, AUTOWAY, MEMBERSHIP)
         chunkSize: 15,
       });
 

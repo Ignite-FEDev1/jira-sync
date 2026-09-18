@@ -23,11 +23,16 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { RefreshCw, User, Plus, ExternalLink, LogOut, Sparkles } from 'lucide-react';
-import { toast } from 'sonner';
 import {
-  JIRA_ENDPOINTS,
-} from '@/lib/constants/jira';
+  RefreshCw,
+  User,
+  Plus,
+  ExternalLink,
+  LogOut,
+  Sparkles,
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
 import { useCurrentUser, type AppUser } from '@/contexts/user-context';
 import {
   SyncOrchestrator,
@@ -77,7 +82,6 @@ export default function Home() {
   const { currentUser, setCurrentUser } = useCurrentUser();
   const router = useRouter();
 
-
   const selectedUser = currentUser?.name ?? '';
   const sourceProject = currentUser?.sourceProject || 'FEHG';
   const [syncType, setSyncType] = useState<string>('전체'); // 기본값: 전체
@@ -94,7 +98,14 @@ export default function Home() {
   const [syncSummary, setSyncSummary] = useState<SyncSummary | null>(null);
 
   // 팀 사용자 목록 (DB 조회)
-  const [teamUsers, setTeamUsers] = useState<{ name: string; igniteAccountId: string; hmgAccountId: string; hmgUserId: string }[]>([]);
+  const [teamUsers, setTeamUsers] = useState<
+    {
+      name: string;
+      igniteAccountId: string;
+      hmgAccountId: string;
+      hmgUserId: string;
+    }[]
+  >([]);
 
   // 팀 동기화 대상 (DB 기반)
   interface TeamSyncTarget {
@@ -117,20 +128,31 @@ export default function Home() {
     // 사용자 목록 조회 (API route 경유 — users 테이블은 anon RLS 차단됨)
     fetch('/api/users')
       .then((r) => r.json())
-      .then((res: { success: boolean; data?: Array<{ name: string; teamId: string; igniteAccountId: string; hmgAccountId: string; hmgUserId: string }> }) => {
-        if (res.success && res.data) {
-          setTeamUsers(
-            res.data
-              .filter((u) => u.teamId === currentUser.teamId)
-              .map((u) => ({
-                name: u.name,
-                igniteAccountId: u.igniteAccountId || '',
-                hmgAccountId: u.hmgAccountId || '',
-                hmgUserId: u.hmgUserId || '',
-              }))
-          );
+      .then(
+        (res: {
+          success: boolean;
+          data?: Array<{
+            name: string;
+            teamId: string;
+            igniteAccountId: string;
+            hmgAccountId: string;
+            hmgUserId: string;
+          }>;
+        }) => {
+          if (res.success && res.data) {
+            setTeamUsers(
+              res.data
+                .filter((u) => u.teamId === currentUser.teamId)
+                .map((u) => ({
+                  name: u.name,
+                  igniteAccountId: u.igniteAccountId || '',
+                  hmgAccountId: u.hmgAccountId || '',
+                  hmgUserId: u.hmgUserId || '',
+                }))
+            );
+          }
         }
-      });
+      );
 
     // 팀 동기화 대상 + 필드 매핑 조회
     const loadTeamTargets = async () => {
@@ -144,9 +166,7 @@ export default function Home() {
       if (!teamData?.source_project_id) return;
 
       // 프로젝트 이름 맵
-      const { data: projects } = await db
-        .from('projects')
-        .select('id, name');
+      const { data: projects } = await db.from('projects').select('id, name');
       const projectMap = new Map(projects?.map((p) => [p.id, p.name]) || []);
 
       // 팀 대상 프로젝트 + sync_profile 조회
@@ -171,7 +191,8 @@ export default function Home() {
         profiles?.forEach((p) => profileMap.set(p.id, p.name));
       }
 
-      const sourceProjectName = projectMap.get(teamData.source_project_id) || '?';
+      const sourceProjectName =
+        projectMap.get(teamData.source_project_id) || '?';
 
       setTeamSyncTargets(
         targets
@@ -285,7 +306,9 @@ export default function Home() {
   const handleSync = async () => {
     // 사용자 선택 검증
     if (!currentUser) {
-      toast.error('사용자가 선택되지 않았습니다. 홈에서 사용자를 선택해주세요.');
+      toast.error(
+        '사용자가 선택되지 않았습니다. 홈에서 사용자를 선택해주세요.'
+      );
       return;
     }
 
@@ -298,7 +321,11 @@ export default function Home() {
     // 티켓/에픽 지정 모드일 때 추가 검증
     if (isSpecificMode) {
       if (!epicOrTicketId) {
-        toast.error(syncType === '에픽 지정' ? '에픽을 선택해주세요.' : '티켓 번호를 입력해주세요.');
+        toast.error(
+          syncType === '에픽 지정'
+            ? '에픽을 선택해주세요.'
+            : '티켓 번호를 입력해주세요.'
+        );
         return;
       }
     }
@@ -313,7 +340,9 @@ export default function Home() {
         const usersRes = await fetch('/api/users');
         const usersJson = await usersRes.json();
         if (usersJson.success && Array.isArray(usersJson.data)) {
-          const freshUser = usersJson.data.find((u: AppUser) => u.id === currentUser.id);
+          const freshUser = usersJson.data.find(
+            (u: AppUser) => u.id === currentUser.id
+          );
           if (freshUser?.sourceProject) {
             freshSourceProject = freshUser.sourceProject;
             // currentUser도 갱신
@@ -335,12 +364,16 @@ export default function Home() {
       if (syncType === '전체') {
         // DB 기반 전체 동기화: 팀의 모든 대상 프로젝트를 순회
         if (teamSyncTargets.length === 0) {
-          toast.error('동기화 대상이 아직 로드되지 않았습니다. 잠시 후 다시 시도해주세요.');
+          toast.error(
+            '동기화 대상이 아직 로드되지 않았습니다. 잠시 후 다시 시도해주세요.'
+          );
           setIsSyncing(false);
           return;
         }
         syncLabel = '전체 (팀 설정 기반)';
-        toast.success(`${selectedUser} 담당자 - "${syncLabel}" 동기화를 시작합니다.`);
+        toast.success(
+          `${selectedUser} 담당자 - "${syncLabel}" 동기화를 시작합니다.`
+        );
 
         let totalSuccess = 0;
         let totalFailed = 0;
@@ -392,7 +425,9 @@ export default function Home() {
         if (totalFailed === 0) {
           toast.success(`전체 동기화 완료! 총 ${totalSuccess}개 티켓 처리`);
         } else {
-          toast.warning(`전체 동기화 완료 (성공: ${totalSuccess}, 실패: ${totalFailed})`);
+          toast.warning(
+            `전체 동기화 완료 (성공: ${totalSuccess}, 실패: ${totalFailed})`
+          );
         }
         setIsSyncing(false);
         return;
@@ -453,7 +488,7 @@ export default function Home() {
     }
   };
 
-  // 에픽 동기화 핸들러 — FEHG의 [GW]/[HB] 에픽들을 AUTOWAY/HMGBOARD로
+  // 에픽 동기화 핸들러 — FEHG의 [GW]/[HM] 에픽들을 AUTOWAY/MEMBERSHIP으로
   // 매칭 또는 생성하고 상태를 동기화 (자식 티켓 sync와 독립)
   const handleEpicSync = async () => {
     if (epicSyncMode === 'single' && !epicSyncId) {
@@ -475,12 +510,12 @@ export default function Home() {
 
       const modeLabel =
         epicSyncMode === 'all'
-          ? '전체 (AUTOWAY + HMGBOARD)'
+          ? '전체 (AUTOWAY + MEMBERSHIP)'
           : epicSyncMode === 'autoway'
-            ? 'AUTOWAY'
-            : epicSyncMode === 'hmgboard'
-              ? 'HMGBOARD'
-              : `단일 에픽 (${epicKey})`;
+          ? 'AUTOWAY'
+          : epicSyncMode === 'membership'
+          ? 'MEMBERSHIP'
+          : `단일 에픽 (${epicKey})`;
 
       toast.success(`에픽 동기화 시작 — ${modeLabel}`);
 
@@ -494,9 +529,7 @@ export default function Home() {
       );
 
       if (summary.totalFailed === 0) {
-        toast.success(
-          `에픽 동기화 완료 — ${summary.totalSuccess}개 처리`
-        );
+        toast.success(`에픽 동기화 완료 — ${summary.totalSuccess}개 처리`);
       } else {
         toast.warning(
           `에픽 동기화 완료 (성공: ${summary.totalSuccess}, 실패: ${summary.totalFailed})`
@@ -828,7 +861,9 @@ export default function Home() {
                       className="min-w-[100px]"
                     >
                       <RefreshCw
-                        className={`mr-2 h-4 w-4 ${isSyncing ? 'animate-spin' : ''}`}
+                        className={`mr-2 h-4 w-4 ${
+                          isSyncing ? 'animate-spin' : ''
+                        }`}
                       />
                       {isSyncing ? '동기화 중...' : '동기화'}
                     </Button>
@@ -849,7 +884,8 @@ export default function Home() {
                         maxLength={10}
                       />
                       <p className="text-xs text-muted-foreground">
-                        숫자만 입력 (최대 10자) • {sourceProject}-{epicOrTicketId || 'XXX'} 형태로 조회
+                        숫자만 입력 (최대 10자) • {sourceProject}-
+                        {epicOrTicketId || 'XXX'} 형태로 조회
                       </p>
                     </div>
                   )}
@@ -890,7 +926,8 @@ export default function Home() {
                       </Select>
                       {epicOrTicketId && (
                         <p className="text-xs text-muted-foreground">
-                          {sourceProject}-{epicOrTicketId} 에픽 하위 티켓을 동기화합니다
+                          {sourceProject}-{epicOrTicketId} 에픽 하위 티켓을
+                          동기화합니다
                         </p>
                       )}
                     </div>
@@ -929,7 +966,7 @@ export default function Home() {
                       <SelectContent>
                         <SelectItem value="all">전체</SelectItem>
                         <SelectItem value="autoway">AUTOWAY</SelectItem>
-                        <SelectItem value="hmgboard">HMGBOARD</SelectItem>
+                        <SelectItem value="membership">MEMBERSHIP</SelectItem>
                         <SelectItem value="single">에픽 번호 입력</SelectItem>
                       </SelectContent>
                     </Select>
@@ -939,7 +976,9 @@ export default function Home() {
                       className="min-w-[100px]"
                     >
                       <RefreshCw
-                        className={`mr-2 h-4 w-4 ${isEpicSyncing ? 'animate-spin' : ''}`}
+                        className={`mr-2 h-4 w-4 ${
+                          isEpicSyncing ? 'animate-spin' : ''
+                        }`}
                       />
                       {isEpicSyncing ? '동기화 중...' : '동기화'}
                     </Button>
@@ -961,17 +1000,17 @@ export default function Home() {
                         maxLength={10}
                       />
                       <p className="text-xs text-muted-foreground">
-                        [GW]/[HB] prefix로 대상 자동 결정 • {sourceProject}-
-                        {epicSyncId || 'XXX'}
+                        [GW]/[HM] prefix로 대상 자동 결정 • {sourceProject}
+                        -{epicSyncId || 'XXX'}
                       </p>
                     </div>
                   )}
 
                   <p className="text-xs text-muted-foreground">
-                    FEHG의 [GW]/[HB] 에픽을 AUTOWAY/HMGBOARD로 매칭/생성하고 상태를 동기화합니다.
+                    FEHG의 [GW]/[HM] 에픽을 AUTOWAY/MEMBERSHIP으로
+                    매칭/생성하고 상태를 동기화합니다.
                   </p>
                 </div>
-
               </div>
 
               {/* @deprecated 정적 분석 - 관리자 페이지로 이전 예정 */}
@@ -1037,10 +1076,7 @@ export default function Home() {
                                 <div className="flex items-start justify-between gap-3">
                                   <div>
                                     <div className="font-semibold">
-                                      Black Duck ·{' '}
-                                      {projectKey === 'hmg-board'
-                                        ? 'HB'
-                                        : projectKey}
+                                      Black Duck · {projectKey}
                                     </div>
                                     <div className="text-xs text-muted-foreground">
                                       {blackduck.project?.name ?? '-'} ·{' '}
@@ -1143,10 +1179,7 @@ export default function Home() {
                                 <div className="flex items-start justify-between gap-3">
                                   <div>
                                     <div className="font-semibold">
-                                      SonarQube ·{' '}
-                                      {projectKey === 'hmg-board'
-                                        ? 'HB'
-                                        : projectKey}
+                                      SonarQube · {projectKey}
                                     </div>
                                     <div className="text-xs text-muted-foreground">
                                       {sonarqube.projectKey}
@@ -1219,8 +1252,7 @@ export default function Home() {
                     </>
                   )} */}
 
-                  {syncLogs.length === 0 &&
-                  !isSyncing ? (
+                  {syncLogs.length === 0 && !isSyncing ? (
                     <>
                       <div className="text-muted-foreground">
                         <span className="text-green-500">[00:00:00]</span>{' '}
@@ -1247,10 +1279,10 @@ export default function Home() {
                             log.level === 'success'
                               ? 'text-green-600'
                               : log.level === 'error'
-                                ? 'text-red-600'
-                                : log.level === 'warning'
-                                  ? 'text-yellow-600'
-                                  : 'text-blue-600'
+                              ? 'text-red-600'
+                              : log.level === 'warning'
+                              ? 'text-yellow-600'
+                              : 'text-blue-600'
                           }`}
                         >
                           <span className="text-muted-foreground">
@@ -1261,7 +1293,6 @@ export default function Home() {
                           </span>
                         </div>
                       ))}
-
                     </>
                   )}
                 </div>
@@ -1274,16 +1305,26 @@ export default function Home() {
                     </div>
                     <div className="mb-4 p-4 bg-muted/30 rounded-lg border border-muted space-y-1">
                       <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">필드 동기화</span>
-                        <span className="font-bold text-base">{syncSummary.totalUpdated}개</span>
+                        <span className="text-muted-foreground">
+                          필드 동기화
+                        </span>
+                        <span className="font-bold text-base">
+                          {syncSummary.totalUpdated}개
+                        </span>
                       </div>
                       <div className="flex items-center justify-between">
                         <span className="text-muted-foreground">신규 생성</span>
-                        <span className="font-bold text-base text-green-600">{syncSummary.totalCreated}개</span>
+                        <span className="font-bold text-base text-green-600">
+                          {syncSummary.totalCreated}개
+                        </span>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span className="text-muted-foreground">동기화 실패</span>
-                        <span className="font-bold text-base text-red-600">{syncSummary.totalFailed}개</span>
+                        <span className="text-muted-foreground">
+                          동기화 실패
+                        </span>
+                        <span className="font-bold text-base text-red-600">
+                          {syncSummary.totalFailed}개
+                        </span>
                       </div>
                     </div>
                     <div className="text-muted-foreground mb-2 font-semibold">
@@ -1292,7 +1333,11 @@ export default function Home() {
                     <div className="space-y-1">
                       {syncSummary.results.map((result, idx) => (
                         <div key={idx} className="flex items-center gap-2">
-                          <span className={result.success ? 'text-green-600' : 'text-red-600'}>
+                          <span
+                            className={
+                              result.success ? 'text-green-600' : 'text-red-600'
+                            }
+                          >
                             {result.success ? '✓' : '✗'}
                           </span>
                           <a
@@ -1310,7 +1355,6 @@ export default function Home() {
                               <a
                                 href={`${
                                   result.targetProject === 'AUTOWAY' ||
-                                  result.targetProject === 'HMGBOARD' ||
                                   result.targetProject === 'MEMBERSHIP'
                                     ? JIRA_ENDPOINTS.HMG
                                     : JIRA_ENDPOINTS.IGNITE
@@ -1332,7 +1376,9 @@ export default function Home() {
                             <span className="text-red-600">생성 실패</span>
                           )}
                           {result.error && (
-                            <span className="text-xs text-red-500">({result.error})</span>
+                            <span className="text-xs text-red-500">
+                              ({result.error})
+                            </span>
                           )}
                         </div>
                       ))}

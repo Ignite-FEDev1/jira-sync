@@ -70,17 +70,13 @@ flowchart TD
     CreateOrch --> Execute[orchestrator.execute]
     
     Execute --> InitCache[스프린트 캐시 초기화]
-    InitCache --> DetermineProj[대상 프로젝트 결정<br/>→ KQ, HDD, HB, AUTOWAY]
-    
+    InitCache --> DetermineProj[대상 프로젝트 결정<br/>→ KQ, AUTOWAY]
+
     DetermineProj --> PreloadSprint{스프린트 프리로드}
-    
+
     PreloadSprint -.병렬.-> LoadKQ[KQ 스프린트 조회]
-    PreloadSprint -.병렬.-> LoadHDD[HDD 스프린트 조회]
-    PreloadSprint -.병렬.-> LoadHB[HB 스프린트 조회]
-    
+
     LoadKQ --> SprintDone[프리로드 완료]
-    LoadHDD --> SprintDone
-    LoadHB --> SprintDone
     
     SprintDone --> FetchFEHG[FEHG 티켓 조회<br/>JQL: project = FEHG AND assignee = ...]
     
@@ -95,10 +91,8 @@ flowchart TD
     ClassifyResult --> ProjectSync[프로젝트별 순차 동기화]
     
     ProjectSync --> SyncKQ[KQ 동기화<br/>청크 단위 병렬 처리]
-    SyncKQ --> SyncHDD[HDD 동기화<br/>청크 단위 병렬 처리]
-    SyncHDD --> SyncHB[HB 동기화<br/>청크 단위 병렬 처리]
-    SyncHB --> SyncAW[AUTOWAY 동기화<br/>청크 단위 병렬 처리]
-    
+    SyncKQ --> SyncAW[AUTOWAY 동기화<br/>청크 단위 병렬 처리]
+
     SyncAW --> AllComplete[모든 프로젝트 완료]
     AllComplete --> Summary[결과 요약 생성]
     
@@ -116,16 +110,14 @@ flowchart TD
     style PreloadSprint fill:#ec4899,color:#fff
     style ProjectSync fill:#8b5cf6,color:#fff
     style SyncKQ fill:#ec4899,color:#fff
-    style SyncHDD fill:#ec4899,color:#fff
-    style SyncHB fill:#ec4899,color:#fff
     style SyncAW fill:#ec4899,color:#fff
     style Summary fill:#10b981,color:#fff
 `,
     },
     {
       id: 2,
-      title: '2-1. Ignite 프로젝트 동기화 (KQ/HB/HDD)',
-      description: 'FEHG → KQ/HB/HDD 동기화 상세 플로우',
+      title: '2-1. Ignite 프로젝트 동기화 (KQ)',
+      description: 'FEHG → KQ 동기화 상세 플로우',
       diagram: `
 flowchart TD
     Start([담당자 선택<br/>예: 박성진])
@@ -161,7 +153,7 @@ flowchart TD
     FindSprint --> SprintID[스프린트 ID 반환]
     
     SprintID --> UpdateFields[jira.ignite.updateIssueFields<br/>PUT /rest/api/3/issue/KQ-XXX]
-    UpdateFields --> StatusSync[상태 동기화<br/>HDD는 스킵]
+    UpdateFields --> StatusSync[상태 동기화]
     
     StatusSync --> MapStatus[STATUS_MAPPING.IGNITE<br/>fehgStatusId to transitionId]
     MapStatus --> Transition[jira.ignite.updateIssueStatus<br/>POST /rest/api/3/issue/KQ-XXX/transitions]
@@ -462,7 +454,7 @@ flowchart TD
                       </h4>
                       <ul className="text-sm text-blue-800 space-y-1">
                         <li>
-                          • <strong>스프린트 프리로드</strong>: KQ, HDD, HB의
+                          • <strong>스프린트 프리로드</strong>: KQ의
                           스프린트 정보를 동시에 조회
                         </li>
                         <li>
@@ -570,7 +562,7 @@ flowchart TD
                       <ul className="text-sm text-green-800 space-y-1">
                         <li>• STATUS_MAPPING.IGNITE로 transitionId 조회</li>
                         <li>• POST /rest/api/3/issue/KQ-XXX/transitions</li>
-                        <li>• HDD 프로젝트는 권한 문제로 상태 동기화 스킵</li>
+                        <li>• KQ Verify in QA 상태는 동기화 스킵</li>
                       </ul>
                     </div>
                   </>
@@ -657,12 +649,12 @@ flowchart TD
                           ALLOWED_FEHG_TO_HMG_EPIC_IDS에 있으면 AUTOWAY만 동기화
                         </li>
                         <li>
-                          • <strong>Summary 분석</strong>: 에픽 제목에 [KQ],
-                          [HB], [HDD] 포함 여부로 대상 결정
+                          • <strong>Summary 분석</strong>: 에픽 제목에 [KQ]
+                          포함 여부로 대상 결정
                         </li>
                         <li>
-                          • <strong>자동 판단</strong>: prefix 없으면 KQ, HB,
-                          HDD 모두 동기화
+                          • <strong>자동 판단</strong>: prefix 없으면 KQ
+                          동기화
                         </li>
                       </ul>
                     </div>
@@ -707,7 +699,7 @@ flowchart TD
                       <ul className="text-sm text-cyan-800 space-y-1">
                         <li>
                           • <strong>1단계</strong>: issuelinks에서 Blocks 관계
-                          확인 (KQ/HB/HDD)
+                          확인 (KQ)
                         </li>
                         <li>
                           • <strong>2단계</strong>: customfield_10306에 AUTOWAY

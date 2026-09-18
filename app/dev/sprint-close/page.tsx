@@ -19,8 +19,8 @@ const JIRA_BASE = 'https://ignitecorp.atlassian.net/browse';
 const HMG_JIRA_BASE = 'https://hmg.atlassian.net/browse';
 const JIRA_AUTOMATION_URL =
   'https://ignitecorp.atlassian.net/jira/software/projects/FEHG/settings/automate';
-const TICKET_KEY_REGEX = /\b(FEHG|KQ|AUTOWAY|HMGBOARD)-\d+\b/g;
-const HMG_PROJECTS = new Set(['AUTOWAY', 'HMGBOARD']);
+const TICKET_KEY_REGEX = /\b(FEHG|KQ|AUTOWAY)-\d+\b/g;
+const HMG_PROJECTS = new Set(['AUTOWAY']);
 const RECENT_STORAGE_KEY = 'sprint-close-dev-recent';
 const RECENT_LIMIT = 5;
 
@@ -32,7 +32,7 @@ interface ApiResult {
   error?: string;
 }
 
-type EpicTag = 'GW' | 'GW-QA지원' | 'CPO' | 'HB' | 'other' | 'none';
+type EpicTag = 'GW' | 'GW-QA지원' | 'CPO' | 'other' | 'none';
 
 interface TicketInfo {
   key: string;
@@ -289,12 +289,6 @@ const EPIC_STYLE: Record<
     color: 'text-amber-800',
     label: '[CPO]',
     hint: 'CPO 자동화 규칙 대상',
-  },
-  HB: {
-    bg: 'bg-teal-100',
-    color: 'text-teal-800',
-    label: '[HB]',
-    hint: 'HMGBOARD 이관 대상',
   },
   other: {
     bg: 'bg-slate-100',

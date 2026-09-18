@@ -31,7 +31,7 @@ import { useAppUsers } from '@/lib/hooks/use-app-users';
 
 type TabType = 'document' | 'tagging';
 type DeploymentType = 'release' | 'adhoc' | 'hotfix';
-type ProjectKey = 'groupware' | 'hmg-board' | 'cpo';
+type ProjectKey = 'groupware' | 'cpo';
 
 const DEPLOYMENT_TYPE_LABELS: Record<DeploymentType, string> = {
   release: '정기배포',
@@ -497,9 +497,6 @@ export default function DeploymentPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="groupware">Groupware (GW)</SelectItem>
-                    <SelectItem value="hmg-board" disabled>
-                      HMG Board (HB)
-                    </SelectItem>
                     <SelectItem value="cpo" disabled>
                       CPO
                     </SelectItem>
@@ -771,7 +768,6 @@ export default function DeploymentPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="groupware">Groupware (GW)</SelectItem>
-                    <SelectItem value="hmg-board">HMG Board (HB)</SelectItem>
                     <SelectItem value="cpo" disabled>
                       CPO
                     </SelectItem>

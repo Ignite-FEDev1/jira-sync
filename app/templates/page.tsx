@@ -403,8 +403,6 @@ function generateTemplate(formData: DeployFormData): string {
       return generateCPOTemplate(formData, deployDisplay);
     case 'groupware':
       return generateGroupwareTemplate(formData, deployDisplay);
-    case 'hmg-board':
-      return generateHMGBoardTemplate(formData, deployDisplay);
     default:
       return '';
   }
@@ -440,26 +438,6 @@ function generateGroupwareTemplate(
   const { deployDocLink, mrLinks } = formData;
 
   return `🚀 그룹웨어 ${deployDisplay.title}
-1. 배포대장 및 배포 전 할 일 확인 (${deployDocLink})
-2. feature -> ${deployDisplay.branch} 머지 확인
-   • ${mrLinks.main ?? ''}
-3. ${deployDisplay.branch} -> main 머지
-4. main 로컬 구동 모니터링
-5. 배포 태그 발행
-6. 배포 후 운영계 모니터링
-7. 배포 후 할 일 확인
-8. main -> stage, dev 현행화
-9. 배포 완료`;
-}
-
-// HMG Board 템플릿 생성
-function generateHMGBoardTemplate(
-  formData: DeployFormData,
-  deployDisplay: { title: string; branch: string }
-): string {
-  const { deployDocLink, mrLinks } = formData;
-
-  return `🚀 HMG Board ${deployDisplay.title}
 1. 배포대장 및 배포 전 할 일 확인 (${deployDocLink})
 2. feature -> ${deployDisplay.branch} 머지 확인
    • ${mrLinks.main ?? ''}

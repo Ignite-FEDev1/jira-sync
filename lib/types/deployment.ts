@@ -17,7 +17,7 @@ export const DEPLOYMENT_TYPE_LABELS: Record<DeploymentType, string> = {
 /**
  * 프로젝트 키 (배포 대상)
  */
-export type ProjectKey = 'groupware' | 'hmg-board' | 'cpo';
+export type ProjectKey = 'groupware' | 'cpo';
 
 /**
  * 배포 태그 적용 요청
@@ -68,7 +68,6 @@ export interface MyTicketsResponse {
  */
 export const PROJECT_TO_JIRA_KEY: Record<ProjectKey, string> = {
   groupware: 'AUTOWAY',
-  'hmg-board': 'HB',
   cpo: 'KQ',
 } as const;
 
@@ -77,6 +76,5 @@ export const PROJECT_TO_JIRA_KEY: Record<ProjectKey, string> = {
  */
 export const PROJECT_DISPLAY_NAMES: Record<ProjectKey, string> = {
   groupware: 'Groupware (GW)',
-  'hmg-board': 'HMG Board (HB)',
   cpo: 'CPO',
 } as const;

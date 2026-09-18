@@ -9,7 +9,6 @@ import type {
 export const PROJECT_OPTIONS: ProjectOption[] = [
   { value: 'cpo', label: 'CPO' },
   { value: 'groupware', label: '그룹웨어' },
-  { value: 'hmg-board', label: 'HMG Board' },
 ];
 
 // 배포 종류 옵션 목록
@@ -52,13 +51,6 @@ export const MR_FIELDS_BY_PROJECT: Record<ProjectType, MRFieldConfig[]> = {
     },
   ],
   groupware: [
-    {
-      id: 'main',
-      label: 'MR 링크',
-      placeholder: 'https://gitlab.hmc.co.kr/.../merge_requests/...',
-    },
-  ],
-  'hmg-board': [
     {
       id: 'main',
       label: 'MR 링크',

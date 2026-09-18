@@ -126,11 +126,10 @@ function convertToFullYearMonth(period: string): string {
 
 /**
  * 프로젝트 키 → 스프린트 이름 prefix
- * - HMGBOARD: 'HB' 접두사 (예: "HB 202604")  ← 옛 Ignite HB 이관
- * - AUTOWAY:  'GW' 접두사 (예: "GW 202605")  ← 그룹웨어
+ * - AUTOWAY:    'GW' 접두사 (예: "GW 202605")  ← 그룹웨어
+ * - MEMBERSHIP: 'HM' 접두사
  */
 function getSprintNamePrefix(projectKey: string): string {
-  if (projectKey === 'HMGBOARD') return 'HB';
   if (projectKey === 'AUTOWAY') return 'GW';
   if (projectKey === 'MEMBERSHIP') return 'HM';
   return projectKey;
@@ -138,7 +137,7 @@ function getSprintNamePrefix(projectKey: string): string {
 
 /**
  * 대상 프로젝트의 스프린트 이름 생성
- * 예: "HB", "202511" → "HB 202511"
+ * 예: "GW", "202511" → "GW 202511"
  */
 function buildTargetSprintName(projectKey: string, yearMonth: string): string {
   return `${getSprintNamePrefix(projectKey)} ${yearMonth}`;
@@ -149,7 +148,7 @@ function buildTargetSprintName(projectKey: string, yearMonth: string): string {
  */
 export async function mapSprintToTarget(
   fehgSprintName: string | null,
-  targetProject: 'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY' | 'MEMBERSHIP'
+  targetProject: 'KQ' | 'AUTOWAY' | 'MEMBERSHIP'
 ): Promise<number | null> {
   if (!fehgSprintName) return null;
 
@@ -191,7 +190,7 @@ export function initSprintCache() {
  * 스프린트 캐시 프리로드 (선택적)
  */
 export async function preloadSprintCache(
-  projects: Array<'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY' | 'MEMBERSHIP'>
+  projects: Array<'KQ' | 'AUTOWAY' | 'MEMBERSHIP'>
 ): Promise<void> {
   const infos = await Promise.all(projects.map((p) => getBoardInfo(p)));
   await Promise.all(

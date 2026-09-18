@@ -200,7 +200,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1-b. 원본의 짝꿍(AUTOWAY/HMGBOARD · KQ)도 완료에 맞춰 종료
+    // 1-b. 원본의 짝꿍(AUTOWAY · KQ)도 완료에 맞춰 종료
     // 데일리 싱크가 마감일 1개월 조건 때문에 놓치는 티켓을 여기서 메운다.
     const sourceCounterparts =
       (await phase('close-source-counterparts', () =>

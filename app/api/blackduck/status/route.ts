@@ -115,8 +115,7 @@ function getApiTokenAuthHeader(projectKey: string | null): string | null {
   const apiToken =
     normalizedProjectKey === 'cpo'
       ? cpoToken
-      : normalizedProjectKey === 'hmg-board' ||
-          normalizedProjectKey === 'groupware'
+      : normalizedProjectKey === 'groupware'
         ? hbGroupwareToken
         : defaultToken;
   if (!apiToken) return null;

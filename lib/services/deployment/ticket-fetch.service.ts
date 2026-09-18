@@ -15,7 +15,7 @@ const httpsAgent = new https.Agent({
 
 export interface FetchDeploymentTicketsRequest {
   /** 프로젝트 키 */
-  project: 'groupware' | 'hmg-board' | 'cpo';
+  project: 'groupware' | 'cpo';
   /** 사용자 이름 */
   userName: string;
   /** 기준 월 (YYYY-MM 형식) */
@@ -41,7 +41,6 @@ export interface FetchDeploymentTicketsResponse {
  */
 const PROJECT_TO_JIRA_KEY: Record<string, string> = {
   groupware: 'AUTOWAY',
-  'hmg-board': 'HMGBOARD',
   cpo: 'KQ',
 } as const;
 

@@ -112,7 +112,7 @@ fe1-web/
 
 ## 📚 주요 기능
 
-- ✅ FEHG → KQ/HB/HDD/AUTOWAY 자동 동기화
+- ✅ FEHG → KQ/AUTOWAY/MEMBERSHIP 자동 동기화
 - ✅ 에픽/티켓 지정 모드
 - ✅ 스프린트 자동 매핑
 - ✅ 실시간 로그 및 결과 표시

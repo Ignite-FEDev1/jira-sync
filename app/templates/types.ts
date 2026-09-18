@@ -1,5 +1,5 @@
 // 프로젝트 타입
-export type ProjectType = 'cpo' | 'groupware' | 'hmg-board';
+export type ProjectType = 'cpo' | 'groupware';
 
 // 배포 종류 타입
 export type DeployType = 'release' | 'adhoc' | 'hotfix';

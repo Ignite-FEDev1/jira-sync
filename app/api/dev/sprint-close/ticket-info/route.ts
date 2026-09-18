@@ -70,12 +70,11 @@ export async function GET(req: NextRequest) {
       | { key: string; fields?: { summary?: string } }
       | undefined;
     const parentSummary = parent?.fields?.summary ?? '';
-    let epicTag: 'GW' | 'GW-QA지원' | 'CPO' | 'HB' | 'other' | 'none' = 'none';
+    let epicTag: 'GW' | 'GW-QA지원' | 'CPO' | 'other' | 'none' = 'none';
     if (parent) {
       if (parentSummary.startsWith('[GW-QA지원]')) epicTag = 'GW-QA지원';
       else if (parentSummary.startsWith('[GW]')) epicTag = 'GW';
       else if (parentSummary.startsWith('[CPO]')) epicTag = 'CPO';
-      else if (parentSummary.startsWith('[HB]')) epicTag = 'HB';
       else epicTag = 'other';
     }
 

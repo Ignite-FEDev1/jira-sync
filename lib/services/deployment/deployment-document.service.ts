@@ -15,7 +15,7 @@ const httpsAgent = new https.Agent({
 });
 
 export type DeploymentType = 'release' | 'adhoc' | 'hotfix';
-export type ProjectKey = 'groupware' | 'hmg-board' | 'cpo';
+export type ProjectKey = 'groupware' | 'cpo';
 
 /**
  * JQL fixVersion 조건을 변환

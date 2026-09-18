@@ -137,7 +137,7 @@ export async function POST(req: NextRequest) {
           actions.push(`${originalKey}: 상태 되돌리기 실패 — ${r.error}`);
         }
 
-        // 3. 원본의 짝꿍(AUTOWAY/HMGBOARD · KQ)도 같이 되돌린다.
+        // 3. 원본의 짝꿍(AUTOWAY · KQ)도 같이 되돌린다.
         // 마감 실행이 짝꿍을 종료시켰으니, 되돌릴 때도 같이 돌려놔야 대칭이 맞는다.
         log.step('원본 짝꿍 상태 되돌리기');
         const originalFields = await ignite.get<{
