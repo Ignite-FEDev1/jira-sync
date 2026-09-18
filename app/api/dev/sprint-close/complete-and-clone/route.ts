@@ -32,6 +32,7 @@ import {
   syncCounterpartStatuses,
   findLinkedKqKey,
 } from '@/lib/services/sprint-close/counterpart-status';
+import { buildCloneSummary } from '@/lib/services/sprint-close/existing-clone';
 import { createRunLogger, RunStatus } from '@/lib/services/sprint-close/run-log';
 
 export async function POST(req: NextRequest) {
@@ -232,7 +233,8 @@ export async function POST(req: NextRequest) {
     const hasKqLink = originalLinks.some(
       (l) => l.type?.name === 'Blocks' && l.outwardIssue?.key.startsWith('KQ-')
     );
-    const cloneSummary = `${original.summary} - ${nextMonthLabel}`;
+    // 기존 "- N월" 접미사를 걷어내고 붙인다 ("- 8월 - 9월" 방지)
+    const cloneSummary = buildCloneSummary(original.summary, nextMonthLabel);
     const newFields: Record<string, unknown> = {
       project: { key: 'FEHG' },
       summary: cloneSummary,

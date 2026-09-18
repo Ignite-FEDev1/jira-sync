@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>설정 화면은 왜 삐뚤어 보이나</title>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html { color-scheme: light dark; -webkit-text-size-adjust: 100%; }
+  body, h1, h2, h3, p, ul, figure { margin: 0; }
+  ul { padding: 0; list-style: none; }
+  button { font: inherit; color: inherit; }
+  table { border-collapse: collapse; width: 100%; }
+
+  :root {
+    --paper:#FCFBF9; --surface:#FFFFFF; --sunken:#F4F2ED;
+    --ink:#1B1F26; --ink-soft:#5B6472; --ink-faint:#9AA3B0;
+    --line:#E3E0D9; --line-soft:#EFEDE8;
+    --rule:#2F6F8F;          /* 기준선 · 청록 계열 */
+    --rule-wash:rgba(47,111,143,.10);
+    --off:#C8562F;           /* 어긋남 · 테라코타 */
+    --off-wash:rgba(200,86,47,.10);
+    --ok:#3E7A5E;
+    --shadow:0 1px 2px rgba(27,31,38,.05), 0 8px 24px rgba(27,31,38,.06);
+    --sans:'Apple SD Gothic Neo', Pretendard, -apple-system, BlinkMacSystemFont,'Segoe UI','Malgun Gothic',Roboto,sans-serif;
+    --mono:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper:#14171C; --surface:#1C2027; --sunken:#191D23;
+      --ink:#E9EBEE; --ink-soft:#98A1AE; --ink-faint:#646D7B;
+      --line:#2A3038; --line-soft:#222831;
+      --rule:#6FA8C4; --rule-wash:rgba(111,168,196,.14);
+      --off:#E08359; --off-wash:rgba(224,131,89,.14);
+      --ok:#5DA37F;
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.3); }
+  }
+  :root[data-theme="dark"] { --paper:#14171C; --surface:#1C2027; --sunken:#191D23;
+    --ink:#E9EBEE; --ink-soft:#98A1AE; --ink-faint:#646D7B;
+    --line:#2A3038; --line-soft:#222831;
+    --rule:#6FA8C4; --rule-wash:rgba(111,168,196,.14);
+    --off:#E08359; --off-wash:rgba(224,131,89,.14);
+    --ok:#5DA37F;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.3); }
+  :root[data-theme="light"] { --paper:#FCFBF9; --surface:#FFFFFF; --sunken:#F4F2ED;
+    --ink:#1B1F26; --ink-soft:#5B6472; --ink-faint:#9AA3B0;
+    --line:#E3E0D9; --line-soft:#EFEDE8;
+    --rule:#2F6F8F; --rule-wash:rgba(47,111,143,.10);
+    --off:#C8562F; --off-wash:rgba(200,86,47,.10);
+    --ok:#3E7A5E;
+    --shadow:0 1px 2px rgba(27,31,38,.05), 0 8px 24px rgba(27,31,38,.06); }
+
+  body { background:var(--paper); color:var(--ink); font-family:var(--sans);
+         font-size:17px; line-height:1.75; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:960px; margin:0 auto;
+          padding:clamp(2.5rem,7vw,5rem) clamp(1.1rem,5vw,2.5rem) 6rem;
+          display:flex; flex-direction:column; gap:clamp(3rem,8vw,5rem); }
+
+  .label { font-family:var(--mono); font-size:.7rem; letter-spacing:.16em;
+           text-transform:uppercase; color:var(--ink-faint); }
+  h1 { font-size:clamp(2.1rem,7vw,3.6rem); font-weight:800; letter-spacing:-.035em;
+       line-height:1.12; text-wrap:balance; margin-top:.5rem; }
+  h2 { font-size:clamp(1.4rem,4vw,2rem); font-weight:700; letter-spacing:-.025em;
+       line-height:1.28; text-wrap:balance; }
+  .lead { font-size:clamp(1.02rem,2.4vw,1.24rem); color:var(--ink-soft); max-width:36ch; }
+  p { max-width:62ch; text-wrap:pretty; }
+  .muted { color:var(--ink-soft); }
+  .num { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  section { display:flex; flex-direction:column; gap:1.4rem; }
+  .head { display:flex; flex-direction:column; gap:.5rem; }
+  hr { border:0; border-top:1px solid var(--line); }
+
+  /* ── 화면 모형 ── */
+  .screen { border:1px solid var(--line); border-radius:6px; background:var(--surface);
+            box-shadow:var(--shadow); overflow:hidden; }
+  .screen-cap { display:flex; align-items:baseline; justify-content:space-between; gap:1rem;
+                padding:.5rem .8rem; background:var(--sunken); border-bottom:1px solid var(--line);
+                font-size:.74rem; }
+  .screen-cap b { font-weight:700; }
+  .screen-cap span { font-family:var(--mono); font-size:.68rem; color:var(--ink-faint); }
+  .stage { position:relative; padding:0; }
+
+  .band { display:flex; align-items:center; height:38px; border-bottom:1px solid var(--line-soft);
+          font-size:.72rem; position:relative; }
+  .band .inner { display:flex; align-items:center; gap:.5rem; height:100%;
+                 background:var(--rule-wash); border-left:2px solid var(--rule);
+                 border-right:2px solid var(--rule); padding:0 .6rem; font-weight:600; }
+  .band .free { display:flex; align-items:center; gap:.5rem; height:100%;
+                background:var(--off-wash); border-left:2px solid var(--off);
+                border-right:2px solid var(--off); padding:0 .6rem; font-weight:600; }
+
+  .body-row { display:flex; height:120px; }
+  .side { width:26%; border-right:1px solid var(--line); background:var(--off-wash);
+          display:flex; flex-direction:column; gap:.3rem; padding:.5rem .6rem; font-size:.7rem; }
+  .side.aligned { background:var(--rule-wash); }
+  .side i { display:block; height:9px; border-radius:2px; background:var(--line); }
+  .side i:first-of-type { background:var(--ink-faint); }
+  .content { flex:1; padding:.5rem .6rem; display:flex; flex-direction:column; gap:.35rem; }
+  .content i { display:block; height:9px; border-radius:2px; background:var(--line); }
+  .card-mock { border:1px solid var(--line); border-radius:4px; padding:.45rem;
+               display:flex; flex-direction:column; gap:.3rem; }
+
+  /* 기준선 표시 */
+  .guide { position:absolute; top:0; bottom:0; width:0; border-left:1px dashed var(--rule); z-index:2; }
+  .guide.bad { border-left-color:var(--off); }
+  .gap-mark { position:absolute; top:44px; height:18px; background:var(--off-wash);
+              border-left:1px solid var(--off); border-right:1px solid var(--off);
+              display:flex; align-items:center; justify-content:center;
+              font-family:var(--mono); font-size:.62rem; color:var(--off); z-index:3; }
+
+  /* ── 수치표 ── */
+  .tbl { border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  table { font-size:.82rem; }
+  th { text-align:left; font-weight:600; font-size:.7rem; letter-spacing:.04em;
+       color:var(--ink-faint); text-transform:uppercase; padding:.5rem .7rem;
+       background:var(--sunken); border-bottom:1px solid var(--line); white-space:nowrap; }
+  td { padding:.5rem .7rem; border-bottom:1px solid var(--line-soft); }
+  tr:last-child td { border-bottom:0; }
+  td.n, th.n { font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right; }
+  .bad-n { color:var(--off); font-weight:700; }
+
+  /* ── 안 카드 ── */
+  .opts { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:1rem; }
+  .opt { border:1px solid var(--line); border-radius:6px; background:var(--surface);
+         padding:1.1rem; display:flex; flex-direction:column; gap:.55rem; }
+  .opt.pick { border-color:var(--ok); border-width:2px; }
+  .opt .tag { font-family:var(--mono); font-size:.66rem; letter-spacing:.1em;
+              text-transform:uppercase; color:var(--ink-faint); }
+  .opt.pick .tag { color:var(--ok); font-weight:700; }
+  .opt h3 { font-size:1rem; font-weight:700; letter-spacing:-.015em; }
+  .opt p { font-size:.86rem; color:var(--ink-soft); line-height:1.6; max-width:none; }
+  .opt .cost { font-family:var(--mono); font-size:.72rem; color:var(--ink-faint);
+               border-top:1px solid var(--line-soft); padding-top:.5rem; margin-top:auto; }
+
+  .note { border-left:2px solid var(--line); padding-left:.85rem;
+          display:flex; flex-direction:column; gap:.2rem; }
+  .note b { font-size:.84rem; font-weight:700; }
+  .note p { font-size:.84rem; color:var(--ink-soft); line-height:1.6; max-width:none; }
+  .notes { display:grid; grid-template-columns:repeat(auto-fit,minmax(255px,1fr)); gap:.9rem; }
+
+  .verdict { border:1px solid var(--line); border-left:4px solid var(--ok);
+             border-radius:6px; background:var(--surface); padding:1.3rem;
+             display:flex; flex-direction:column; gap:.6rem; }
+
+  code { font-family:var(--mono); font-size:.86em; background:var(--sunken);
+         padding:.08em .35em; border-radius:3px; }
+
+  .theme { position:fixed; top:1rem; right:1rem; z-index:20; background:var(--surface);
+           border:1px solid var(--line); border-radius:100px; padding:.35rem .8rem;
+           font-size:.76rem; color:var(--ink-soft); cursor:pointer; box-shadow:var(--shadow); }
+  .theme:focus-visible { outline:2px solid var(--rule); outline-offset:2px; }
+</style>
+</head>
+<body>
+
+<button class="theme" id="theme" type="button" aria-label="라이트/다크 전환">테마 전환</button>
+
+<div class="wrap">
+
+<header class="head">
+  <p class="label">설정 화면 레이아웃 · UX 진단</p>
+  <h1>제목은 가운데,<br>사이드바는 벽에</h1>
+  <p class="lead">같은 화면인데 기준선이 두 개입니다. 왜 그런지, 어떻게 맞출지.</p>
+</header>
+
+<hr>
+
+<!-- 1. 현상 -->
+<section>
+  <div class="head">
+    <p class="label">1 · 지금 보이는 것</p>
+    <h2>제목과 사이드바가 다른 선에서 시작합니다</h2>
+  </div>
+
+  <div class="screen">
+    <div class="screen-cap"><b>현재</b><span>1920px 화면</span></div>
+    <div class="stage">
+      <!-- 기준선 -->
+      <div class="guide" style="left:24.6%"></div>
+      <div class="guide bad" style="left:0"></div>
+      <div class="gap-mark" style="left:0; width:24.6%">← 472px 어긋남 →</div>
+
+      <div class="band">
+        <div style="width:24.6%"></div>
+        <div class="inner" style="flex:1; margin-right:24.6%">GNB · 동기화 · 배포방 · 설정</div>
+      </div>
+      <div class="band" style="height:52px">
+        <div style="width:24.6%"></div>
+        <div class="inner" style="flex:1; margin-right:24.6%">설정 · 팀, 사용자, 프로젝트를 관리합니다</div>
+      </div>
+      <div class="body-row">
+        <div class="side">
+          <span style="font-weight:700; color:var(--off)">사이드바</span>
+          <i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="content">
+          <div class="card-mock"><i style="width:35%"></i><i></i><i></i><i style="width:70%"></i></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p>위쪽 <b style="color:var(--rule)">파란 영역</b>은 화면 가운데 <span class="num">1024px</span> 안에 갇혀 있습니다.
+     아래 <b style="color:var(--off)">주황 영역</b>은 화면 끝까지 갑니다.
+     그래서 <b>세로로 이어져야 할 왼쪽 선이 두 군데</b>로 갈라집니다.</p>
+</section>
+
+<!-- 2. 숫자 -->
+<section>
+  <div class="head">
+    <p class="label">2 · 실측</p>
+    <h2>화면이 넓을수록 더 벌어집니다</h2>
+  </div>
+
+  <div class="tbl">
+    <table>
+      <thead>
+        <tr>
+          <th>화면 너비</th>
+          <th class="n">제목 시작</th>
+          <th class="n">사이드바 시작</th>
+          <th class="n">어긋남</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>1028px <span class="muted">(좁은 노트북)</span></td><td class="n">26</td><td class="n">0</td><td class="n">26px</td></tr>
+        <tr><td>1440px <span class="muted">(일반 노트북)</span></td><td class="n">232</td><td class="n">0</td><td class="n bad-n">232px</td></tr>
+        <tr><td>1920px <span class="muted">(외장 모니터)</span></td><td class="n">472</td><td class="n">0</td><td class="n bad-n">472px</td></tr>
+        <tr><td>2560px <span class="muted">(와이드)</span></td><td class="n">792</td><td class="n">0</td><td class="n bad-n">792px</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="muted">좁은 화면에서는 <span class="num">26px</span>이라 눈에 안 띕니다.
+     큰 모니터를 쓸수록 어긋남이 커지는 구조라, 사람마다 다르게 보입니다.</p>
+</section>
+
+<!-- 3. 원인 -->
+<section>
+  <div class="head">
+    <p class="label">3 · 왜 이렇게 됐나</p>
+    <h2>규칙이 헤더에만 적용됐습니다</h2>
+  </div>
+
+  <p>이 앱의 다른 화면(<code>홈</code>·<code>배포방</code>·<code>배포 대장</code>)은
+     <b>내용을 화면 가운데 모으는</b> 규칙을 씁니다. 설정 화면도 헤더까지는 그 규칙을 따릅니다.</p>
+  <p>그런데 <b>사이드바가 그 규칙 밖에 놓였습니다.</b> 헤더를 만들 때 규칙을 넣고,
+     그 아래 본문 영역에는 안 넣은 겁니다. 좁은 화면에서 개발하면 차이가 <span class="num">26px</span>이라
+     알아채기 어렵습니다.</p>
+
+  <div class="notes">
+    <div class="note"><b>헤더</b><p>가운데 정렬 · 최대 <span class="num">1024px</span></p></div>
+    <div class="note"><b>사이드바 + 본문</b><p>화면 전체 폭 · 제한 없음</p></div>
+    <div class="note"><b>결과</b><p>같은 화면에 기준선 2개</p></div>
+  </div>
+</section>
+
+<hr>
+
+<!-- 4. 안 -->
+<section>
+  <div class="head">
+    <p class="label">4 · 개선안</p>
+    <h2>세 가지 방향</h2>
+  </div>
+
+  <div class="opts">
+    <div class="opt">
+      <span class="tag">안 A</span>
+      <h3>사이드바를 안으로</h3>
+      <p>사이드바까지 같은 <span class="num">1024px</span> 안에 넣습니다. 선이 하나로 맞습니다.</p>
+      <p><b>문제</b> · 본문이 <span class="num">800px</span>로 줄어듭니다. 표가 많은 화면이라
+         지금도 넉넉하지 않은데 더 좁아집니다.</p>
+      <span class="cost">고칠 곳 1군데 · 본문 −224px</span>
+    </div>
+
+    <div class="opt pick">
+      <span class="tag">안 B · 추천</span>
+      <h3>헤더 제한을 푼다</h3>
+      <p>헤더도 사이드바처럼 화면 끝까지 쓰게 합니다. 선이 하나로 맞고
+         <b>본문 넓이는 그대로</b>입니다.</p>
+      <p>설정 화면은 표와 폼이 중심이라 넓은 게 유리합니다.
+         읽기 편한 폭은 <b>안쪽 카드</b>가 이미 담당하고 있습니다.</p>
+      <span class="cost">고칠 곳 1군데 · 본문 유지</span>
+    </div>
+
+    <div class="opt">
+      <span class="tag">안 C</span>
+      <h3>그대로 둔다</h3>
+      <p>기능에는 문제가 없습니다. 좁은 화면에서는 거의 안 보입니다.</p>
+      <p><b>문제</b> · 외장 모니터를 쓰면 매번 눈에 걸립니다.
+         새 화면을 추가할 때마다 같은 고민이 반복됩니다.</p>
+      <span class="cost">고칠 곳 0 · 계속 어긋남</span>
+    </div>
+  </div>
+</section>
+
+<!-- 5. 안 B 모습 -->
+<section>
+  <div class="head">
+    <p class="label">5 · 안 B를 적용하면</p>
+    <h2>선이 하나로 맞습니다</h2>
+  </div>
+
+  <div class="screen">
+    <div class="screen-cap"><b>안 B 적용 후</b><span>1920px 화면</span></div>
+    <div class="stage">
+      <div class="guide" style="left:0"></div>
+      <div class="band">
+        <div class="inner" style="flex:1">GNB · 동기화 · 배포방 · 설정</div>
+      </div>
+      <div class="band" style="height:52px">
+        <div class="inner" style="flex:1">설정 · 팀, 사용자, 프로젝트를 관리합니다</div>
+      </div>
+      <div class="body-row">
+        <div class="side aligned">
+          <span style="font-weight:700; color:var(--rule)">사이드바</span>
+          <i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="content">
+          <div class="card-mock"><i style="width:35%"></i><i></i><i></i><i style="width:70%"></i></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p>왼쪽 선이 하나입니다. 제목·사이드바·본문이 같은 자리에서 시작합니다.</p>
+</section>
+
+<!-- 6. 남는 질문 -->
+<section>
+  <div class="head">
+    <p class="label">6 · 그래도 남는 것</p>
+    <h2>본문이 너무 넓어지면?</h2>
+  </div>
+
+  <p>와이드 모니터에서 표가 <span class="num">2300px</span>까지 늘어나면 눈이 가로로 너무 멀리 갑니다.</p>
+  <p><b>그건 이 층에서 풀 문제가 아닙니다.</b> 각 화면 안의 카드가 자기 최대 폭을 정하면 됩니다.
+     실제로 <code>배포 대장</code> 화면은 이미 그렇게 하고 있습니다.</p>
+  <p class="muted">즉 <b>바깥 틀은 화면을 다 쓰고, 안쪽 내용이 읽기 좋은 폭을 지킨다</b>는 규칙입니다.
+     틀에서 제한하면 넓은 표를 쓰고 싶은 화면이 방법이 없어집니다.</p>
+</section>
+
+<hr>
+
+<!-- 6-b. 잘림 -->
+<section>
+  <div class="head">
+    <p class="label">7 · 같은 화면의 다른 문제</p>
+    <h2>메뉴 한 줄이 잘립니다</h2>
+  </div>
+
+  <p><b>Tampermonkey 스크립트</b> 한 항목만 사이드바 폭을 넘칩니다.
+     넘치는 양은 <span class="num">10px</span>, 딱 글자 한 자 분량입니다.</p>
+
+  <div class="tbl">
+    <table>
+      <thead><tr><th>메뉴</th><th class="n">필요한 폭</th><th class="n">있는 폭</th><th>결과</th></tr></thead>
+      <tbody>
+        <tr><td>배포 시나리오 관리</td><td class="n">191</td><td class="n">191</td><td>딱 맞음</td></tr>
+        <tr><td>동기화 방식 관리</td><td class="n">191</td><td class="n">191</td><td>딱 맞음</td></tr>
+        <tr><td><b>Tampermonkey 스크립트</b></td><td class="n bad-n">201</td><td class="n">191</td><td class="bad-n">10px 잘림</td></tr>
+        <tr><td>QA 라우터 관리</td><td class="n">191</td><td class="n">191</td><td>딱 맞음</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="muted">다른 항목이 전부 <span class="num">191</span>로 같은 건 우연이 아닙니다.
+     한글은 폭이 예측 가능한데, <b>영문 이름 하나가 섞이면서 튀어나왔습니다.</b></p>
+
+  <div class="opts">
+    <div class="opt">
+      <span class="tag">방법 1</span>
+      <h3>사이드바를 넓힌다</h3>
+      <p><span class="num">224 → 240px</span>. 지금 항목은 다 들어갑니다.</p>
+      <p><b>문제</b> · 더 긴 이름이 생기면 또 넘칩니다. 근본 해결이 아니고,
+         본문이 <span class="num">16px</span> 줄어듭니다.</p>
+      <span class="cost">지금만 해결 · 또 터질 수 있음</span>
+    </div>
+
+    <div class="opt pick">
+      <span class="tag">방법 2 · 추천</span>
+      <h3>두 줄까지 허용한다</h3>
+      <p>넘치면 <b>다음 줄로 넘어가게</b> 합니다. 이름이 얼마나 길어지든 다 보입니다.</p>
+      <p>메뉴는 자주 읽는 곳이라 <b>잘리는 것보다 두 줄이 낫습니다.</b>
+         지금은 한 항목만 두 줄이 되고 나머지는 그대로입니다.</p>
+      <span class="cost">폭 유지 · 앞으로도 안 잘림</span>
+    </div>
+
+    <div class="opt">
+      <span class="tag">방법 3</span>
+      <h3>이름을 줄인다</h3>
+      <p>"Tampermonkey 스크립트" → "Tampermonkey".</p>
+      <p><b>문제</b> · 새 메뉴를 추가할 때마다 "몇 글자까지 되지?"를 확인해야 합니다.
+         관리 포인트가 하나 늘어납니다.</p>
+      <span class="cost">고칠 곳 1군데 · 매번 확인 필요</span>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note"><b>왜 두 줄이 나은가</b><p>사이드바 폭을 늘리는 건 "지금 이름들"에 맞춘 값입니다.
+      두 줄 허용은 <b>어떤 이름이 와도</b> 동작합니다.</p></div>
+    <div class="note"><b>세로로 길어지지 않나</b><p>8개 중 1개만 두 줄이 됩니다.
+      사이드바 높이는 화면에 한참 못 미쳐 여유가 많습니다.</p></div>
+  </div>
+</section>
+
+<div class="verdict">
+  <p class="label">제안</p>
+  <h2 style="font-size:clamp(1.2rem,3.2vw,1.6rem)">둘 다 설정 셸 한 파일에서 고쳐집니다</h2>
+  <p class="on-fg" style="color:var(--ink)"><b>정렬</b> · 안 B — 헤더 제한을 풀어 선을 하나로.
+     본문 넓이는 그대로 두고, 읽기 좋은 폭은 각 화면의 카드가 정하게 남겨둡니다.</p>
+  <p class="on-fg" style="color:var(--ink)"><b>잘림</b> · 방법 2 — 메뉴 이름을 두 줄까지 허용.
+     폭을 늘리는 대신 어떤 이름이 와도 다 보이게 합니다.</p>
+  <p class="muted" style="font-size:.86rem">이 변경은 <b>설정 화면 전체</b>(팀·사용자·프로젝트·휴일·Tampermonkey·QA 라우터)에
+     함께 적용됩니다. QA 라우터만의 문제가 아니라 원래 있던 어긋남입니다.</p>
+</div>
+
+</div>
+
+<script>
+  const root = document.documentElement;
+  document.getElementById('theme').addEventListener('click', () => {
+    const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const cur = root.dataset.theme || (dark ? 'dark' : 'light');
+    root.dataset.theme = cur === 'dark' ? 'light' : 'dark';
+  });
+</script>
+</body>
+</html>

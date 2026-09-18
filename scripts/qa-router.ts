@@ -12,8 +12,12 @@
  *
  * 환경변수:
  *   NEXT_PUBLIC_DB_URL, DB_SERVICE_ROLE_KEY   필수
- *   SLACK_BOT_TOKEN                           필수 (xoxb)
- *   IGNITE_JIRA_EMAIL, IGNITE_JIRA_API_TOKEN  operator 미지정 시 폴백
+ *   SLACK_BOT_TOKEN                           필수 (xoxb · 발송용)
+ *   SLACK_READ_TOKEN                          선택 (xoxp · QA 스레드 읽기용)
+ *                                             없으면 스레드 기능만 꺼진다
+ *   IGNITE_JIRA_EMAIL, IGNITE_JIRA_API_TOKEN  operator 미지정 시 폴백 (ignite 대상)
+ *   HMG_JIRA_EMAIL,    HMG_JIRA_API_TOKEN     operator 미지정 시 폴백 (hmg 대상)
+ *                                             폴백도 대상의 인스턴스를 따라간다
  *   QA_ROUTER_ITERATIONS    기본 9   (0 이면 1회만)
  *   QA_ROUTER_INTERVAL_SEC  기본 60
  *   QA_ROUTER_CONFIG_ID     지정 시 그 대상만
@@ -27,9 +31,24 @@ import {
   createConfluenceClient,
   createJiraClient,
   createSlackClient,
+  createSlackReader,
 } from '@/lib/services/qa-router/clients';
+import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
 
-const JIRA_BASE = 'https://ignitecorp.atlassian.net';
+/**
+ * 대상마다 Jira 가 다르다. 전에는 여기 상수 하나로 ignite 를 박아 두었는데,
+ * 그러면 hmg 대상은 자격증명·필터 ID 가 맞아도 **다른 Jira 를 조회해** 빈
+ * 결과를 정상처럼 돌려준다 (404 가 아니라 "그런 필터 없음" 이라 조용하다).
+ */
+function jiraBaseOf(instance: 'ignite' | 'hmg'): string {
+  return instance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE;
+}
+
+/** 인스턴스별 폴백 환경변수. operator 미지정 대상에서만 쓴다. */
+const ENV_CREDS: Record<'ignite' | 'hmg', { email: string; token: string }> = {
+  ignite: { email: 'IGNITE_JIRA_EMAIL', token: 'IGNITE_JIRA_API_TOKEN' },
+  hmg: { email: 'HMG_JIRA_EMAIL', token: 'HMG_JIRA_API_TOKEN' },
+};
 
 function required(name: string): string {
   const v = process.env[name];
@@ -65,11 +84,49 @@ async function main() {
   const repo = await import('@/lib/services/qa-router/repository');
   const { runTick } = await import('@/lib/services/qa-router/tick');
 
+  /*
+    ── DRY RUN 은 DB 도 안 건드린다 ──
+
+    전에는 Slack·Jira 클라이언트에만 걸려 있었다. 그런데 dry 인 Slack
+    `post` 가 `{ok:true}` 를 돌려주므로 tick 은 발송에 성공한 줄 알고
+    `markSeen` 을 **진짜로 썼다.** 그러면 1분마다 도는 운영 배치가 그 티켓을
+    이미 알린 걸로 보고 건너뛴다 — 확인하려고 돌린 리허설이 운영 알림을
+    삼킨다. 오류는 한 줄도 안 난다.
+
+    저장소 계층에서 한 번에 막는다. 쓰기 지점이 tick 한 곳에만 아홉 군데라
+    호출부마다 막으면 반드시 하나를 빠뜨린다.
+  */
+  if (dryRun) {
+    repo.setWritesDisabled(true);
+    log('DRY RUN · Slack 발송, Jira 재배정, DB 쓰기를 모두 건너뜁니다');
+  }
+
   const slack = createSlackClient({
     token: required('SLACK_BOT_TOKEN'),
     log,
     dryRun,
   });
+
+  /*
+    ── [배포 전 전환] ────────────────────────────────────────────────
+    읽기는 토큰이 따로다. 발송용 봇 토큰(xoxb)에는 읽기 스코프가 없다 —
+    실측으로 붙어 있는 것이 incoming-webhook·chat:write·usergroups:read·
+    users:read 뿐이고, conversations.history 는 channels:history 를 요구한다.
+
+    지금: 개인 사용자 토큰(xoxp) 을 SLACK_READ_TOKEN 으로 받는다.
+    배포 직전: 봇을 #cpo-qa 에 초대 → channels:history 스코프 추가 →
+              SLACK_READ_TOKEN 값만 봇 토큰으로 교체. 코드는 그대로.
+
+    없으면 넘기지 않는다 — 스레드 기능만 꺼지고 판정·알림은 그대로 돈다.
+    ──────────────────────────────────────────────────────────────────
+  */
+  const readToken = process.env.SLACK_READ_TOKEN;
+  const slackReader = readToken
+    ? createSlackReader({ token: readToken, log })
+    : undefined;
+  if (!slackReader) {
+    log('SLACK_READ_TOKEN 없음 · QA 스레드 읽기를 건너뜁니다');
+  }
 
   log(
     `시작 · holder=${HOLDER} · 루프 ${iterations}회 × ${intervalMs / 1000}초${dryRun ? ' · DRY RUN' : ''}`
@@ -112,24 +169,23 @@ async function main() {
           let creds: { email: string; token: string } | null = null;
           if (cfg.jiraOperatorAccountId) {
             creds = await repo.getJiraCredsByAccountId(
-              cfg.jiraOperatorAccountId
+              cfg.jiraOperatorAccountId,
+              cfg.jiraInstance
             );
             if (!creds) {
               log(
-                `${cfg.name} · operator ${cfg.jiraOperatorAccountId.slice(0, 14)} 의 Jira 자격증명이 users 에 없음`
+                `${cfg.name} · operator ${cfg.jiraOperatorAccountId.slice(0, 14)} 의 ${cfg.jiraInstance} Jira 자격증명이 users 에 없음`
               );
             }
           }
-          if (
-            !creds &&
-            process.env.IGNITE_JIRA_EMAIL &&
-            process.env.IGNITE_JIRA_API_TOKEN
-          ) {
-            creds = {
-              email: process.env.IGNITE_JIRA_EMAIL,
-              token: process.env.IGNITE_JIRA_API_TOKEN,
-            };
-            log(`${cfg.name} · 환경변수 자격증명으로 폴백`);
+          // 폴백도 인스턴스를 따라간다. ignite 토큰으로 hmg 에 붙으면 401 이고,
+          // 그 401 은 "설정이 틀렸다" 가 아니라 "토큰이 만료됐다" 처럼 보인다.
+          const envName = ENV_CREDS[cfg.jiraInstance];
+          const envEmail = process.env[envName.email];
+          const envToken = process.env[envName.token];
+          if (!creds && envEmail && envToken) {
+            creds = { email: envEmail, token: envToken };
+            log(`${cfg.name} · ${envName.email} 환경변수 자격증명으로 폴백`);
           }
           credCache.set(cfg.id, creds);
         }
@@ -143,9 +199,10 @@ async function main() {
           continue;
         }
 
-        const jira = createJiraClient({ baseUrl: JIRA_BASE, ...creds, log });
+        const jiraBase = jiraBaseOf(cfg.jiraInstance);
+        const jira = createJiraClient({ baseUrl: jiraBase, ...creds, log });
         const confluence = createConfluenceClient({
-          baseUrl: JIRA_BASE,
+          baseUrl: jiraBase,
           ...creds,
           log,
         });
@@ -156,7 +213,8 @@ async function main() {
             jira,
             confluence,
             slack,
-            jiraBaseUrl: JIRA_BASE,
+            slackReader,
+            jiraBaseUrl: jiraBase,
             log,
           },
           HOLDER
@@ -164,7 +222,7 @@ async function main() {
 
         const detail =
           out.status === 'done'
-            ? `조회 ${out.scanned} · 발송 ${out.notified} · 이월 ${out.deferred} · 실패 ${out.failed}`
+            ? `조회 ${out.scanned} · 발송 ${out.notified} · 실패 ${out.failed}`
             : JSON.stringify(out);
         lastStatus.set(cfg.id, out.status);
         log(`${cfg.name} → ${out.status} · ${detail}`);

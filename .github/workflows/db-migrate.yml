@@ -1,0 +1,70 @@
+name: DB 마이그레이션 적용
+
+# 왜 있나:
+#   마이그레이션을 대시보드 SQL Editor 에 손으로 붙여 실행하던 방식은
+#   "SQL 은 고쳤는데 적용을 잊는" 사고를 낸다. 실제로 워치독의 Content-Type
+#   오류가 파일에는 고쳐졌지만 DB 함수는 낡은 채 남아 한 번도 발송되지 못했다.
+#   main 에 들어오면 자동으로 적용해 그 간극을 없앤다.
+#
+# 무엇이 적용되나:
+#   scripts/db-migrate.sh 가 public._migrations 를 보고 새 파일과 내용이 바뀐
+#   파일만 적용한다. 자세한 규칙은 supabase/migrations/README.md 를 본다.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**.sql'
+      - 'scripts/db-migrate.sh'
+      - '.github/workflows/db-migrate.yml'
+  # 적용이 실패했거나 사람이 다시 돌려야 할 때
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '적용하지 않고 대상만 확인'
+        type: boolean
+        default: false
+
+# 같은 DB 에 두 실행이 동시에 붙으면 순서를 보장할 수 없다.
+concurrency:
+  group: db-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest 에 psql 이 있지만 버전이 오래될 수 있어 명시적으로 받는다.
+      - name: psql 설치
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: 적용
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            bash scripts/db-migrate.sh --dry-run
+          else
+            bash scripts/db-migrate.sh
+          fi
+
+      # 실패하면 조용히 넘어가면 안 된다 — 적용 안 된 SQL 은 다음 사고의 씨앗이다.
+      - name: 실패 알림
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_QA_ROUTER_BOT_TOKEN || secrets.SLACK_BOT_TOKEN }}
+        run: |
+          [ -z "$SLACK_BOT_TOKEN" ] && exit 0
+          curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-Type: application/json; charset=utf-8' \
+            -d "$(jq -n \
+              --arg c 'C0BVDJEJ19C' \
+              --arg t ":rotating_light: DB 마이그레이션 적용 실패
+<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|실행 로그> · ${{ github.sha }}
+적용되지 않은 SQL 이 있습니다. 로그를 확인하세요." \
+              '{channel:$c, text:$t}')" > /dev/null

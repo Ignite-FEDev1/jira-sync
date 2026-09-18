@@ -37,10 +37,26 @@ export interface RelatedLinks {
   refKq?: string | null;
   /** 상위 에픽 */
   epic?: string | null;
-  /** 개발처리 티켓 */
-  devKey?: string | null;
+  /**
+   * 개발처리 티켓 **전부**.
+   *
+   * 전에는 대표 한 건(`devKey`)만 걸었다. 근거 문장은 "6건 중 4건이 조한빈
+   * 담당" 이라고 해 놓고 링크는 하나만 주니, 나머지 셋을 보려면 에픽을 열어
+   * 직접 골라내야 했다 — 문장이 센 근거를 목록이 안 보여 주고 있었다.
+   */
+  devKeys?: string[];
   /** GitLab MR URL 목록 */
   mrUrls?: string[];
+  /**
+   * 키별 제목. 키만 있는 링크는 눌러 보기 전에는 무엇인지 알 수 없다.
+   *
+   * `[기획] KQ-17670` 네 글자로는 그게 무슨 기획인지 모른다. 알고 싶은
+   * 사람은 결국 눌러서 Jira 를 열어야 했고, 그러면 링크 목록이 하는 일이
+   * "키 보관" 뿐이 된다. 제목이 붙으면 대부분 안 눌러도 된다.
+   *
+   * 없는 제목은 조용히 건너뛴다 — 조회 경로마다 받아 오는 필드가 다르다.
+   */
+  titles?: Record<string, string | null | undefined>;
 }
 
 export interface Judgement {
@@ -58,8 +74,17 @@ export interface Judgement {
   path?: string[];
   /** 판정 방식 설명. 경로가 없을 때 대신 쓴다. */
   reason: string;
-  /** Tier 1(에픽 추적) 인지 Tier 2(프리픽스 학습 맵) 인지 */
-  tier?: 1 | 2;
+  /**
+   * `reason` 안에서 **결론에 해당하는 도막**. Slack 이 이 부분만 굵게 만든다.
+   *
+   * 근거 한 줄이 길어지면(에픽 제목 + 건수 + 나머지 담당자) 정작 결론인
+   * "4건이 조한빈 담당" 이 가운데 묻힌다. judge 가 mrkdwn 을 직접 쓰지
+   * 않는 이유는 같은 문장을 어드민 화면도 쓰기 때문이다 — 거기서는 `*` 가
+   * 그냥 별표로 보인다. 어디를 강조할지만 알려 주고 표기는 화면이 정한다.
+   */
+  highlight?: string;
+  /** 1 에픽 추적 · 2 프리픽스(형제·학습) · 3 레이블 참조 담당자 */
+  tier?: 1 | 2 | 3;
 }
 
 export interface RouteMessageInput {
@@ -97,7 +122,20 @@ function reassignLine(o: ReassignOutcome | null | undefined): string | null {
   if (!o) return null;
   switch (o.kind) {
     case 'kept':
-      return `:information_source: Jira 담당자 유지 (${o.triageName}) · 확인 후 수동 배정 필요`;
+      /*
+        아무 말도 하지 않는다.
+
+        `reassignMode` 가 'off' 라 **모든 메시지에 항상** 붙던 줄이다. 값이
+        변하지 않는 문장은 정보가 아니라 배경이고, 배경이 매 줄 끼면 정작
+        읽어야 할 줄을 밀어낸다.
+        게다가 괄호 안에 찍히던 것은 사람 이름이 아니라 Jira accountId 를
+        열두 자로 자른 것(`637426199e48`)이었다 — 읽는 사람에게 아무 뜻이
+        없는 내부 식별자다.
+
+        "담당자가 안 바뀌었다" 는 머리글의 `예상 담당자` 가 이미 말한다.
+        재배정은 **실제로 뭔가 일어났을 때만** 말한다(done·skipped·failed).
+      */
+      return null;
     case 'done':
       return ':white_check_mark: 재배정 완료 (담당자+공동담당자)';
     case 'skipped':
@@ -121,6 +159,45 @@ export function buildReasonLine(j: Judgement): string {
   return j.reason;
 }
 
+/** 문장 속 이슈 키를 눌러서 갈 수 있게 만든다. */
+function linkifyKeys(text: string, base: string): string {
+  return text.replace(
+    /\b([A-Z][A-Z0-9]+-\d+)\b/g,
+    (k) => `<${issueUrl(base, k)}|${k}>`
+  );
+}
+
+/**
+ * 근거를 불릿으로 편다.
+ *
+ * 전에는 `path` 가 있으면 **judge 가 만든 문장을 버리고** 키만 늘어놓았다:
+ *   `KQ-17670 → KQ-17669 → KQ-18427 → 조한빈`  _(Tier 1)_
+ * 키 세 개를 봐도 그게 기획인지 에픽인지 개발인지, 왜 그 사람인지 모른다.
+ * 알고 싶은 것은 경로가 아니라 **이유**고, judge 는 이미 그 문장을 만든다:
+ *   `기획 KQ-17670 → 에픽 KQ-17669 「…」 아래 개발처리 5건 중 3건이 조한빈 담당 (최다)`
+ * 그 문장을 살리고, 키는 아래 "관련 링크" 가 이미 라벨과 함께 들고 있다.
+ *
+ * 구분자(`→`, `·`)에서 끊어 한 단계씩 한 줄로 만든다 — judge 의 문장이 곧
+ * 추론 단계라, 끊는 것만으로 단계가 드러난다.
+ */
+function reasonBullets(j: Judgement, jiraBaseUrl: string): string {
+  // 결론 도막을 굵게. 표시를 먼저 입히고 나서 끊는다 — 끊고 나면
+  // 도막마다 찾아 다녀야 하고, 경계에 걸친 문구를 놓친다.
+  const marked = j.highlight
+    ? escapeMrkdwn(j.reason).replace(
+        escapeMrkdwn(j.highlight),
+        (m) => `*${m}*`
+      )
+    : escapeMrkdwn(j.reason);
+  const parts = marked
+    .split(/\s+(?:→|·)\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  // 한 도막뿐이면 불릿을 붙이지 않는다. 점 하나짜리 목록은 목록이 아니다.
+  if (parts.length <= 1) return linkifyKeys(parts[0] ?? j.reason, jiraBaseUrl);
+  return parts.map((p) => `• ${linkifyKeys(p, jiraBaseUrl)}`).join('\n');
+}
+
 export function buildRouteMessage(input: RouteMessageInput): SlackMessage {
   const {
     issueKey,
@@ -139,10 +216,44 @@ export function buildRouteMessage(input: RouteMessageInput): SlackMessage {
     : j.name
       ? escapeMrkdwn(j.name)
       : null;
+  /*
+    워크플로 상 QA 는 FE 건으로 보이는 티켓을 **모두 담당자 김가빈으로** 넘긴다.
+    그러니 이 봇이 내놓는 이름은 대부분 사실이 아니라 **예상**이다.
+    그냥 "— @조한빈" 이라고만 쓰면 배정된 것처럼 읽히므로 앞에 못을 박는다.
+
+    tier 가 없는 판정(0단계)만 추론이 아닌 사실이다 — 티켓에 이미 적혀 있던 값.
+    ask_other 는 우리 팀 밖 사람이라 멘션하지 않고 타팀임을 덧붙인다.
+  */
+  const whoLabel =
+    j.classification === 'ask_other'
+      ? '예상 담당자'
+      : j.tier
+        ? '예상 담당자'
+        : '담당자';
+  const whoSuffix = j.classification === 'ask_other' ? ' _(타팀)_' : '';
+  /*
+    티켓 번호와 제목을 한 줄에, 담당자를 그 아래 줄에 둔다.
+
+    전에는 첫 줄이 `KQ-18762 — 예상 담당자 @조한빈` 이고 제목이 둘째 줄이었다.
+    그러면 **무슨 티켓인지가 사람 이름 뒤로 밀린다.** 알림을 열었을 때 먼저
+    묻는 것은 "무슨 건인가" 고, "누구에게 가야 하나" 는 그 다음이다.
+    링크 목록의 `[QA] KQ-18762 - 제목` 과도 같은 꼴이 된다.
+  */
+  /*
+    담당자 줄을 인용 막대(`>`)로 뗀다.
+
+    전에는 제목 바로 아래 평문 한 줄이었다. 제목이 길어 두 줄로 접히면
+    그 뒤에 같은 굵기·같은 색으로 붙어서 **제목의 셋째 줄처럼 보였다.**
+    이 메시지에서 가장 먼저 읽혀야 하는 줄인데 가장 안 보이는 자리에
+    있었던 셈이다.
+
+    Slack 의 `>` 는 왼쪽에 세로 막대를 그린다. 굵게·크게 하지 않고도
+    "여기부터 다른 정보" 라는 경계가 생긴다 — 이모지를 하나 더 붙여
+    머리글의 💡 와 경쟁시키는 것보다 조용하다.
+  */
   const headline =
-    `${emoji} <${url}|*${issueKey}*>` +
-    (who ? ` — ${who}` : '') +
-    `\n${escapeMrkdwn(summary)}`;
+    `${emoji} <${url}|*${issueKey}*> - ${escapeMrkdwn(summary)}` +
+    (who ? `\n>*${whoLabel}* ${who}${whoSuffix}` : '');
   const statusLine = reassignLine(reassign);
 
   const blocks: unknown[] = [
@@ -159,40 +270,98 @@ export function buildRouteMessage(input: RouteMessageInput): SlackMessage {
   const reasonLabel =
     j.classification === 'unknown'
       ? '왜 판정 못 했나'
-      : `왜 ${j.name ?? '이 사람'}인가`;
+      : j.classification === 'ask_other'
+        ? // 이름이 붙어 있어도 "이 사람에게 가야 한다"가 아니다.
+          // 라벨을 바꾸지 않으면 우리 팀 배정으로 읽힌다.
+          '왜 저희 팀 건이 아니라고 보나'
+        : /*
+             머리글과 **같은 칩**을 쓴다. 평문 `@조한빈` 은 검은 글씨라
+             바로 위 파란 칩과 다른 사람처럼 보였다. Slack 은 한 메시지에
+             같은 사람을 두 번 멘션해도 알림을 두 번 보내지 않는다.
+           */
+          `왜 ${who ?? escapeMrkdwn(j.name ?? '이 사람')} 인가`;
   blocks.push({
     type: 'section',
     text: {
       type: 'mrkdwn',
-      text:
-        `*${reasonLabel}*\n` +
-        (j.path && j.path.length > 0
-          ? `\`${buildReasonLine(j)}\``
-          : escapeMrkdwn(j.reason)) +
-        (j.tier ? `  _(Tier ${j.tier})_` : ''),
+      /*
+        Tier 번호는 뺐다. `(Tier 1)` 은 코드의 내부 이름이라 읽는 사람에게
+        아무 뜻이 없다. 추정인지 아닌지는 머리글의 `예상 담당자` 가 이미
+        말하고, 어떻게 알아냈는지는 아래 불릿이 말한다.
+      */
+      text: `*${reasonLabel}*\n${reasonBullets(j, jiraBaseUrl)}`,
     },
   });
 
-  // 관련 링크
-  const linkLines: string[] = [`• [QA] <${url}|${issueKey}>`];
+  /*
+    관련 링크. 키 옆에 제목을 붙인다.
+
+    제목은 자르지 않고 그대로 붙인다. 38자에서 잘라 봤더니 `…` 뒤에 무엇이
+    있는지 알 수 없어 결국 눌러 보게 됐다 — 자를 거면 안 붙이는 게 낫다.
+    Slack section 은 긴 줄을 알아서 접는다.
+
+    감싸는 기호(「」) 대신 ` - ` 로 잇는다. Jira 제목에는 `[BO_명의이전]`
+    처럼 대괄호가 이미 들어 있어서, 그 위에 또 괄호를 씌우면 어디까지가
+    제목인지 경계가 흐려진다.
+
+    줄바꿈 들여쓰기는 쓰지 않았다. Slack 은 렌더러(데스크톱·웹·모바일)마다
+    앞 공백을 다르게 먹어서, 들여쓴 줄이 어떤 기기에서는 그냥 붙어 버린다.
+    한 줄에 담으면 어디서 보든 같은 모양이다.
+  */
+  const linkLine = (label: string, key: string, title?: string | null) => {
+    const t = title ?? links?.titles?.[key];
+    return (
+      `• [${label}] <${issueUrl(jiraBaseUrl, key)}|${key}>` +
+      (t ? ` - ${escapeMrkdwn(t.trim())}` : '')
+    );
+  };
+  /*
+    QA 티켓에도 제목을 붙인다. 머리글이 이미 보여 주지만, 링크 목록만
+    긁어 가는 일이 잦아서(스레드에 붙여넣기) 목록 혼자서도 말이 되어야 한다.
+  */
+  const linkLines: string[] = [linkLine('QA', issueKey, summary)];
   if (links?.refKq)
     linkLines.push(
-      `• [기획] <${issueUrl(jiraBaseUrl, links.refKq)}|${links.refKq}>`
+      linkLine(j.classification === 'ask_other' ? '참조' : '기획', links.refKq)
     );
-  if (links?.epic)
-    linkLines.push(
-      `• [에픽] <${issueUrl(jiraBaseUrl, links.epic)}|${links.epic}>`
-    );
-  if (links?.devKey)
-    linkLines.push(
-      `• [개발] <${issueUrl(jiraBaseUrl, links.devKey)}|${links.devKey}>`
-    );
+  if (links?.epic) linkLines.push(linkLine('에픽', links.epic));
+
+  /*
+    개발처리가 여럿이면 `[개발]` 을 줄마다 반복하지 않는다.
+
+    실측으로 네 줄이 `• [개발] KQ-…` 로 시작했는데, 같은 라벨이 네 번
+    반복되면 라벨이 정보를 주지 않고 줄 앞을 막기만 한다. 눈이 실제로
+    훑는 것은 그 뒤의 티켓 번호와 제목이다.
+
+    묶어서 소제목을 한 번만 달고 번호를 매긴다. 번호는 "몇 건인지" 를
+    세지 않아도 보이게 하고, 근거 문장의 "6건 중 4건" 과 맞대 볼 수 있게 한다.
+    한 건뿐이면 묶을 것이 없으니 그냥 한 줄로 둔다.
+  */
+  const devKeys = links?.devKeys ?? [];
+  if (devKeys.length === 1) linkLines.push(linkLine('개발', devKeys[0]));
+
+  const devGroup =
+    devKeys.length > 1
+      ? `\n\n*개발처리 ${devKeys.length}건*${j.name ? ` · ${escapeMrkdwn(j.name)} 담당` : ''}\n` +
+        devKeys
+          .map((k, i) => {
+            const t = links?.titles?.[k];
+            return (
+              `${i + 1}. <${issueUrl(jiraBaseUrl, k)}|${k}>` +
+              (t ? ` - ${escapeMrkdwn(t.trim())}` : '')
+            );
+          })
+          .join('\n')
+      : '';
   for (const mr of (links?.mrUrls ?? []).slice(0, 3))
     linkLines.push(`• [MR] ${mr}`);
   if (linkLines.length > 1) {
     blocks.push({
       type: 'section',
-      text: { type: 'mrkdwn', text: `*관련 링크*\n${linkLines.join('\n')}` },
+      text: {
+        type: 'mrkdwn',
+        text: `*관련 링크*\n${linkLines.join('\n')}${devGroup}`,
+      },
     });
   }
 

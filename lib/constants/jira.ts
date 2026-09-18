@@ -8,6 +8,27 @@ export const JIRA_ENDPOINTS = {
 
 export const JIRA_API_VERSION = '/rest/api/3';
 
+/**
+ * 인스턴스로 베이스 URL 을 고른다.
+ *
+ * 이 삼항식이 호출부마다 복사돼 있었다. 복사본이 늘면 한쪽만 고쳐져도
+ * 타입은 통과하고, 그 대상만 다른 Jira 를 조회해 **빈 결과를 정상처럼**
+ * 돌려준다 (없는 필터는 404 가 아니라 권한 없음/빈 결과로 보인다).
+ */
+export function jiraBaseUrl(instance: 'ignite' | 'hmg'): string {
+  return instance === 'hmg' ? JIRA_ENDPOINTS.HMG : JIRA_ENDPOINTS.IGNITE;
+}
+
+/**
+ * 인스턴스별 자격증명 환경변수 이름. operator 계정이 지정되지 않았을 때
+ * 폴백으로 쓴다. 베이스 URL 과 토큰은 **항상 같은 인스턴스**여야 한다 —
+ * 어긋나면 401 이 나는데, 그 401 은 설정 실수가 아니라 토큰 만료처럼 읽힌다.
+ */
+export const JIRA_ENV_CREDS = {
+  ignite: { email: 'IGNITE_JIRA_EMAIL', token: 'IGNITE_JIRA_API_TOKEN' },
+  hmg: { email: 'HMG_JIRA_EMAIL', token: 'HMG_JIRA_API_TOKEN' },
+} as const;
+
 // 프로젝트 정보
 export const JIRA_PROJECTS = {
   // Ignite Jira 프로젝트

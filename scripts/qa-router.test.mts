@@ -8,7 +8,77 @@
  */
 
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
+
+import {
+  cycleStage,
+  describeQaProgress,
+  describeScope,
+  formatClock,
+  milestoneFrom,
+  milestoneOn,
+  nextWorkday,
+  overdueSlot,
+  monthOrderKey,
+  computeHealth,
+  readCyclePageTitle,
+  readDeployKind,
+  tooSoon,
+  prevWorkday,
+  ruleDay,
+  resolveDeployYmd,
+  resolveQaEndYmd,
+  staleFilterCycle,
+} from '../lib/services/qa-router/status';
+import { DEPLOY_KINDS } from '../lib/services/qa-router/types';
+import type { DeployCycle } from '../lib/services/qa-router/types';
+import {
+  checkAlertRules,
+  DEFAULT_ALERT_RULES,
+  effectiveAlertRules,
+  hasAlertOverride,
+} from '../lib/services/qa-router/types';
+import {
+  hasProblem,
+  isMissed,
+  outcomeOf,
+  problemsOf,
+  settlementBucket,
+} from '../lib/services/qa-router/outcome';
+import {
+  demoConfig,
+  demoCycles,
+  demoEvents,
+  demoState,
+} from '../lib/services/qa-router/demo';
+
+import { pickTriage } from '../lib/services/qa-router/triage';
+import { resolvePersonFields } from '../lib/services/qa-router/derive';
+import { JUDGE_TIERS } from '../lib/services/qa-router/types';
+
+import {
+  parseThreadStatus,
+  parseThreadTable,
+  threadTableFrom,
+} from '../lib/services/qa-router/plan-tickets';
+import {
+  findAssigned,
+  findViaRefOwner,
+  isQaBatchTicket,
+  judge,
+} from '../lib/services/qa-router/judge';
+import {
+  parseThreadTitle,
+  shouldLookForThread,
+} from '../lib/services/qa-router/qa-thread';
+import { tokenize } from '../app/admin/qa-router/[id]/slack-preview';
+import { buildDiagram } from '../app/admin/qa-router/[id]/judge-flow';
+import {
+  countTypes,
+  inferFromSample,
+  judgeFits,
+} from '../lib/services/qa-router/infer';
 
 // tick → repository → @/lib/db 가 모듈 로드 시점에 createClient 를 호출한다.
 // 여기서는 DB 를 쓰지 않으므로 더미 값으로 로드만 통과시킨다.
@@ -18,7 +88,11 @@ process.env.NEXT_PUBLIC_DB_ANON_KEY ??= 'placeholder';
 
 const {
   parseFilterUrl,
+  parseGadgetUrl,
+  isFilterInput,
   deriveFromJql,
+  deriveFromJqlStructure,
+  deriveJql,
   inferFixVersionRule,
   parseFixVersion,
   matchSlackUsers,
@@ -435,7 +509,7 @@ test('diffDerived — 첫 파생이면 변경 없음 (알림 안 보냄)', () =>
 // Slack 메시지
 // ─────────────────────────────────────────────────────────────
 
-test('buildRouteMessage — 판정 근거를 추론 경로로 펼친다', () => {
+test('buildRouteMessage — 판정 근거를 사람이 읽는 문장으로 편다', () => {
   const msg = buildRouteMessage({
     issueKey: 'KQ-18599',
     summary: '[BO_판매차량명의전] 컬럼값이 기획과 상이한 현상',
@@ -445,10 +519,11 @@ test('buildRouteMessage — 판정 근거를 추론 경로로 펼친다', () => 
       name: '박성찬',
       slackId: 'U04DLF61U9K',
       path: ['KQ-17647', 'KQ-17645', 'KQ-18230'],
-      reason: '에픽 추적',
+      reason:
+        '기획 KQ-17647 → 에픽 KQ-17645 아래 개발처리 5건 중 3건이 박성찬 담당 (최다)',
       tier: 1,
     },
-    links: { refKq: 'KQ-17647', epic: 'KQ-17645', devKey: 'KQ-18230' },
+    links: { refKq: 'KQ-17647', epic: 'KQ-17645', devKeys: ['KQ-18230'] },
     reassign: { kind: 'kept', triageName: '김가빈' },
   });
 
@@ -458,10 +533,48 @@ test('buildRouteMessage — 판정 근거를 추론 경로로 펼친다', () => 
     ['section', 'section', 'section', 'divider']
   );
   assert.ok(blocks[0].text!.text.includes('<@U04DLF61U9K>'), '멘션이 들어간다');
-  assert.ok(blocks[0].text!.text.includes('Jira 담당자 유지 (김가빈)'));
+  /*
+    티켓 번호와 제목이 한 줄, 담당자는 그 아래 줄이다. 제목이 사람 이름
+    뒤로 밀리면 "무슨 건인가" 를 먼저 못 읽는다.
+  */
+  const head = blocks[0].text!.text.split('\n');
+  assert.ok(head[0].includes('KQ-18599') && head[0].includes('컬럼값이'));
+  // `>` 는 Slack 이 왼쪽 세로 막대를 그리는 표시다. 제목과 경계를 만든다.
+  assert.ok(head[1].startsWith('>*예상 담당자*'), '담당자 줄을 인용으로 뗀다');
+  /*
+    'kept' 는 아무 말도 하지 않는다. reassignMode 가 'off' 라 **모든**
+    메시지에 붙던 줄이고, 값이 변하지 않는 문장은 정보가 아니라 배경이다.
+    담당자가 그대로라는 것은 머리글의 `예상 담당자` 가 이미 말한다.
+  */
   assert.ok(
-    blocks[1].text!.text.includes('KQ-17647 → KQ-17645 → KQ-18230 → 박성찬')
+    !blocks[0].text!.text.includes('담당자 유지'),
+    '변하지 않는 줄은 넣지 않는다'
   );
+  /*
+    키만 늘어놓은 경로(`KQ-17647 → KQ-17645 → KQ-18230 → 박성찬`)를 쓰지
+    않는다. 키 세 개로는 그게 기획인지 에픽인지, 왜 그 사람인지 알 수 없다.
+    judge 가 만든 문장을 단계별 불릿으로 편다.
+  */
+  const reason = blocks[1].text!.text;
+  /*
+    머리글과 **같은 칩**(진짜 멘션)을 쓴다. 평문 `@박성찬` 은 검은 글씨라
+    바로 위 파란 칩과 다른 사람처럼 보였다.
+  */
+  assert.ok(
+    reason.includes('왜 <@U04DLF61U9K> 인가'),
+    '근거 제목도 멘션 칩으로 쓴다'
+  );
+  assert.ok(reason.includes('• 기획 '), '단계마다 불릿이 붙는다');
+  assert.ok(
+    reason.includes('개발처리 5건 중 3건이 박성찬 담당 (최다)'),
+    'judge 의 문장이 살아 있어야 한다'
+  );
+  assert.ok(
+    reason.includes('/browse/KQ-17647|KQ-17647'),
+    '문장 속 키는 눌러서 갈 수 있어야 한다'
+  );
+  // Tier 번호는 코드 내부 이름이라 읽는 사람에게 뜻이 없다.
+  assert.ok(!reason.includes('Tier'), 'Tier 번호를 노출하지 않는다');
   assert.ok(blocks[2].text!.text.includes('[기획]'));
 });
 
@@ -548,6 +661,7 @@ function cfgWith(over: Record<string, unknown>) {
     id: 'c1',
     name: 'T',
     triageAccountId: 'triage-1',
+    jiraFilterId: '12571',
     slackChannelId: 'C1',
     reassignMode: 'off',
     selfAccountId: null,
@@ -665,4 +779,2974 @@ test('maybeReassign — 사람이 이미 옮겼으면 덮어쓰지 않는다', a
     '재배정을 시도하지 않아야 한다'
   );
   assert.equal(out?.kind, 'skipped');
+});
+
+// ─────────────────────────────────────────────────────────────
+// 어드민 표시 — 시각 포맷
+// ─────────────────────────────────────────────────────────────
+
+test('formatClock — 같은 날이면 시:분만', () => {
+  // 2026-09-08 02:57 UTC = KST 11:57
+  const t = '2026-09-08T02:57:00Z';
+  const now = new Date('2026-09-08T03:10:00Z');
+  assert.equal(formatClock(t, now), '11:57');
+});
+
+test('formatClock — 날이 넘어가면 월/일을 붙인다', () => {
+  // KST 로 어제 23:30 → 오늘 새벽. 2시간 차이지만 날짜가 다르다.
+  const t = '2026-09-07T14:30:00Z'; // KST 09-07 23:30
+  const now = new Date('2026-09-07T16:30:00Z'); // KST 09-08 01:30
+  assert.equal(formatClock(t, now), '9/7 23:30');
+});
+
+test('formatClock — 요일이 같아도 일주일 전이면 날짜를 붙인다', () => {
+  const t = '2026-09-01T02:00:00Z';
+  const now = new Date('2026-09-08T02:00:00Z');
+  assert.equal(formatClock(t, now), '9/1 11:00');
+});
+
+test('formatClock — 기록이 없으면 빈 문자열', () => {
+  assert.equal(formatClock(null, new Date('2026-09-08T02:00:00Z')), '');
+});
+
+// ─────────────────────────────────────────────────────────────
+// 어드민 표시 — 필터 조건 요약
+// ─────────────────────────────────────────────────────────────
+
+const SCOPE_BASE = {
+  members: [],
+  fixVersionRule: null,
+  derivedAt: '2026-09-08T00:00:00Z',
+};
+
+test('describeScope — 프로젝트·이슈타입·제외상태를 한 문장으로', () => {
+  assert.equal(
+    describeScope({
+      ...SCOPE_BASE,
+      projectKey: 'KQ',
+      issueType: 'Bug',
+      excludeStatuses: ['Done', 'CLOSE', '완료'],
+    }),
+    'KQ 프로젝트의 Bug 이슈 중 Done, CLOSE, 완료 상태가 아닌 것을 확인합니다.'
+  );
+});
+
+test('describeScope — 제외 상태가 없으면 "모두 확인"', () => {
+  assert.equal(
+    describeScope({
+      ...SCOPE_BASE,
+      projectKey: 'KQ',
+      issueType: 'Bug',
+      excludeStatuses: [],
+    }),
+    'KQ 프로젝트의 Bug 이슈를 모두 확인합니다.'
+  );
+});
+
+test('describeScope — 이슈 타입 제한이 없으면 "모든 이슈"', () => {
+  assert.equal(
+    describeScope({
+      ...SCOPE_BASE,
+      projectKey: 'KQ',
+      issueType: null,
+      excludeStatuses: ['Done'],
+    }),
+    'KQ 프로젝트의 모든 이슈 중 Done 상태가 아닌 것을 확인합니다.'
+  );
+});
+
+test('describeScope — 아직 안 읽었으면 null (화면이 따로 말해야 한다)', () => {
+  assert.equal(describeScope(null), null);
+  assert.equal(
+    describeScope({
+      ...SCOPE_BASE,
+      projectKey: null,
+      issueType: null,
+      excludeStatuses: [],
+    }),
+    null
+  );
+});
+
+// ─────────────────────────────────────────────────────────────
+// 필터 URL 파싱 — 두 인스턴스
+// ─────────────────────────────────────────────────────────────
+
+test('parseFilterUrl — ignite 필터 URL', () => {
+  assert.deepEqual(
+    parseFilterUrl('https://ignitecorp.atlassian.net/issues?filter=12571'),
+    { instance: 'ignite', filterId: '12571' }
+  );
+});
+
+test('parseFilterUrl — hmg(그룹웨어) 필터 URL', () => {
+  assert.deepEqual(
+    parseFilterUrl('https://hmg.atlassian.net/issues?filter=30012'),
+    { instance: 'hmg', filterId: '30012' }
+  );
+});
+
+test('parseFilterUrl — hmg 구 URL 도 받는다', () => {
+  assert.deepEqual(
+    parseFilterUrl('https://jira.hmg-corp.io/issues/?filter=99&jql=x'),
+    { instance: 'hmg', filterId: '99' }
+  );
+});
+
+test('parseFilterUrl — IssueNavigator 형태(requestId)', () => {
+  assert.deepEqual(
+    parseFilterUrl(
+      'https://hmg.atlassian.net/secure/IssueNavigator.jspa?requestId=555'
+    ),
+    { instance: 'hmg', filterId: '555' }
+  );
+});
+
+test('parseFilterUrl — 숫자만 넣으면 기본 인스턴스', () => {
+  assert.deepEqual(parseFilterUrl('12571'), {
+    instance: 'ignite',
+    filterId: '12571',
+  });
+});
+
+test('parseFilterUrl — 모르는 호스트나 필터 없는 URL 은 null', () => {
+  assert.equal(parseFilterUrl('https://example.com/issues?filter=1'), null);
+  assert.equal(parseFilterUrl('https://hmg.atlassian.net/browse/KQ-1'), null);
+  assert.equal(parseFilterUrl('그냥 텍스트'), null);
+  assert.equal(parseFilterUrl(''), null);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 대시보드 차트 주소 — 팀이 공유하는 것은 필터가 아니라 대시보드다
+// ─────────────────────────────────────────────────────────────
+
+test('parseGadgetUrl — 공유받은 대시보드 차트 주소', () => {
+  assert.deepEqual(
+    parseGadgetUrl(
+      'https://hmg.atlassian.net/jira/dashboards/10542?maximized=17305'
+    ),
+    { instance: 'hmg', dashboardId: '10542', gadgetId: '17305' }
+  );
+});
+
+test('parseGadgetUrl — 구 Dashboard.jspa 형태', () => {
+  assert.deepEqual(
+    parseGadgetUrl(
+      'https://hmg.atlassian.net/secure/Dashboard.jspa?selectPageId=10542&maximized=17305'
+    ),
+    { instance: 'hmg', dashboardId: '10542', gadgetId: '17305' }
+  );
+});
+
+test('parseGadgetUrl — 차트를 안 펼친 대시보드 주소는 거부', () => {
+  /*
+    대시보드 하나에 차트가 여럿이고 서로 다른 필터를 본다 (실측: 10542 는
+    가젯 5개가 필터 4개를 본다). 아무거나 고르면 사람이 보던 차트가 아닌
+    것으로 봇이 돌 수 있어서, 어느 차트인지 지정하게 한다.
+  */
+  assert.equal(
+    parseGadgetUrl('https://hmg.atlassian.net/jira/dashboards/10542'),
+    null
+  );
+});
+
+test('parseGadgetUrl — 모르는 호스트는 거부', () => {
+  assert.equal(
+    parseGadgetUrl('https://evil.example.com/jira/dashboards/1?maximized=2'),
+    null
+  );
+  assert.equal(parseGadgetUrl(''), null);
+});
+
+test('isFilterInput — 필터 주소와 대시보드 차트 주소를 모두 받는다', () => {
+  assert.equal(
+    isFilterInput('https://hmg.atlassian.net/issues?filter=15127'),
+    true
+  );
+  assert.equal(
+    isFilterInput(
+      'https://hmg.atlassian.net/jira/dashboards/10542?maximized=17305'
+    ),
+    true
+  );
+  assert.equal(isFilterInput('https://hmg.atlassian.net/browse/KQ-1'), false);
+  assert.equal(isFilterInput(''), false);
+});
+
+// ─────────────────────────────────────────────────────────────
+// project 절이 없는 필터 — 부모 티켓으로 범위를 가르는 팀이 있다
+// ─────────────────────────────────────────────────────────────
+
+test('deriveFromJql — project 절이 없으면 티켓 키에서 프로젝트를 읽는다', () => {
+  /*
+    실측(그룹웨어 QA 필터 15127): 여러 팀이 한 프로젝트를 같이 써서
+    `project =` 대신 부모 티켓을 나열해 자기 몫을 가른다. 전에는 여기서
+    프로젝트를 못 찾아 판정이 통째로 멎었다.
+  */
+  const d = deriveFromJql(
+    '(parent = ICTQMSCHE-22302 or parent = ICTQMSCHE-24806) and status != Done'
+  );
+  assert.equal(d.projectKey, 'ICTQMSCHE');
+});
+
+test('deriveFromJql — project 절이 있으면 그 값이 이긴다', () => {
+  const d = deriveFromJql('project = KQ AND parent = ABC-1 AND status != Done');
+  assert.equal(d.projectKey, 'KQ');
+});
+
+test('deriveFromJql — 키가 여러 프로젝트면 찍지 않는다', () => {
+  /*
+    하나를 고르면 나머지 프로젝트의 티켓을 조용히 빠뜨린다.
+    그건 "못 찾았다" 보다 나쁘다.
+  */
+  const d = deriveFromJql('parent = AAA-1 OR parent = BBB-2');
+  assert.equal(d.projectKey, null);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 개요 표시 — QA 기간을 오늘 기준으로 해석
+// ─────────────────────────────────────────────────────────────
+
+test('describeQaProgress — 기간 중이면 며칠차·며칠 남음', () => {
+  assert.equal(
+    describeQaProgress('2026-09-03', '2026-09-09', '2026-09-05'),
+    'QA 3일차 · 4일 남음'
+  );
+});
+
+test('describeQaProgress — 마지막 날과 그 전날', () => {
+  assert.equal(
+    describeQaProgress('2026-09-03', '2026-09-09', '2026-09-09'),
+    'QA 7일차 · 오늘 마감'
+  );
+  assert.equal(
+    describeQaProgress('2026-09-03', '2026-09-09', '2026-09-08'),
+    'QA 6일차 · 내일 마감'
+  );
+});
+
+test('describeQaProgress — 시작 전', () => {
+  assert.equal(
+    describeQaProgress('2026-09-10', '2026-09-16', '2026-09-09'),
+    '내일 시작'
+  );
+  assert.equal(
+    describeQaProgress('2026-09-10', '2026-09-16', '2026-09-07'),
+    '3일 뒤 시작'
+  );
+});
+
+test('describeQaProgress — 종료 후 (차수 전환이 안 된 상태)', () => {
+  assert.equal(
+    describeQaProgress('2026-09-03', '2026-09-09', '2026-09-10'),
+    '어제 종료'
+  );
+  assert.equal(
+    describeQaProgress('2026-09-03', '2026-09-09', '2026-09-12'),
+    '3일 전 종료'
+  );
+});
+
+test('describeQaProgress — 종료일을 못 읽었으면 일차만', () => {
+  assert.equal(
+    describeQaProgress('2026-09-03', null, '2026-09-05'),
+    'QA 3일차'
+  );
+});
+
+// ─────────────────────────────────────────────────────────────
+// 차수 준비 단계 판정
+// ─────────────────────────────────────────────────────────────
+
+const CYCLE_BASE = {
+  cycleLabel: null,
+  prodYmd: null,
+  deployPageId: null,
+  deployPageTitle: null,
+  collectedAt: '2026-09-08T00:00:00Z',
+};
+
+test('cycleStage — 필터가 가리키는 차수는 보는 중', () => {
+  const c = {
+    ...CYCLE_BASE,
+    deployYmd: '2026-09-14',
+    fixVersion: 'release_20260914',
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    jiraVersionExists: true,
+  };
+  assert.equal(
+    cycleStage(c, 'release_20260914', '2026-09-08').stage,
+    'watching'
+  );
+});
+
+test('cycleStage — Jira 버전이 없으면 예정 (봇이 볼 수 없다)', () => {
+  const c = {
+    ...CYCLE_BASE,
+    deployYmd: '2026-10-12',
+    fixVersion: 'release_20261012',
+    qaStartYmd: '2026-09-28',
+    qaEndYmd: '2026-10-07',
+    jiraVersionExists: false,
+  };
+  const r = cycleStage(c, 'release_20260914', '2026-09-08');
+  assert.equal(r.stage, 'planned');
+  assert.equal(r.label, '예정');
+});
+
+test('cycleStage — 버전은 있는데 필터가 안 가리키면 전환 대기', () => {
+  const c = {
+    ...CYCLE_BASE,
+    deployYmd: '2026-10-12',
+    fixVersion: 'release_20261012',
+    qaStartYmd: '2026-09-28',
+    qaEndYmd: '2026-10-07',
+    jiraVersionExists: true,
+  };
+  const r = cycleStage(c, 'release_20260914', '2026-09-29');
+  assert.equal(r.stage, 'pending_switch');
+  assert.equal(r.tone, 'warn');
+});
+
+test('cycleStage — QA 가 끝났고 보는 차수도 아니면 지난 차수', () => {
+  const c = {
+    ...CYCLE_BASE,
+    deployYmd: '2026-08-19',
+    fixVersion: 'release_20260819',
+    qaStartYmd: '2026-08-10',
+    qaEndYmd: '2026-08-16',
+    jiraVersionExists: true,
+  };
+  assert.equal(cycleStage(c, 'release_20260914', '2026-09-08').stage, 'past');
+});
+
+test('cycleStage — QA 가 끝나도 배포 전까지는 알림 중이다', () => {
+  // QA 종료(09-09)와 배포(09-14) 사이에도 봇은 할 일이 있다 (운영 배포 알림).
+  // 끊는 기준은 QA 종료일이 아니라 배포일이다.
+  const c = {
+    ...CYCLE_BASE,
+    deployYmd: '2026-09-14',
+    fixVersion: 'release_20260914',
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    jiraVersionExists: true,
+  };
+  assert.equal(
+    cycleStage(c, 'release_20260914', '2026-09-11').stage,
+    'watching'
+  );
+  // 배포 당일까지도 아직이다.
+  assert.equal(
+    cycleStage(c, 'release_20260914', '2026-09-14').stage,
+    'watching'
+  );
+});
+
+test('cycleStage — 배포가 끝났으면 필터가 남아 있어도 알림 중이 아니다', () => {
+  /*
+    실측 화면 오류(2026-09-17): release_20260914 는 09-14 에 배포까지 나갔는데
+    필터를 안 바꿔 뒀다는 이유로 사흘째 초록 "알림 중" 이었다. 그 줄만 보면
+    봇이 지금 그 차수를 돌보는 중으로 읽힌다.
+
+    그렇다고 접어 숨기지도 않는다 — 봇이 어디를 보고 있는지는 남아야 해서
+    이름을 "배포 완료" 로 따로 준다.
+  */
+  const c = {
+    ...CYCLE_BASE,
+    deployYmd: '2026-09-14',
+    fixVersion: 'release_20260914',
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    jiraVersionExists: true,
+  };
+  const still = cycleStage(c, 'release_20260914', '2026-09-17');
+  assert.equal(still.stage, 'past');
+  assert.equal(still.label, '배포 완료');
+  assert.equal(still.tone, 'off');
+
+  // 필터가 이미 옮겨 갔으면 평범한 지난 차수다.
+  assert.equal(
+    cycleStage(c, 'release_20261012', '2026-09-17').label,
+    '지난 차수'
+  );
+});
+
+test('상태 — 차수 사이에는 폴링이 늦어도 응답 없음이 아니다', () => {
+  /*
+    차수가 끝나고 다음 QA 가 아직이면 배치를 일부러 늦춘다(정시 1회).
+    그 구간에서 heartbeat 로 재면 늘 넘는데, 그걸 "응답 없음 · 조치 필요" 로
+    띄우고 있었다. 우리가 쉬기로 해 놓고 쉰다고 빨간 줄을 켜는 셈이다.
+    실측(2026-09-17): 09-14 배포 뒤 사흘째 빨간 줄 + 매시간 슬랙 알림.
+  */
+  const now = new Date('2026-09-17T01:30:00Z'); // KST 목 10:30 (업무시간)
+  const base = {
+    config: { ...demoConfig('demo', null), enabled: true },
+    now,
+    state: {
+      ...demoState('release_20260914'),
+      // 19시간 전 — heartbeat(기본 20분) 기준으로는 한참 넘는다
+      lastPollAt: '2026-09-16T06:28:46Z',
+      consecutiveFails: 0,
+      activeCycle: null,
+      filterCache: {
+        fixVersion: 'release_20260914',
+        checkedAt: '2026-09-16T04:11:41Z',
+      },
+    },
+  };
+
+  // 다음 QA 가 아직 → 쉬는 중이다. 빨간 줄이 아니라 "차수 완료".
+  const resting = computeHealth({ ...base, nextQaStartYmd: '2026-09-28' });
+  assert.equal(resting.label, '차수 완료');
+  assert.equal(resting.actionable, false);
+
+  // 다음 QA 가 시작됐으면 사람이 필터를 바꿔야 한다 — 경보가 살아 있어야 한다.
+  const due = computeHealth({ ...base, nextQaStartYmd: '2026-09-15' });
+  assert.equal(due.actionable, true);
+});
+
+// ─────────────────────────────────────────────────────────────
+// QA 스레드 표 파싱
+//
+// 엔글 QA 가 스레드에 올리는 "요청 티켓 / 대응상태" 표에서 기획티켓의
+// 완료 여부를 읽는다. Jira 상태만으로는 "개발 전 완료"와 "QA 통과 완료"가
+// 갈리지 않아서 이 표가 두 번째 축이 된다.
+// ─────────────────────────────────────────────────────────────
+
+test('parseThreadStatus: 대응상태를 뜻으로 좁힌다', () => {
+  assert.equal(parseThreadStatus('완료'), 'done');
+  assert.equal(parseThreadStatus('대응중'), 'working');
+  assert.equal(parseThreadStatus('이슈'), 'issue');
+  assert.equal(parseThreadStatus('테스트 대기'), 'waiting');
+  // 모르는 값을 완료로 넘기면 화면이 거짓말을 한다
+  assert.equal(parseThreadStatus('보류'), 'unknown');
+});
+
+test('parseThreadTable: 실제 스레드 표를 읽는다', () => {
+  const table = parseThreadTable(
+    [
+      '요청 티켓\t대응상태',
+      'KQ-18432\t테스트 대기',
+      'KQ-18246\t이슈',
+      'KQ-17670\t완료',
+      'KQ-16870\t대응중',
+    ].join('\n')
+  );
+  // 헤더는 티켓 키가 없어 저절로 걸러진다
+  assert.equal(table.size, 4);
+  assert.equal(table.get('KQ-17670'), 'done');
+  assert.equal(table.get('KQ-18246'), 'issue');
+  assert.equal(table.get('KQ-18432'), 'waiting');
+  assert.equal(table.get('KQ-16870'), 'working');
+});
+
+test('parseThreadTable: 알아볼 수 없는 상태는 담지 않는다', () => {
+  const table = parseThreadTable('KQ-1\t완료\nKQ-2\t???\nKQ-3\t');
+  assert.equal(table.size, 1);
+  assert.equal(table.get('KQ-1'), 'done');
+  // 없는 것과 모르는 것을 같게 두지 않는다
+  assert.equal(table.has('KQ-2'), false);
+  assert.equal(table.has('KQ-3'), false);
+});
+
+// ─────────────────────────────────────────────────────────────
+// Tier 3 · 레이블 참조 담당자
+//
+// QA 팀이 김가빈에게 잘못 배정한 티켓도 레이블에 원 티켓 키를 달고 온다.
+// 그 티켓의 담당자를 보면 최소한 "우리 건이 아니다 + 누구 같다"까지는 말할 수 있다.
+// 전에는 이걸 버리고 "데이터 모두 없음"으로 끝냈다.
+// ─────────────────────────────────────────────────────────────
+
+test('isQaBatchTicket: 차수 공용 배치 티켓을 가려낸다', () => {
+  // 실측 KQ-18292 — 그 차수 모든 버그에 붙어 있어 라우팅 근거가 못 된다
+  assert.equal(isQaBatchTicket('[정기배포 QA] 2026-09-14'), true);
+  assert.equal(isQaBatchTicket('  [정기배포QA] 2026-10-12'), true);
+  assert.equal(isQaBatchTicket('[기획][BO] 세금계산서 일괄등록'), false);
+  assert.equal(isQaBatchTicket(undefined), false);
+});
+
+const REF_MEMBERS = [
+  { accountId: 'acc-hanbin', name: '조한빈', slackId: 'U1' },
+  { accountId: 'acc-hyunji', name: '손현지', slackId: 'U2' },
+];
+
+/** 고정 응답 Jira. 호출된 키를 기록해 배치 티켓을 건너뛰는지도 본다. */
+function refJira(
+  issues: Record<string, JiraIssue>,
+  kids: Record<string, JiraIssue[]> = {}
+): JiraPort & { asked: string[] } {
+  const asked: string[] = [];
+  return {
+    asked,
+    async getIssue(key: string) {
+      asked.push(key);
+      const i = issues[key];
+      if (!i) throw new Error(`no such issue ${key}`);
+      return i;
+    },
+    async search(jql: string) {
+      const m = jql.match(/parent = (\S+)/);
+      return (m && kids[m[1]]) || [];
+    },
+  };
+}
+
+const bug = (labels: string[]): JiraIssue => ({
+  key: 'KQ-18696',
+  fields: { summary: '[APP_입고검수] 노출 위치 상이', labels },
+});
+
+test('findViaRefOwner: 배치 티켓은 근거에서 뺀다', async () => {
+  const jira = refJira({
+    'KQ-18292': {
+      key: 'KQ-18292',
+      fields: {
+        summary: '[정기배포 QA] 2026-09-14',
+        assignee: { accountId: 'acc-ngle', displayName: '김홍련' },
+      },
+    },
+    'KQ-18432': {
+      key: 'KQ-18432',
+      fields: {
+        summary: '[체카 RO 단가 변경]',
+        assignee: { accountId: 'acc-oh', displayName: '오유연' },
+      },
+    },
+  });
+  const r = await findViaRefOwner(
+    bug(['KQ-18292', 'KQ-18432', '엔글QA']),
+    REF_MEMBERS,
+    jira
+  );
+  assert.ok(r);
+  // 배치 티켓 담당자(김홍련)를 집으면 모든 티켓이 같은 사람을 가리킨다
+  assert.equal(r.name, '오유연');
+  assert.equal(r.isMember, false);
+  assert.deepEqual(r.evidence, ['KQ-18432']);
+});
+
+test('findViaRefOwner: 우리 팀원이면 배정 대상으로 집는다', async () => {
+  const jira = refJira({
+    'KQ-18432': {
+      key: 'KQ-18432',
+      fields: {
+        summary: '[체카 RO]',
+        assignee: { accountId: 'acc-hanbin', displayName: '조한빈' },
+      },
+    },
+  });
+  const r = await findViaRefOwner(bug(['KQ-18432']), REF_MEMBERS, jira);
+  assert.equal(r?.name, '조한빈');
+  assert.equal(r?.isMember, true);
+});
+
+test('findViaRefOwner: 기획자보다 개발티켓 담당자를 먼저 본다', async () => {
+  // 기획 티켓의 담당자는 기획자다. 부모 에픽 밑 개발처리를 봐야 개발자가 나온다.
+  const jira = refJira(
+    {
+      'KQ-17989': {
+        key: 'KQ-17989',
+        fields: {
+          summary: '[기획][BO] 세금계산서 일괄등록',
+          assignee: { accountId: 'acc-somi', displayName: '이소미' },
+          parent: { key: 'KQ-17988' },
+        },
+      },
+    },
+    {
+      'KQ-17988': [
+        {
+          key: 'KQ-18240',
+          fields: {
+            summary: '[BE] API 개발',
+            issuetype: { name: '개발처리' },
+            assignee: { accountId: 'acc-jong', displayName: '박종찬' },
+          },
+        },
+      ],
+    }
+  );
+  const r = await findViaRefOwner(bug(['KQ-17989']), REF_MEMBERS, jira);
+  assert.equal(r?.name, '박종찬');
+  assert.equal(r?.refKey, 'KQ-18240');
+  assert.equal(r?.isMember, false);
+});
+
+test('findViaRefOwner: 레이블에 참조가 없으면 null', async () => {
+  const r = await findViaRefOwner(
+    bug(['FE1', '엔글QA']),
+    MEMBERS,
+    stubJira({})
+  );
+  assert.equal(r, null);
+});
+
+// ─────────────────────────────────────────────────────────────
+// Tier 0 · 이미 적힌 담당자
+//
+// 필터는 "담당자 또는 공동담당자가 우리 6명" 인 Bug 를 잡는다. 트리아지
+// 상태로 들어오는 것만이 아니라 이미 배정된 것도 함께 걸린다.
+// 사람이 정해 놓은 답이 있으면 추측하지 않는다.
+// ─────────────────────────────────────────────────────────────
+
+const TRIAGE = 'acc-gabin';
+
+const withAssignee = (
+  assignee: string | null,
+  co: string | null = null,
+  reporter: string | null = null
+): Parameters<typeof findAssigned>[0] => ({
+  key: 'KQ-1',
+  fields: {
+    summary: '[BO_x] 현상',
+    ...(assignee
+      ? { assignee: { accountId: assignee, displayName: assignee } }
+      : {}),
+    ...(co ? { customfield_10132: { accountId: co, displayName: co } } : {}),
+    ...(reporter
+      ? { reporter: { accountId: reporter, displayName: reporter } }
+      : {}),
+  },
+});
+
+test('findAssigned: 트리아지 계정은 답이 아니다', () => {
+  // 김가빈에게 있는 것은 "아직 아무도 안 정했다"는 표시다
+  assert.equal(findAssigned(withAssignee(TRIAGE), REF_MEMBERS, TRIAGE), null);
+  assert.equal(findAssigned(withAssignee(null), REF_MEMBERS, TRIAGE), null);
+});
+
+test('findAssigned: 이미 배정된 팀원을 그대로 집는다', () => {
+  const r = findAssigned(withAssignee('acc-hanbin'), REF_MEMBERS, TRIAGE);
+  assert.equal(r?.name, 'acc-hanbin');
+  assert.equal(r?.isMember, true);
+  assert.equal(r?.field, 'assignee');
+});
+
+test('findAssigned: QA 인계 직후는 두 칸 다 트리아지', () => {
+  // 실측 KQ-18696 — assignee 를 김가빈으로 바꾸면 자동화가 공동담당자에 복사한다
+  assert.equal(
+    findAssigned(
+      withAssignee(TRIAGE, TRIAGE, 'acc-ngle-qa'),
+      REF_MEMBERS,
+      TRIAGE
+    ),
+    null
+  );
+});
+
+test('findAssigned: 보고자가 도로 들고 있으면 배정이 아니다', () => {
+  /*
+    실측 KQ-18605 — QA 가 넘겼다가 09-07 에 도로 가져갔다. 담당자만
+    라진환[nGle] 로 돌아가고 공동담당자엔 김가빈이 남았다. 담당자 칸을
+    믿으면 "저희 팀 건이 아님 · 추정 담당자 라진환" 이 나간다.
+  */
+  assert.equal(
+    findAssigned(
+      withAssignee('acc-ngle-qa', TRIAGE, 'acc-ngle-qa'),
+      REF_MEMBERS,
+      TRIAGE
+    ),
+    null
+  );
+  assert.equal(
+    findAssigned(
+      withAssignee('acc-ngle-qa', null, 'acc-ngle-qa'),
+      REF_MEMBERS,
+      TRIAGE
+    ),
+    null
+  );
+});
+
+test('findAssigned: 잔재가 남아도 팀원이 잡고 있으면 그게 답', () => {
+  const r = findAssigned(
+    withAssignee('acc-hanbin', TRIAGE, 'acc-ngle-qa'),
+    REF_MEMBERS,
+    TRIAGE
+  );
+  assert.equal(r?.name, 'acc-hanbin');
+  assert.equal(r?.isMember, true);
+});
+
+test('findAssigned: 팀원이 아니어도 후보로 돌려준다', () => {
+  // 우리 팀 밖 사람이면 "우리 건이 아닌 것 같다" 의 근거가 된다
+  const r = findAssigned(
+    withAssignee('acc-jongchan', null, 'acc-ngle-qa'),
+    REF_MEMBERS,
+    TRIAGE
+  );
+  assert.equal(r?.name, 'acc-jongchan');
+  assert.equal(r?.isMember, false);
+});
+
+test('findAssigned: 팀원 담당자가 팀원 아닌 담당자보다 우선', () => {
+  const r = findAssigned(
+    withAssignee('acc-outsider', 'acc-hanbin'),
+    REF_MEMBERS,
+    TRIAGE
+  );
+  assert.equal(r?.name, 'acc-hanbin');
+  assert.equal(r?.isMember, true);
+});
+
+// ─────────────────────────────────────────────────────────────
+// QA 스레드 찾기
+//
+// 엔글 QA 가 차수마다 #cpo-qa 에 "[9/14(월) 정기배포 QA]" 스레드를 판다.
+// 제목에 연도가 없어서 게시 시각으로 보완한다.
+// ─────────────────────────────────────────────────────────────
+
+test('parseThreadTitle: 제목에서 배포일을 읽는다', () => {
+  // 실측 — 2026-08-26 17:52 KST 게시
+  const r = parseThreadTitle(
+    '*[9/14(월) 정기배포 QA]*',
+    new Date('2026-08-26T08:52:59Z')
+  );
+  assert.equal(r?.deployYmd, '2026-09-14');
+});
+
+test('parseThreadTitle: 해를 넘기는 배포를 다음 해로 본다', () => {
+  // 12월에 판 1월 배포 스레드
+  const r = parseThreadTitle(
+    '[1/12(월) 정기배포 QA]',
+    new Date('2026-12-20T02:00:00Z')
+  );
+  assert.equal(r?.deployYmd, '2027-01-12');
+});
+
+test('parseThreadTitle: QA 스레드가 아니면 null', () => {
+  const at = new Date('2026-08-26T08:52:59Z');
+  assert.equal(
+    parseThreadTitle('[공지] 이번주 QA 주간회의 없습니다', at),
+    null
+  );
+  assert.equal(parseThreadTitle('[비정기배포 검토 요청]', at), null);
+  // 날짜가 없으면 어느 차수인지 못 고른다
+  assert.equal(parseThreadTitle('[정기배포 QA]', at), null);
+});
+
+test('shouldLookForThread: 이미 찾았으면 다시 찾지 않는다', () => {
+  assert.equal(
+    shouldLookForThread(
+      { deployYmd: '2026-09-14', qaThreadTs: '1787734379.373189' },
+      '2026-09-09'
+    ),
+    false
+  );
+});
+
+test('shouldLookForThread: 배포일이 한 달 안이면 찾는다', () => {
+  // 실측 — 9/14 스레드는 8/26 에 생겼다 (배포 19일 전)
+  assert.equal(
+    shouldLookForThread({ deployYmd: '2026-09-14' }, '2026-09-09'),
+    true
+  );
+  // 창 경계(+30일)까지는 본다
+  assert.equal(
+    shouldLookForThread({ deployYmd: '2026-10-09' }, '2026-09-09'),
+    true
+  );
+  /*
+    10-12 차수는 33일 뒤라 아직 창 밖이다. 실제로도 그 스레드는 없다 —
+    2주 주기에 배포 19일 전 생성이므로 9/12 쯤부터 창에 들어온다.
+  */
+  assert.equal(
+    shouldLookForThread({ deployYmd: '2026-10-12' }, '2026-09-09'),
+    false
+  );
+  assert.equal(
+    shouldLookForThread({ deployYmd: '2026-10-12' }, '2026-09-12'),
+    true
+  );
+  // 지난 차수는 이제 와서 찾을 이유가 없다
+  assert.equal(
+    shouldLookForThread({ deployYmd: '2026-08-31' }, '2026-09-09'),
+    false
+  );
+});
+
+// ─────────────────────────────────────────────────────────────
+// 일정 판정 — SQL 과 같은 답을 내야 한다
+//
+// 규칙이 SQL(qa_router_milestone·qa_router_latest_ymd·*_workday)과 TS
+// (status.ts)에 각각 있다. 어긋나면 "화면은 9/14 라는데 알림은 9/10 에
+// 왔다" 가 되므로 여기서 묶는다. 기대값은 실제 DB 에서 뽑아 적었다.
+// ─────────────────────────────────────────────────────────────
+
+/** 실측 release_20260914. 본문만 9/10 으로 남아 있던 그 차수다. */
+const CYCLE_0914: DeployCycle = {
+  deployYmd: '2026-09-14',
+  fixVersion: 'release_20260914',
+  cycleLabel: null,
+  qaStartYmd: '2026-09-03',
+  qaEndYmd: '2026-09-09',
+  prodYmd: '2026-09-10',
+  deployPageId: null,
+  deployPageTitle: 'Dev) 배포 - 2026-09-14(정기)',
+  jiraVersionExists: true,
+  collectedAt: '2026-09-10T00:00:00Z',
+};
+
+test('배포일은 제목을 쓰고 본문은 불일치로 남긴다', () => {
+  const r = resolveDeployYmd(CYCLE_0914);
+  assert.equal(r.ymd, '2026-09-14');
+  assert.equal(r.source, 'ledgerTitle');
+  // 스레드를 못 읽었으니 추정이다.
+  assert.equal(r.estimated, true);
+  // 무엇을 못 읽어서 추정인지도 들고 있어야 화면에 적을 수 있다.
+  assert.deepEqual(r.pending, ['thread']);
+  assert.deepEqual(r.others, [{ source: 'ledgerBody', ymd: '2026-09-10' }]);
+});
+
+test('스레드가 더 늦으면 스레드가 이긴다 (배포는 밀리기만 한다)', () => {
+  const r = resolveDeployYmd({
+    ...CYCLE_0914,
+    threadDeployYmd: '2026-09-21',
+  });
+  assert.equal(r.ymd, '2026-09-21');
+  assert.equal(r.source, 'thread');
+  assert.equal(r.estimated, false);
+  assert.deepEqual(r.pending, []);
+});
+
+test('스레드가 더 이르면 제목이 이긴다 (당겨지지 않는다)', () => {
+  const r = resolveDeployYmd({
+    ...CYCLE_0914,
+    threadDeployYmd: '2026-09-07',
+  });
+  assert.equal(r.ymd, '2026-09-14');
+});
+
+test('QA 종료는 대장과 스레드 중 늦은 쪽', () => {
+  assert.equal(resolveQaEndYmd(CYCLE_0914).ymd, '2026-09-09');
+  // 스레드를 못 읽었으면 미확인으로 남는다 (규칙상 둘 다 만족해야 종료다).
+  assert.deepEqual(resolveQaEndYmd(CYCLE_0914).pending, ['thread']);
+  assert.deepEqual(
+    resolveQaEndYmd({ ...CYCLE_0914, threadQaEndYmd: '2026-09-13' }).pending,
+    []
+  );
+  assert.equal(
+    resolveQaEndYmd({ ...CYCLE_0914, threadQaEndYmd: '2026-09-13' }).ymd,
+    '2026-09-13'
+  );
+});
+
+test('근무일 보정: 배포 경고는 당기고 QA 종료는 미룬다', () => {
+  // 2026-09-14 은 월요일 → 이전 근무일은 09-11(금)
+  assert.equal(prevWorkday('2026-09-14'), '2026-09-11');
+  // 2026-09-13 은 일요일 → 그 날 또는 뒤 첫 근무일은 09-14(월)
+  assert.equal(nextWorkday('2026-09-13'), '2026-09-14');
+  // 평일은 그대로
+  assert.equal(nextWorkday('2026-09-09'), '2026-09-09');
+});
+
+test('분기점 판정이 SQL 과 같다', () => {
+  const s = {
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-14',
+  };
+  // DB 에서 뽑은 표와 같은 값이어야 한다.
+  assert.equal(milestoneOn(s, '2026-09-03'), '오늘 QA 시작');
+  assert.equal(milestoneOn(s, '2026-09-09'), 'QA 종료');
+  assert.equal(milestoneOn(s, '2026-09-10'), null);
+  assert.equal(milestoneOn(s, '2026-09-11'), '3일 뒤 운영 배포');
+  assert.equal(milestoneOn(s, '2026-09-12'), null);
+  assert.equal(milestoneOn(s, '2026-09-13'), null);
+  assert.equal(milestoneOn(s, '2026-09-14'), '오늘 운영 배포');
+  assert.equal(milestoneOn(s, '2026-09-15'), null);
+});
+
+test('스레드를 못 읽어도 이미 읽어 둔 상태를 0 으로 덮지 않는다', () => {
+  /*
+    실제로 밟은 사고: 읽기 토큰 없이 "지금 갱신" 을 한 번 눌렀더니
+    threadDone 이 7 → 0 이 됐다. 화면은 그걸 "아무것도 안 끝났다" 로 그리고,
+    그 값이 18시 마감 요약까지 그대로 나간다.
+    "못 읽음" 과 "0 건" 은 다른 말이다.
+  */
+  const prev = {
+    total: 2,
+    threadDone: 2,
+    ticketDone: 0,
+    tickets: [
+      { key: 'KQ-1', threadStatus: 'done' },
+      { key: 'KQ-2', threadStatus: 'done' },
+    ],
+  } as unknown as Parameters<typeof threadTableFrom>[0];
+
+  const carried = threadTableFrom(prev);
+  assert.equal(carried?.get('KQ-1'), 'done');
+  assert.equal(carried?.get('KQ-2'), 'done');
+
+  // 이전 값이 없으면 되돌릴 것도 없다 (undefined 여야 새로 읽은 값이 그대로 쓰인다).
+  assert.equal(threadTableFrom(null), undefined);
+  assert.equal(
+    threadTableFrom({
+      total: 1,
+      threadDone: 0,
+      ticketDone: 0,
+      tickets: [{ key: 'KQ-1', threadStatus: null }],
+    } as unknown as Parameters<typeof threadTableFrom>[0]),
+    undefined
+  );
+});
+
+// ─────────────────────────────────────────────────────────────
+// 판정 뒤 결과 확인
+//
+// 봇 조회가 `assignee = 트리아지` 라서 누가 티켓을 가져가면 검색에서 빠진다.
+// 그 뒤를 따로 보지 않으면 "확인 필요" 가 영영 안 준다 — 실측으로 3건 전부
+// 이미 타팀이 가져가 끝난 건이었는데 화면은 계속 3이었다.
+// ─────────────────────────────────────────────────────────────
+
+const OC_MEMBERS = [{ accountId: 'u-park', name: '박성찬', slackId: 'U1' }];
+const OC_TRIAGE = 'u-triage';
+const ocIds = new Set(OC_MEMBERS.map((m) => m.accountId));
+
+test('아직 트리아지가 쥐고 있으면 pending', () => {
+  const r = outcomeOf(
+    {
+      key: 'KQ-1',
+      fields: { assignee: { accountId: OC_TRIAGE, displayName: '김가빈' } },
+    },
+    ocIds,
+    OC_TRIAGE
+  );
+  assert.equal(r.outcome, 'pending');
+  assert.equal(r.name, null);
+});
+
+test('타팀이 가져가면 other_team, 우리 팀이면 our_team', () => {
+  const other = outcomeOf(
+    {
+      key: 'KQ-2',
+      fields: { assignee: { accountId: 'u-outsider', displayName: '이상일' } },
+    },
+    ocIds,
+    OC_TRIAGE
+  );
+  assert.equal(other.outcome, 'other_team');
+  assert.equal(other.name, '이상일');
+
+  const ours = outcomeOf(
+    {
+      key: 'KQ-3',
+      fields: { assignee: { accountId: 'u-park', displayName: '박성찬' } },
+    },
+    ocIds,
+    OC_TRIAGE
+  );
+  assert.equal(ours.outcome, 'our_team');
+});
+
+test('담당자가 트리아지로 남아 있어도 공동담당자를 본다', () => {
+  /*
+    Automation 이 공동담당자를 복사해 두므로 인계 직후에도 트리아지 이름이
+    남아 있을 수 있다. 담당자만 보면 "아직 아무도 안 가져갔다" 로 잘못 읽는다.
+  */
+  const r = outcomeOf(
+    {
+      key: 'KQ-4',
+      fields: {
+        assignee: { accountId: OC_TRIAGE, displayName: '김가빈' },
+        customfield_10132: { accountId: 'u-park', displayName: '박성찬' },
+      },
+    },
+    ocIds,
+    OC_TRIAGE
+  );
+  assert.equal(r.outcome, 'our_team');
+  assert.equal(r.name, '박성찬');
+});
+
+test('타팀이라고 넘겼는데 우리 팀이 가져가면 놓친 것', () => {
+  // 그 사람은 멘션을 못 받고 스스로 발견했다는 뜻이라 눈에 띄어야 한다.
+  assert.equal(isMissed('ask_other', 'our_team'), true);
+  assert.equal(isMissed('unknown', 'our_team'), true);
+  // 우리 팀으로 알렸고 우리 팀이 가져갔으면 맞은 것이다.
+  assert.equal(isMissed('ask_fe1', 'our_team'), false);
+  // 타팀이 가져갔으면 추정이 맞았다.
+  assert.equal(isMissed('ask_other', 'other_team'), false);
+  assert.equal(isMissed('unknown', 'pending'), false);
+});
+
+test('우리 팀 + 타팀 + 미배정 = 전체 (세 칸에 빈틈이 없다)', () => {
+  /*
+    화면 카드가 약속하는 것은 "전체가 어디로 갔는지 한 줄로 맞아떨어진다" 다.
+    전에는 미배정에만 "발송 실패는 빼고" 가 붙어서, 발송에 실패했고 아직
+    아무도 안 가져간 건이 세 칸 어디에도 안 들어갔다 — 모든 차수에서 2건씩
+    합이 모자랐는데 화면만 보고는 알 수 없었다.
+
+    오류·판정 여부와 무관하게 모든 건이 정확히 한 칸을 받아야 한다.
+  */
+  for (const outcome of ['our_team', 'other_team', 'pending', null] as const) {
+    const b = settlementBucket(outcome);
+    assert.ok(
+      b === 'our_team' || b === 'other_team' || b === 'open',
+      `${outcome} 이 어느 칸에도 안 들어감`
+    );
+  }
+  // 확인 전(null)과 트리아지 보유(pending)는 같은 칸이다. 둘 다 주인이 없다.
+  assert.equal(settlementBucket(null), 'open');
+  assert.equal(settlementBucket('pending'), 'open');
+  assert.equal(settlementBucket('our_team'), 'our_team');
+  assert.equal(settlementBucket('other_team'), 'other_team');
+});
+
+test('확인 필요 총계는 칩 값의 합이 아니다 (한 건이 둘일 수 있다)', () => {
+  /*
+    놓침과 발송 실패는 배타적이지 않다. 발송에 실패했는데 결국 우리 팀이
+    가져간 건은 둘 다다. 화면이 두 칩 값을 더해 총계를 냈더니 실측 12건이
+    14건으로 부풀었다 — 방금 세 칸에서 고친 것과 같은 종류의 결함이
+    바로 아래 줄에 남아 있었다.
+  */
+  const both = {
+    classification: 'ask_other',
+    error: 'not_in_channel',
+    outcome: 'our_team' as const,
+  };
+  assert.deepEqual(problemsOf(both), ['send_failed', 'missed']);
+  assert.equal(hasProblem(both), true);
+
+  // 판정이 넘어진 건은 발송이 아니라 판정 쪽으로 센다. 고칠 데가 다르다.
+  assert.deepEqual(
+    problemsOf({ classification: null, error: 'Jira 500', outcome: 'pending' }),
+    ['judge_failed']
+  );
+  // 아무 문제 없는 건
+  const clean = {
+    classification: 'ask_fe1',
+    error: null,
+    outcome: 'our_team' as const,
+  };
+  assert.deepEqual(problemsOf(clean), []);
+  assert.equal(hasProblem(clean), false);
+
+  // 데모 전 차수에서 "칩 합 > 총계" 가 실제로 벌어지는지 확인한다.
+  const today = '2026-09-10';
+  const cycles = demoCycles(today);
+  const all = demoEvents(cycles, today);
+  let sawOverlap = false;
+  for (const c of cycles) {
+    const ev = all.filter(
+      (e) => e.fixVersion === c.fixVersion && e.classification !== 'system'
+    );
+    if (ev.length === 0) continue;
+    const chipSum = (['missed', 'send_failed', 'judge_failed'] as const)
+      .map((k) => ev.filter((e) => problemsOf(e).includes(k)).length)
+      .reduce((a, b) => a + b, 0);
+    const total = ev.filter(hasProblem).length;
+    assert.ok(total <= chipSum, `${c.fixVersion} 총계가 칩 합보다 큼`);
+    if (total < chipSum) sawOverlap = true;
+  }
+  assert.ok(
+    sawOverlap,
+    '겹치는 건이 하나도 없어 이 테스트가 아무것도 안 지킨다'
+  );
+});
+
+test('데모 전 차수에서 세 칸의 합이 총건수와 같다', () => {
+  // 조건식이 아니라 실제 데이터로 확인한다. 위 단위 테스트는 함수만 보고,
+  // 합이 깨지는 것은 늘 "어떤 조합이 실제로 존재하느냐" 에서 나왔다.
+  const today = '2026-09-10';
+  const cycles = demoCycles(today);
+  const all = demoEvents(cycles, today);
+  let checked = 0;
+  for (const c of cycles) {
+    const ev = all.filter(
+      (e) => e.fixVersion === c.fixVersion && e.classification !== 'system'
+    );
+    if (ev.length === 0) continue;
+    checked++;
+    const n = (b: string) =>
+      ev.filter((e) => settlementBucket(e.outcome) === b).length;
+    assert.equal(
+      n('our_team') + n('other_team') + n('open'),
+      ev.length,
+      `${c.fixVersion} 합이 안 맞음`
+    );
+  }
+  assert.ok(checked > 0, '검사한 차수가 없다');
+});
+
+test('데모에 담당자 배정 실패 갈래가 빠짐없이 들어 있다', () => {
+  /*
+    난수로 뿌리면 씨드에 따라 어떤 갈래는 한 건도 안 나온다. 실제로
+    release_20260914 에는 발송 실패가 한 종류뿐이었고 판정 실패는 어느
+    차수에도 없었다 — 데모로 화면을 검수하는데 검수 대상이 없던 셈이다.
+  */
+  const today = '2026-09-10';
+  const cycles = demoCycles(today);
+  const ev = demoEvents(cycles, today).filter(
+    (e) => e.fixVersion === 'release_20260914'
+  );
+  const has = (f: (e: (typeof ev)[number]) => boolean) => ev.some(f);
+
+  // 판정 자체가 넘어진 건 (tick.ts 의 catch 가 남기는 모양)
+  assert.ok(
+    has((e) => e.classification === null && !!e.error),
+    '판정 실패 없음'
+  );
+  // 놓침 두 갈래 + 판정 실패까지 셋
+  assert.ok(
+    has((e) => isMissed(e.classification, e.outcome)),
+    '놓침 없음'
+  );
+  assert.ok(
+    has((e) => e.classification === 'ask_other' && e.outcome === 'our_team'),
+    '타팀으로 오판 없음'
+  );
+  assert.ok(
+    has((e) => e.classification === 'unknown' && e.outcome === 'our_team'),
+    '담당자 식별 실패 없음'
+  );
+  // 예상 빗나감 (우리 팀으로 알렸는데 타팀이 가져감)
+  assert.ok(
+    has((e) => e.classification === 'ask_fe1' && e.outcome === 'other_team'),
+    '예상 빗나감 없음'
+  );
+  // Slack 오류는 코드별로. 치명 오류와 일시 오류가 화면에서 같게 보이는지 볼 수 있어야 한다.
+  for (const code of [
+    'not_in_channel',
+    'invalid_auth',
+    'channel_not_found',
+    'ratelimited',
+  ]) {
+    assert.ok(
+      has((e) => e.error === code),
+      `${code} 없음`
+    );
+  }
+  // 발송 실패와 놓침이 겹친 건
+  assert.ok(
+    has((e) => !!e.error && isMissed(e.classification, e.outcome)),
+    '발송 실패 + 놓침 없음'
+  );
+  // 발송 실패인데 아직 주인이 없는 건 — 세 칸 합이 깨지던 조합이다
+  assert.ok(
+    has((e) => !!e.error && settlementBucket(e.outcome) === 'open'),
+    '발송 실패 + 미배정 없음'
+  );
+});
+
+test('판정이 넘어진 건도 우리 팀이 가져갔으면 놓친 것', () => {
+  /*
+    tick.ts 의 catch 는 classification 을 비운 채 기록한다. 봇이 답을 아예
+    못 냈으니 멘션도 안 나갔다 — 가장 심한 놓침인데 전에는 false 였다.
+  */
+  assert.equal(isMissed(null, 'our_team'), true);
+  // 타팀이 가져갔으면 우리 일이 아니었다. 배치는 고쳐야 하지만 놓침은 아니다.
+  assert.equal(isMissed(null, 'other_team'), false);
+  assert.equal(isMissed(null, 'pending'), false);
+});
+
+/*
+  ── 판정 단계 순서가 설정값이라는 것 ──
+
+  순서를 코드에서 데이터로 옮긴 뒤, "옮겼는데 사실은 안 읽더라" 를 막는다.
+  아래 티켓은 **두 단계가 동시에 답할 수 있게** 꾸며져 있다.
+    · 티켓 담당자 = 손현지 (우리 팀)          → assigned 단계가 답함
+    · 레이블이 가리킨 KQ-1 담당자 = 박성찬    → ref_owner 단계가 답함
+  그래서 어느 쪽이 나오는지가 곧 "순서를 읽었나" 의 답이다.
+*/
+const TIER_MEMBERS = [
+  { accountId: 'u-sohn', name: '손현지', slackId: null },
+  { accountId: 'u-park', name: '박성찬', slackId: null },
+];
+
+const tierIssue = {
+  key: 'KQ-9001',
+  fields: {
+    summary: '[BO_주문관리] 목록 정렬이 틀립니다',
+    labels: ['KQ-1'],
+    assignee: { accountId: 'u-sohn', displayName: '손현지' },
+  },
+} as unknown as Parameters<typeof judge>[0];
+
+/** 레이블이 가리킨 KQ-1 은 박성찬 담당. 형제·에픽 조회는 빈손으로 답한다. */
+const tierJira = {
+  async getIssue(key: string) {
+    if (key === 'KQ-1') {
+      return {
+        key,
+        fields: {
+          summary: '[기획] 주문 목록 정렬',
+          assignee: { accountId: 'u-park', displayName: '박성찬' },
+        },
+      };
+    }
+    return { key, fields: {} };
+  },
+  async search() {
+    return [];
+  },
+} as unknown as Parameters<typeof judge>[1];
+
+const tierCtx = {
+  projectKey: 'KQ',
+  fixVersion: 'release_20260914',
+  triageAccountId: 'u-triage',
+  jiraFilterId: '12571',
+  members: TIER_MEMBERS,
+};
+
+test('판정 — 기본 순서에서는 티켓 담당자가 레이블 참조를 이긴다', async () => {
+  const r = await judge(tierIssue, tierJira, tierCtx);
+  assert.equal(r.via, 'assigned');
+  assert.equal(r.name, '손현지');
+});
+
+test('판정 — 순서를 뒤집으면 레이블 참조가 먼저 답한다', async () => {
+  const r = await judge(tierIssue, tierJira, {
+    ...tierCtx,
+    tiers: ['ref_owner', 'assigned'],
+  });
+  assert.equal(r.via, 'ref_owner');
+  assert.equal(r.name, '박성찬');
+});
+
+test('판정 — 배열에서 뺀 단계는 아예 돌지 않는다', async () => {
+  // assigned 만 남기면 레이블 참조는 볼 기회조차 없다.
+  const r = await judge(tierIssue, tierJira, { ...tierCtx, tiers: ['epic'] });
+  assert.equal(r.via, 'none');
+  assert.equal(r.classification, 'unknown');
+  // 못 찾았다는 문구는 **실제로 돌린 단계만** 말해야 한다.
+  assert.match(r.reason!, /에픽 추적/);
+  assert.doesNotMatch(r.reason!, /레이블 참조|티켓 담당자/);
+});
+
+test('판정 — 빈 배열이면 기본 순서로 돈다 (알림이 멎지 않는다)', async () => {
+  // 설정이 비어 있는 것은 "판정을 끄고 싶다" 가 아니다.
+  const r = await judge(tierIssue, tierJira, { ...tierCtx, tiers: [] });
+  assert.equal(r.via, 'assigned');
+});
+
+/*
+  ── 알림 규칙 ──
+
+  날짜 알림 네 종을 코드에서 데이터로 옮겼다. 두 가지를 고정한다.
+    ① 기본 규칙으로 돌린 결과가 **옛 milestoneOn 과 한 날도 다르지 않을 것**
+    ② 새 규칙을 더하면 사람이 넣은 날짜에 정확히 울릴 것
+
+  ①이 없으면 "설정으로 뺐다" 가 조용한 동작 변경이 된다.
+*/
+test('알림 규칙 — 기본값이 기존 분기점과 다른 날은 뺀 규칙 하루뿐이다', () => {
+  const s = {
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-14',
+  };
+  /*
+    ── 왜 하루가 갈리나 ──
+
+    `{days}일 뒤 운영 배포`(운영 배포일 1일 전 · 주말이면 이전 근무일)를
+    기본값에서 **일부러 뺐다**. 실측에서 그 규칙은 QA 종료와 같은 날에
+    걸려 한 번도 안 나갔고, 기본 본문이 이미 운영 배포일을 적고 있어
+    같은 말을 하루 앞서 반복하려던 것이었다.
+
+    `milestoneOn` 은 옛 하드코딩 판이고 그 분기를 아직 갖고 있다. 지금은
+    SQL 어디서도 안 부르는 참고용이라 그대로 두되, **갈리는 날이 정확히
+    그 하루뿐**임을 여기서 고정한다. 다른 날이 갈리면 그건 사고다.
+  */
+  const droppedDay = '2026-09-11'; // prevWorkday(09-14 월) = 09-11 금
+  const diffs: string[] = [];
+
+  for (let i = 0; i < 40; i++) {
+    const day = new Date(Date.UTC(2026, 7, 25) + i * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const now = milestoneFrom(DEFAULT_ALERT_RULES, s, day);
+    const legacy = milestoneOn(s, day);
+    if (now !== legacy) diffs.push(day);
+    else continue;
+    // 갈리는 유일한 날: 옛 판은 말하고, 지금은 아무 말도 안 한다.
+    assert.equal(day, droppedDay, `${day} 에서 예상 못 한 차이`);
+    assert.equal(now, null);
+    assert.equal(legacy, '3일 뒤 운영 배포');
+  }
+
+  assert.deepEqual(diffs, [droppedDay], '갈리는 날이 하루가 아니다');
+});
+
+test('알림 규칙 — 3일 전이라고 넣으면 정확히 3일 전에 울린다', () => {
+  /*
+    실측으로 밟은 버그를 고정한다. 기존 prevWorkday 는 "이 날 **이전**의
+    마지막 근무일" 이라 평일에도 하루를 뺀다. 그걸 그대로 쓰니 `-3일` 규칙이
+    **6일 전**(8/28 금)에 울렸다 — 9/3 목에서 3일 빼면 8/31 월인데, 월요일도
+    근무일인데 하루를 더 뺀 것이다.
+  */
+  const s = {
+    qaStartYmd: '2026-09-03', // 목
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-14',
+  };
+  const rules = [
+    ...DEFAULT_ALERT_RULES,
+    {
+      id: 'qaSoon',
+      anchor: 'qa_start' as const,
+      offset: -3,
+      shift: 'prev_workday' as const,
+      label: '{days}일 뒤 QA 시작',
+      enabled: true,
+    },
+  ];
+  assert.equal(milestoneFrom(rules, s, '2026-08-31'), '3일 뒤 QA 시작');
+  assert.equal(milestoneFrom(rules, s, '2026-08-28'), null);
+});
+
+test('알림 규칙 — 주말에 걸리면 비켜 가고, 평일이면 그대로 둔다', () => {
+  // 9/12 는 토요일. prev 는 금요일로 당기고 next 는 월요일로 민다.
+  assert.equal(ruleDay('2026-09-12', 0, 'prev_workday'), '2026-09-11');
+  assert.equal(ruleDay('2026-09-12', 0, 'next_workday'), '2026-09-14');
+  assert.equal(ruleDay('2026-09-12', 0, 'none'), '2026-09-12');
+  // 9/11 은 금요일. 어떤 보정이든 움직이지 않아야 한다.
+  for (const sh of ['none', 'prev_workday', 'next_workday'] as const) {
+    assert.equal(ruleDay('2026-09-11', 0, sh), '2026-09-11');
+  }
+});
+
+test('알림 규칙 — 하루에 둘이 걸리면 위에 있는 것 하나만 울린다', () => {
+  /*
+    실제로 겹친다. QA 종료가 금요일이고 운영 배포가 같은 날이면 둘 다
+    맞는다. 둘 다 보내면 같은 차수 이야기가 두 번 온다.
+  */
+  const s = {
+    qaStartYmd: '2026-09-01',
+    qaEndYmd: '2026-09-14',
+    prodYmd: '2026-09-14',
+  };
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-14'),
+    '오늘 운영 배포'
+  );
+  // 순서를 뒤집으면 반대가 나온다 — 순서가 곧 우선순위다.
+  const flipped = [...DEFAULT_ALERT_RULES].reverse();
+  assert.equal(milestoneFrom(flipped, s, '2026-09-14'), 'QA 종료');
+});
+
+test('알림 규칙 — 끈 규칙은 울리지 않는다', () => {
+  const s = {
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-14',
+  };
+  const off = DEFAULT_ALERT_RULES.map((r) =>
+    r.id === 'qaStart' ? { ...r, enabled: false } : r
+  );
+  assert.equal(milestoneFrom(off, s, '2026-09-03'), null);
+});
+
+/*
+  ── 차수별 알림 기준 덮어쓰기 ──
+
+  왜 필요했나 (실측):
+    Jira 차수명은 release_20260914 인데 GitLab 브랜치는 release/260910 이고
+    실제 운영 배포는 09-14 였다. 브랜치를 자른 날과 배포한 날이 4일 어긋난다.
+    그 차수 하나에 맞추려고 **설정**을 고치면 다음 차수부터 전부 틀어진다.
+
+  두 가지를 고정한다.
+    ① override 가 null(또는 undefined)이면 **설정값을 쓴다** — 지금 동작 그대로
+    ② 값이 있으면 그것을 쓴다
+
+  ①이 없으면 칸 하나를 더한 것이 조용한 동작 변경이 된다.
+*/
+test('차수 덮어쓰기 — null 이면 설정값을 쓴다 (한 날도 다르지 않다)', () => {
+  const s = {
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-14',
+  };
+  const configRules = [...DEFAULT_ALERT_RULES];
+
+  // 같은 배열을 그대로 돌려줘야 한다 (복사도 변형도 없다).
+  assert.equal(effectiveAlertRules(null, configRules), configRules);
+  // 컬럼이 아직 없는 DB 에 새 코드가 붙는 창에서는 undefined 가 온다.
+  assert.equal(effectiveAlertRules(undefined, configRules), configRules);
+
+  // 그리고 실제로 울리는 날이 한 날도 달라지지 않는다.
+  for (let i = 0; i < 60; i++) {
+    const day = new Date(Date.UTC(2026, 7, 20) + i * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    assert.equal(
+      milestoneFrom(effectiveAlertRules(null, configRules), s, day),
+      milestoneFrom(configRules, s, day),
+      `${day} 에서 갈림`
+    );
+  }
+});
+
+test('차수 덮어쓰기 — 값이 있으면 그것을 쓴다', () => {
+  /*
+    release_20260914 를 브랜치(release/260910) 기준으로 잡아 둔 상태를 흉내낸다.
+    설정은 09-10 을 배포일로 알고 있고, 이 차수만 09-14 로 맞춘다.
+  */
+  const s = {
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-10',
+  };
+  const configRules = [...DEFAULT_ALERT_RULES];
+  const override = [
+    {
+      id: 'prodToday',
+      anchor: 'prod' as const,
+      // 브랜치를 자른 날(09-10)보다 4일 뒤에 배포했다.
+      offset: 4,
+      shift: 'none' as const,
+      label: '오늘 운영 배포',
+      enabled: true,
+    },
+  ];
+
+  const used = effectiveAlertRules(override, configRules);
+  assert.equal(used, override);
+
+  // 설정값은 09-10 에 울리고, 덮어쓴 차수는 09-14 에 울린다.
+  assert.equal(milestoneFrom(configRules, s, '2026-09-10'), '오늘 운영 배포');
+  assert.equal(milestoneFrom(used, s, '2026-09-10'), null);
+  assert.equal(milestoneFrom(used, s, '2026-09-14'), '오늘 운영 배포');
+});
+
+test('차수 덮어쓰기 — 덮어쓴 차수인지 화면이 알 수 있다', () => {
+  // 이 값이 없으면 "왜 이 차수만 알림이 다르지" 를 나중에 아무도 못 푼다.
+  assert.equal(hasAlertOverride({}), false);
+  assert.equal(hasAlertOverride({ alertRulesOverride: null }), false);
+  assert.equal(
+    hasAlertOverride({ alertRulesOverride: [...DEFAULT_ALERT_RULES] }),
+    true
+  );
+});
+
+test('차수 덮어쓰기 — 저장 전에 깨진 규칙을 사람 말로 막는다', () => {
+  assert.equal(checkAlertRules([...DEFAULT_ALERT_RULES]), null);
+  // `[]` 는 알림을 통째로 끈 상태가 된다. DB CHECK 도 같은 것을 막는다.
+  assert.match(checkAlertRules([]) ?? '', /하나도 없습니다/);
+  assert.match(checkAlertRules('nope') ?? '', /형식이 잘못/);
+  assert.match(
+    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], anchor: 'nope' }]) ?? '',
+    /기준일이 잘못/
+  );
+  assert.match(
+    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], offset: 99 }]) ?? '',
+    /-60 ~ 60/
+  );
+  assert.match(
+    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], label: '  ' }]) ?? '',
+    /문구를 입력/
+  );
+  // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
+  assert.match(
+    checkAlertRules([DEFAULT_ALERT_RULES[0], DEFAULT_ALERT_RULES[0]]) ?? '',
+    /겹칩니다/
+  );
+  assert.match(
+    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], template: '{없는변수}' }]) ??
+      '',
+    /모르는 변수/
+  );
+});
+
+/*
+  알림 발송의 실체는 PL/pgSQL + pg_cron 이다. TS 만 고치면 화면은 새 규칙을
+  보여주는데 새벽에 나가는 것은 옛 규칙이다 — 그 어긋남은 아무도 못 본다.
+  그래서 크론 함수가 실제로 덮어쓰기를 읽는지 파일에서 확인한다.
+*/
+test('차수 덮어쓰기 — 크론 함수도 이 규칙을 읽는다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260915_qa_router_cycle_alert_rules.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 칸은 nullable 이고 기본값이 없다 — 기존 차수가 전부 null 이어야 한다.
+  assert.match(sql, /add column if not exists alert_rules_override jsonb;/);
+  assert.doesNotMatch(sql, /alert_rules_override jsonb[^;]*default/);
+  // 아침 브리핑이 설정값을 직접 읽지 않고 이 함수를 거친다.
+  const brief = sql.slice(
+    sql.indexOf('function public.qa_router_morning_brief')
+  );
+  assert.match(
+    brief,
+    /qa_router_alert_rules_for\(cyc\.alert_rules_override, r\.alert_rules\)/
+  );
+  // 그 함수는 coalesce 한 줄이다 — TS 의 effectiveAlertRules 와 같은 규칙.
+  assert.match(sql, /select coalesce\(p_override, p_config_rules\);/);
+});
+
+/*
+  ── 수집이 밀린 것을 알아보나 ──
+
+  실측으로 밟았다. 09시·17시에 걷기로 해 놓고 마지막 수집이 어제 13:26 인데
+  화면은 "마지막 수집 1일 전" 이라고만 했다 — 그게 정상인지 고장인지 말하지
+  않았다. 오늘 09시 슬롯을 놓친 상태다.
+*/
+test('수집 슬롯 — 지난 슬롯인데 안 걷혔으면 그 시각을 돌려준다', () => {
+  // 09-11(금) 10:00 KST = 09-11 01:00Z. 09시 슬롯이 이미 지났다.
+  const now = new Date('2026-09-11T01:00:00Z');
+  // 어제 13:26 이 마지막 → 오늘 09시 슬롯을 놓쳤다.
+  assert.equal(overdueSlot([9, 17], '2026-09-10T04:26:00Z', now), 9);
+  // 오늘 09:05 에 걷었으면 밀리지 않았다.
+  assert.equal(overdueSlot([9, 17], '2026-09-11T00:05:00Z', now), null);
+});
+
+test('수집 슬롯 — 첫 슬롯 전이면 밀린 것이 아니다', () => {
+  // 09-11 08:00 KST. 오늘 아직 지나온 슬롯이 없다.
+  const now = new Date('2026-09-10T23:00:00Z');
+  assert.equal(overdueSlot([9, 17], '2026-09-10T04:26:00Z', now), null);
+});
+
+test('수집 슬롯 — 한 번도 안 걷었으면 지난 슬롯을 가리킨다', () => {
+  const now = new Date('2026-09-11T09:00:00Z'); // 18:00 KST
+  assert.equal(overdueSlot([9, 17], null, now), 17);
+  // 슬롯을 하나도 안 골랐으면 밀릴 것도 없다.
+  assert.equal(overdueSlot([], null, now), null);
+});
+
+/*
+  ── Slack mrkdwn 뷰어 ──
+
+  깨지기 쉬운 곳 둘:
+    ① `<url|라벨>` 과 `*굵게*` 의 순서
+       굵게를 먼저 잡으면 라벨 안의 `*` 때문에 링크가 두 동강 난다.
+    ② 재귀와 전역 정규식
+       하나를 돌려 쓰면 안쪽 호출이 lastIndex 를 0 으로 되돌려 무한 루프가
+       된다. 실측으로 브라우저가 죽었다.
+*/
+test('Slack 뷰어 — 굵게가 링크를 감싸도 링크가 안 깨진다', () => {
+  const toks = tokenize('*<https://x.com/a|FE1 담당 기획건 7건 모두 QA 완료>*');
+  assert.deepEqual(toks, [
+    {
+      t: 'b',
+      kids: [
+        {
+          t: 'link',
+          url: 'https://x.com/a',
+          kids: [{ t: 'text', v: 'FE1 담당 기획건 7건 모두 QA 완료' }],
+        },
+      ],
+    },
+  ]);
+});
+
+test('Slack 뷰어 — 재귀 뒤에도 바깥 파싱이 이어진다', () => {
+  /*
+    이 테스트가 무한 루프를 잡는다.
+
+    전역 정규식 하나를 재귀에서 돌려 쓰면 `*굵게*` 를 파싱한 직후
+    lastIndex 가 0 이 되어 `A` 부터 다시 훑는다. 끝나지 않는다.
+  */
+  const toks = tokenize('A *굵게* B `코드` C');
+  assert.equal(toks.length, 5, `조각이 5개여야 하는데 ${toks.length}개`);
+  assert.deepEqual(toks[0], { t: 'text', v: 'A ' });
+  assert.deepEqual(toks[4], { t: 'text', v: ' C' });
+});
+
+test('Slack 뷰어 — 실제 머리글 한 줄', () => {
+  assert.deepEqual(
+    tokenize(':date: *Dev) 배포 - 2026-09-14(정기)* - `QA 종료`'),
+    [
+      { t: 'emoji', v: '📅' },
+      { t: 'text', v: ' ' },
+      { t: 'b', kids: [{ t: 'text', v: 'Dev) 배포 - 2026-09-14(정기)' }] },
+      { t: 'text', v: ' - ' },
+      { t: 'code', v: 'QA 종료' },
+    ]
+  );
+});
+
+test('Slack 뷰어 — 모르는 기호는 그대로 둔다', () => {
+  // 없는 기호를 빈칸으로 지우면 "기호가 안 나갔나" 를 화면이 숨긴다.
+  assert.deepEqual(tokenize(':no_such_emoji:'), [
+    { t: 'emoji', v: ':no_such_emoji:' },
+  ]);
+});
+
+test('Slack 뷰어 — 이스케이프를 되돌린다', () => {
+  // qa_router_esc() 가 `&` `<` `>` 를 바꿔 보낸다. 화면은 원래 글자로 보여야 한다.
+  assert.deepEqual(tokenize('A &amp; B &lt;C&gt;'), [
+    { t: 'text', v: 'A & B <C>' },
+  ]);
+});
+
+test('Slack 뷰어 — 링크 라벨의 > 가 링크를 끊지 않는다', () => {
+  /*
+    실측 사고: 라벨에 `>` 가 들어가면 Slack 이 거기서 링크를 끊는다.
+    그래서 qa_router_esc() 가 `&gt;` 로 바꿔 보낸다 — 뷰어도 그 상태의
+    문자열을 받으므로 링크가 하나로 잡혀야 한다.
+  */
+  const toks = tokenize('<https://x.com|[BO&gt;주문관리] 정렬>');
+  assert.equal(toks.length, 1);
+  assert.equal(toks[0].t, 'link');
+});
+
+/*
+  ── 확인 주기 ──
+
+  배치는 한 번 돌 때 대상 전부를 훑는다. 대상마다 다른 주기를 주려면
+  루프 간격이 아니라 **대상별로** 걸러야 한다.
+*/
+test('확인 주기 — 간격이 안 지났으면 건너뛴다', () => {
+  const cfg = { tickIntervalSeconds: 300 } as Parameters<typeof tooSoon>[0];
+  const now = new Date('2026-09-14T01:00:00Z');
+  // 2분 전에 봤다. 5분 주기면 아직 차례가 아니다.
+  assert.equal(tooSoon(cfg, '2026-09-14T00:58:00Z', now), true);
+  // 6분 전이면 지났다.
+  assert.equal(tooSoon(cfg, '2026-09-14T00:54:00Z', now), false);
+});
+
+test('확인 주기 — 한 번도 안 돌았으면 바로 돈다', () => {
+  const cfg = { tickIntervalSeconds: 600 } as Parameters<typeof tooSoon>[0];
+  assert.equal(tooSoon(cfg, null, new Date()), false);
+});
+
+/*
+  ── 판정 흐름도 ──
+
+  깨지기 쉬운 곳
+    · 라벨의 `[` `]` `(` `)` `"` 가 mermaid 문법으로 먹혀 그림이 통째로
+      안 그려진다. 실제로 `제목 [BO_…]` 가 그렇다.
+    · 질문을 잇는 화살표가 하나라도 빠지면 흐름이 끊긴다.
+*/
+test('판정 흐름도 — 대괄호가 든 라벨이 문법을 안 깬다', () => {
+  /*
+    대괄호는 이제 **표본에서 온 프리픽스**를 감쌀 때 생긴다. 날것으로
+    남으면 mermaid 가 노드 문법으로 읽어 그림이 통째로 안 그려진다.
+    프로젝트마다 다른 값이 들어오는 자리라 이스케이프가 더 중요해졌다.
+  */
+  const src = buildDiagram(['siblings'], undefined, undefined, null, {
+    prefixes: [{ name: 'FO_팔기', count: 12 }],
+  });
+  assert.doesNotMatch(src, /\{"[^"]*\[FO/);
+  assert.match(src, /#91;FO_팔기#93;/);
+});
+
+test('판정 흐름도 — 모든 질문이 예/아니오로 이어진다', () => {
+  const src = buildDiagram(['assigned', 'epic', 'siblings', 'ref_owner']);
+  assert.match(src, /start --> q0/);
+  for (let i = 0; i < 4; i++) {
+    assert.match(src, new RegExp(`q${i} -->\\|예\\| a${i}`), `${i}번 예 갈래`);
+  }
+  for (let i = 1; i < 4; i++) {
+    assert.match(
+      src,
+      new RegExp(`q${i - 1} -->\\|아니오\\| q${i}`),
+      `${i}번 아니오 갈래`
+    );
+  }
+  // 마지막 아니오는 판정 불가로.
+  assert.match(src, /q3 -->\|아니오\| none/);
+});
+
+test('판정 흐름도 — 추측 단계만 다른 색을 받는다', () => {
+  const src = buildDiagram(['assigned', 'siblings']);
+  // siblings 가 q1 이고 그것만 추측이다.
+  assert.match(src, /class q1 guess;/);
+  assert.doesNotMatch(src, /class q0[, ]/);
+});
+
+test('판정 흐름도 — 단계를 줄여도 끊기지 않는다', () => {
+  const src = buildDiagram(['epic']);
+  assert.match(src, /start --> q0/);
+  assert.match(src, /q0 -->\|아니오\| none/);
+});
+
+/*
+  ── 판정 회귀 ──
+
+  실제 Jira 응답을 녹화해 두고 그대로 재생한다
+  (`npx tsx scripts/qa-router.record.mts` 로 다시 녹화).
+
+  왜 필요한가
+    · 판정 로직을 데이터 기반 엔진으로 바꾸려 한다
+    · 그때 답이 달라지면 **조용히 틀린 사람에게 알림이 간다**
+    · 오류가 안 나므로 테스트 말고는 알 방법이 없다
+
+  무엇을 고정하나
+    · via          어느 단계가 답했나
+    · classification 우리 팀인가 타팀인가
+    · name         누구로 정했나
+    · reason       Slack 에 나갈 문장 — 이것도 바뀌면 안 된다
+*/
+/*
+  픽스처는 **저장소에 없다** (1MB · .gitignore).
+  `npx tsx scripts/qa-router.record.mts` 로 각자 녹화한다.
+
+  없으면 회귀 테스트를 건너뛴다 — 파일 하나 때문에 나머지 115개가 못 도는
+  것이 더 나쁘다. 다만 **조용히 넘기지는 않는다**: 아래 테스트가 건너뛴
+  사실을 이름으로 말한다.
+*/
+const FIXTURE_PATH = new URL('./fixtures/judge-cases.json', import.meta.url);
+const FIXTURE = existsSync(FIXTURE_PATH)
+  ? (JSON.parse(readFileSync(FIXTURE_PATH, 'utf-8')) as JudgeFixture)
+  : null;
+
+interface JudgeFixture {
+  ctx: {
+    projectKey: string;
+    fixVersion: string;
+    triageAccountId: string;
+    members: { accountId: string; name: string; slackId: string | null }[];
+  };
+  calls: Record<string, unknown>;
+  cases: {
+    issue: { key: string; fields?: Record<string, unknown> };
+    expect: {
+      via: string;
+      classification: string | null;
+      name: string | null;
+      reason: string | null;
+    };
+  }[];
+}
+
+/** 녹화한 응답을 그대로 돌려주는 Jira. 없는 호출은 **소리 내어** 실패한다. */
+function tapePort(fx: JudgeFixture) {
+  const missed: string[] = [];
+  const key = (kind: string, a: string, fields: string[]) =>
+    `${kind}|${a}|${[...fields].sort().join(',')}`;
+  const port = {
+    async getIssue(k: string, fields: string[]) {
+      const hit = fx.calls[key('getIssue', k, fields)];
+      if (hit === undefined) {
+        // 조용히 빈 값을 주면 판정이 달라진 이유를 영영 못 찾는다.
+        missed.push(key('getIssue', k, fields));
+        return { key: k };
+      }
+      return hit;
+    },
+    async search(jql: string, fields: string[]) {
+      const hit = fx.calls[key('search', jql, fields)];
+      if (hit === undefined) {
+        missed.push(key('search', jql, fields));
+        return [];
+      }
+      return hit;
+    },
+    async getChangelogs(keys: string[], fieldIds: string[]) {
+      const hit = fx.calls[key('getChangelogs', keys.join(','), fieldIds)];
+      if (hit === undefined) {
+        missed.push(key('getChangelogs', keys.join(','), fieldIds));
+        return [];
+      }
+      return hit;
+    },
+  };
+  return { port, missed };
+}
+
+test('판정 회귀 — 녹화한 판정이 같은 답을 낸다', async (t) => {
+  if (!FIXTURE) {
+    return t.skip(
+      '픽스처 없음 · npx tsx scripts/qa-router.record.mts 로 녹화하세요'
+    );
+  }
+  const { port, missed } = tapePort(FIXTURE);
+  const diffs: string[] = [];
+
+  for (const c of FIXTURE.cases) {
+    const got = await judge(
+      c.issue as Parameters<typeof judge>[0],
+      port as unknown as Parameters<typeof judge>[1],
+      {
+        projectKey: FIXTURE.ctx.projectKey,
+        fixVersion: FIXTURE.ctx.fixVersion,
+        triageAccountId: FIXTURE.ctx.triageAccountId,
+        jiraFilterId: '12571',
+        members: FIXTURE.ctx.members,
+        onWarn: () => {},
+      }
+    );
+    const now = {
+      via: got.via,
+      classification: got.classification,
+      name: got.name ?? null,
+      reason: got.reason ?? null,
+    };
+    for (const k of ['via', 'classification', 'name', 'reason'] as const) {
+      if (now[k] !== c.expect[k]) {
+        diffs.push(
+          `${c.issue.key} ${k}\n    녹화: ${c.expect[k]}\n    지금: ${now[k]}`
+        );
+      }
+    }
+  }
+
+  assert.equal(
+    missed.length,
+    0,
+    `녹화에 없는 Jira 호출 ${missed.length}건 — 판정 경로가 바뀌었습니다\n  ${missed.slice(0, 3).join('\n  ')}`
+  );
+  assert.equal(
+    diffs.length,
+    0,
+    `판정이 달라진 ${diffs.length}곳\n  ${diffs.join('\n  ')}`
+  );
+});
+
+test('판정 회귀 — 표본이 네 단계를 충분히 덮나', (t) => {
+  if (!FIXTURE) {
+    return t.skip(
+      '픽스처 없음 · npx tsx scripts/qa-router.record.mts 로 녹화하세요'
+    );
+  }
+  /*
+    덮지 못하는 단계가 있으면 **그 사실을 알고 있어야 한다.**
+    지금 siblings 는 0건이다 — 이 프로젝트에서 거의 안 쓰인다는 뜻이고,
+    바꿔 말하면 회귀 테스트가 그 단계를 못 지킨다.
+  */
+  const seen = new Set(FIXTURE.cases.map((c) => c.expect.via));
+  const covered = [...seen].sort().join(', ');
+  assert.ok(seen.has('assigned'), `assigned 가 표본에 없음 (지금: ${covered})`);
+  assert.ok(seen.has('epic'), `epic 이 표본에 없음 (지금: ${covered})`);
+  assert.ok(
+    seen.has('ref_owner'),
+    `ref_owner 가 표본에 없음 (지금: ${covered})`
+  );
+});
+
+/*
+  ── 판정 경로 추론 ──
+
+  필터만 주면 "이 프로젝트에서 판정이 돌아갈지" 를 표본으로 알아낸다.
+  틀리면 **없는 단계를 있다고 하거나, 되는 단계를 죽었다고 한다** — 둘 다
+  사람이 잘못된 설정을 저장하게 만든다.
+*/
+test('추론 — 지금 KQ 모양이면 네 단계가 다 산다', () => {
+  const fits = judgeFits({
+    sampled: 100,
+    coHits: 100,
+    labelHits: 99,
+    prefixHits: 99,
+    parentHits: 6,
+    parentChecked: 12,
+    devTypeCount: 1,
+    prefixKinds: 14,
+  });
+  const by = Object.fromEntries(fits.map((f) => [f.tier, f.verdict]));
+  assert.equal(by.assigned, 'ok');
+  assert.equal(by.epic, 'ok');
+  assert.equal(by.ref_owner, 'ok');
+  // 프리픽스 99건이 14종류면 종류당 7건 — 다수결이 선다.
+  assert.equal(by.siblings, 'ok');
+});
+
+test('추론 — 레이블이 없으면 ②④가 함께 죽는다', () => {
+  const fits = judgeFits({
+    sampled: 50,
+    coHits: 50,
+    labelHits: 0,
+    prefixHits: 50,
+    parentHits: 0,
+    parentChecked: 0,
+    devTypeCount: 0,
+    prefixKinds: 5,
+  });
+  const by = Object.fromEntries(fits.map((f) => [f.tier, f]));
+  assert.equal(by.epic.verdict, 'dead');
+  assert.equal(by.ref_owner.verdict, 'dead');
+  assert.match(by.epic.why, /레이블에 티켓 참조가 없습니다/);
+  // ①③은 멀쩡해야 한다. 하나가 죽었다고 다 죽이면 안 된다.
+  assert.equal(by.assigned.verdict, 'ok');
+  assert.equal(by.siblings.verdict, 'ok');
+});
+
+test('추론 — 레이블은 있는데 에픽이 없으면 ②만 죽는다', () => {
+  /*
+    ②는 세 관문을 다 지나야 한다. 레이블이 99% 있어도 그게 가리킨 티켓에
+    부모가 없으면 답을 못 낸다 — 앞 숫자만 보고 "쓸 만하다" 고 하면 안 된다.
+  */
+  const fits = judgeFits({
+    sampled: 40,
+    coHits: 40,
+    labelHits: 39,
+    prefixHits: 39,
+    parentHits: 0,
+    parentChecked: 10,
+    devTypeCount: 0,
+    prefixKinds: 6,
+  });
+  const by = Object.fromEntries(fits.map((f) => [f.tier, f]));
+  assert.equal(by.epic.verdict, 'dead');
+  assert.match(by.epic.why, /상위 에픽이 없습니다/);
+  // ④는 참조 티켓 담당자로 폴백하므로 산다.
+  assert.equal(by.ref_owner.verdict, 'ok');
+});
+
+test('추론 — 프리픽스가 전부 제각각이면 ③은 약하다', () => {
+  // 30건에 28종류 = 거의 1건씩. 같은 메뉴가 안 모이니 다수결이 안 선다.
+  const fits = judgeFits({
+    sampled: 30,
+    coHits: 30,
+    labelHits: 30,
+    prefixHits: 30,
+    parentHits: 8,
+    parentChecked: 10,
+    devTypeCount: 1,
+    prefixKinds: 28,
+  });
+  const sib = fits.find((f) => f.tier === 'siblings')!;
+  assert.equal(sib.verdict, 'weak');
+  assert.match(sib.why, /흩어져 있어/);
+});
+
+test('추론 — 표본에서 레이블·프리픽스를 뽑는다', () => {
+  const sample = [
+    {
+      key: 'KQ-1',
+      fields: {
+        summary: '[BO_주문관리] 정렬 오류',
+        labels: ['KQ-100', 'FE1'],
+        assignee: { accountId: 'u1' },
+      },
+    },
+    {
+      key: 'KQ-2',
+      fields: { summary: '제목만 있음', labels: ['FE1'] },
+    },
+  ];
+  const r = inferFromSample(sample, 'KQ');
+  assert.equal(r.sampled, 2);
+  assert.equal(r.assignedHits, 1);
+  // 'FE1' 은 티켓 키가 아니므로 세지 않는다.
+  assert.equal(r.labelHits, 1);
+  assert.deepEqual(r.refKeys, ['KQ-100']);
+  assert.equal(r.prefixHits, 1);
+  assert.deepEqual(r.prefixes, [{ name: 'BO_주문관리', count: 1 }]);
+});
+
+test('추론 — 이슈타입 분포는 id 와 이름을 같이 센다', () => {
+  // 저장은 id 로 한다. 이름만 세면 무엇을 저장할지 모른다.
+  const r = countTypes([
+    { fields: { issuetype: { id: '10205', name: '개발처리' } } },
+    { fields: { issuetype: { id: '10205', name: '개발처리' } } },
+    { fields: { issuetype: { id: '10001', name: '스토리' } } },
+    { fields: {} },
+  ]);
+  assert.deepEqual(r, [
+    { id: '10205', name: '개발처리', count: 2 },
+    { id: '10001', name: '스토리', count: 1 },
+  ]);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 처음 받는 사람 — 변경이력에서 알아내기
+// ─────────────────────────────────────────────────────────────
+
+const TEAM = [
+  { accountId: 'kim', name: '김가빈' },
+  { accountId: 'son', name: '손현지' },
+  { accountId: 'park', name: '박성찬' },
+];
+const CO = 'customfield_10132';
+
+/** 티켓 한 건의 이력. created 는 epoch ms 문자열이다 (bulkfetch 형식). */
+function log(items: [number, string | null, string | null][]) {
+  return {
+    changeHistories: items.map(([at, from, to]) => ({
+      created: String(at),
+      items: [{ fieldId: CO, from, to }],
+    })),
+  };
+}
+
+test('처음 받는 사람 — 가장 오래된 변경을 고른다 (bulkfetch 는 최신이 먼저다)', () => {
+  /*
+    실측으로 밟은 함정이다. bulkfetch 는 최신 이력을 먼저 주는데 개별
+    changelog API 는 반대다. `[0]` 을 쓰면 **정확히 반대 값**을 집어,
+    "처음 받은 사람" 자리에 "마지막으로 넘겨받은 사람" 이 들어간다.
+    아래 입력은 최신이 앞이다 — 그래도 kim 이 나와야 한다.
+  */
+  const r = pickTriage(
+    /*
+      최신이 앞이다. 두 읽기가 **다른 답**을 내도록 데이터를 짠다 —
+      `kim → son` 처럼 이어지는 체인은 어느 쪽을 읽어도 kim 이 나와서
+      순서가 뒤집혀도 테스트가 통과해 버린다 (실제로 한 번 놓쳤다).
+        가장 오래된 것 = null → kim   이므로 정답은 kim
+        가장 최신    = son → park    이므로 뒤집히면 son
+    */
+    [
+      log([
+        [200, 'son', 'park'],
+        [100, null, 'kim'],
+      ]),
+    ],
+    TEAM,
+    CO
+  );
+  assert.equal(r?.accountId, 'kim');
+});
+
+test('처음 받는 사람 — 생성 때 값이 있었으면 from 이 최초값이다', () => {
+  // 빈칸이 채워진 게 아니라 이미 있던 값이 바뀐 경우다.
+  const r = pickTriage([log([[100, 'son', 'park']])], TEAM, CO);
+  assert.equal(r?.accountId, 'son');
+});
+
+test('처음 받는 사람 — 팀원 밖은 세지 않는다', () => {
+  /*
+    이게 없으면 답이 통째로 뒤집힌다. 실측 80건에서 최초값 1위는 타팀
+    사람(64건)이었고 정답은 12건으로 2위였다. 팀원 명단은 필터 JQL 에서
+    나오므로 이 거르기는 하드코딩이 아니다.
+  */
+  const r = pickTriage(
+    [
+      log([[1, null, 'outsider']]),
+      log([[2, null, 'outsider']]),
+      log([[3, null, 'outsider']]),
+      log([[4, null, 'kim']]),
+    ],
+    TEAM,
+    CO
+  );
+  assert.equal(r?.accountId, 'kim');
+  assert.equal(r?.hits, 1);
+  // 타팀도 "본 건수" 에는 들어간다. 몇 건을 보고 판단했는지는 정직해야 한다.
+  assert.equal(r?.scanned, 4);
+  assert.equal(r?.teamHits, 1);
+});
+
+test('처음 받는 사람 — 다른 필드의 이력은 무시한다', () => {
+  const r = pickTriage(
+    [
+      {
+        changeHistories: [
+          {
+            created: '50',
+            items: [{ fieldId: 'assignee', from: null, to: 'son' }],
+          },
+          { created: '99', items: [{ fieldId: CO, from: null, to: 'kim' }] },
+        ],
+      },
+    ],
+    TEAM,
+    CO
+  );
+  assert.equal(r?.accountId, 'kim');
+});
+
+test('처음 받는 사람 — 동점이면 추천이라 부르지 않는다', () => {
+  /*
+    Map 입력 순서로 갈린 승자를 "추천" 이라 내놓으면 안 된다. split 이면
+    화면이 확인창을 띄우지 않고 사람이 그냥 고르게 한다.
+  */
+  const r = pickTriage(
+    [
+      log([[1, null, 'kim']]),
+      log([[2, null, 'kim']]),
+      log([[3, null, 'son']]),
+      log([[4, null, 'son']]),
+    ],
+    TEAM,
+    CO
+  );
+  assert.equal(r?.strength, 'split');
+  assert.equal(r?.rivals.length, 1);
+});
+
+test('처음 받는 사람 — 근거가 얇으면 solid 라고 하지 않는다', () => {
+  const r = pickTriage([log([[1, null, 'kim']])], TEAM, CO);
+  assert.equal(r?.strength, 'thin');
+  assert.match(r?.why ?? '', /1건뿐/);
+});
+
+test('처음 받는 사람 — 충분하고 단독이면 solid', () => {
+  const r = pickTriage(
+    [1, 2, 3, 4].map((n) => log([[n, null, 'kim']])),
+    TEAM,
+    CO
+  );
+  assert.equal(r?.strength, 'solid');
+  assert.deepEqual(r?.rivals, []);
+  assert.match(r?.why ?? '', /모두 김가빈입니다/);
+});
+
+test('처음 받는 사람 — 근거가 없으면 null 이다 (아무나 찍지 않는다)', () => {
+  assert.equal(pickTriage([], TEAM, CO), null);
+  // 팀원이 한 번도 최초값이 아니었던 경우도 마찬가지다.
+  assert.equal(pickTriage([log([[1, null, 'outsider']])], TEAM, CO), null);
+});
+
+test('흐름도 — 처음 받는 사람이 시작 칸에 들어간다', () => {
+  // 설정에서 사람을 바꿨는데 그림이 그대로면 무엇을 바꿨는지 알 수 없다.
+  const withName = buildDiagram(['assigned'], undefined, undefined, '김가빈');
+  assert.match(withName, /김가빈 담당/);
+  const without = buildDiagram(['assigned'], undefined, undefined, null);
+  assert.match(without, /start\(\[QA 티켓\]\)/);
+});
+
+test('흐름도 — 표본에서 알아낸 실제 값을 쓴다', () => {
+  /*
+    이 그림의 문구는 KQ 를 보고 쓴 것이라 그대로 두면 다른 프로젝트에서
+    거짓말이 된다. 실측으로 `제목 [BO_…]` 라고 적혀 있었는데 이 필터의
+    1위 프리픽스는 `FO_팔기`(12건)였고 BO_ 는 6위권이었다.
+  */
+  const src = buildDiagram(['epic', 'siblings'], undefined, undefined, null, {
+    prefixes: [
+      { name: 'FO_팔기', count: 12 },
+      { name: 'BO_법인매입', count: 2 },
+    ],
+    planTypes: [{ name: '스토리' }],
+    devTypes: [{ name: '개발처리' }],
+  });
+  assert.match(src, /FO_팔기/);
+  assert.doesNotMatch(src, /앞머리 →/);
+  assert.match(src, /레이블 → 스토리 → 에픽 → 개발처리/);
+});
+
+test('흐름도 — 알아낸 게 없으면 일반 문구로 떨어진다', () => {
+  const src = buildDiagram(
+    ['epic', 'siblings'],
+    undefined,
+    undefined,
+    null,
+    undefined
+  );
+  assert.match(src, /제목 앞머리 → 이번 차수/);
+  assert.match(src, /레이블 → 기획 티켓 → 에픽 → 개발 티켓/);
+  // 질문에도 KQ 말이 안 남아야 한다.
+  assert.match(src, /에픽 밑 개발 티켓에/);
+});
+
+test('흐름도 — 절반만 알면 일반 문구를 그대로 둔다', () => {
+  /*
+    "레이블 → 스토리 → 에픽 → 개발 티켓" 처럼 절반만 진짜면 어느 쪽이
+    실제 값인지 읽는 사람이 구분할 수 없다. 둘 다 알 때만 바꾼다.
+  */
+  const src = buildDiagram(['epic'], undefined, undefined, null, {
+    planTypes: [{ name: '스토리' }],
+  });
+  assert.match(src, /레이블 → 기획 티켓 → 에픽 → 개발 티켓/);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 사람 칸을 JQL 에서 알아내기 (필드 번호 하드코딩 제거)
+// ─────────────────────────────────────────────────────────────
+
+const FIELDS = [
+  {
+    id: 'customfield_10132',
+    name: '공동담당자',
+    schema: {
+      custom: 'com.atlassian.jira.plugin.system.customfieldtypes:userpicker',
+    },
+  },
+  {
+    id: 'customfield_10122',
+    name: '공동담당자',
+    schema: {
+      custom: 'com.atlassian.jira.plugin.system.customfieldtypes:people',
+    },
+  },
+  {
+    id: 'customfield_10999',
+    name: '검수자',
+    schema: { custom: '...:userpicker' },
+  },
+];
+
+test('사람 칸 — JQL 이 사람과 비교한 칸만 꺼낸다', () => {
+  const d = deriveFromJql(
+    'project = KQ AND issuetype = Bug AND ' +
+      '"공동담당자[User Picker (single user)]" = 637426199e48f2b9a6108c25 ' +
+      'OR assignee = 638d49155fce844d606c7682'
+  );
+  // project·issuetype 은 사람과 비교한 게 아니라 안 딸려온다.
+  assert.deepEqual(d.personFields, [
+    { name: '공동담당자', typeHint: 'User Picker (single user)' },
+    { name: 'assignee', typeHint: null },
+  ]);
+});
+
+test('사람 칸 — 이름이 겹치면 대괄호 타입 힌트가 가른다', () => {
+  /*
+    실측(2026-09-14): `공동담당자` 라는 이름의 필드가 2개였다.
+    이름만으로 고르면 절반의 확률로 **엉뚱한 칸**을 읽고, 그 칸은 늘 비어
+    있어서 공동담당자로 들어온 티켓을 통째로 놓치면서 오류는 안 난다.
+  */
+  const r = resolvePersonFields(
+    [
+      { name: '공동담당자', typeHint: 'User Picker (single user)' },
+      { name: 'assignee', typeHint: null },
+    ],
+    FIELDS
+  );
+  assert.equal(r.coAssigneeField, 'customfield_10132');
+  assert.deepEqual(r.labels, ['공동담당자', 'assignee']);
+  assert.deepEqual(r.problems, []);
+});
+
+test('사람 칸 — 못 가리면 찍지 않는다', () => {
+  const r = resolvePersonFields(
+    [{ name: '공동담당자', typeHint: null }],
+    FIELDS
+  );
+  assert.equal(r.coAssigneeField, null);
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /2개라/);
+});
+
+test('사람 칸 — 목록에 없는 이름은 문제로 남긴다', () => {
+  const r = resolvePersonFields([{ name: '없는칸', typeHint: null }], FIELDS);
+  assert.equal(r.coAssigneeField, null);
+  assert.match(r.problems[0], /찾지 못했습니다/);
+});
+
+test('사람 칸 — 커스텀 칸이 둘이면 첫 번째만 쓴다고 말한다', () => {
+  const r = resolvePersonFields(
+    [
+      { name: '공동담당자', typeHint: 'User Picker (single user)' },
+      { name: '검수자', typeHint: null },
+    ],
+    FIELDS
+  );
+  assert.equal(r.coAssigneeField, 'customfield_10132');
+  assert.match(r.problems.join(' '), /2개입니다/);
+});
+
+test('판정 — 넘겨준 칸을 실제로 읽는다', () => {
+  /*
+    이게 핵심이다. 화면만 파생값을 쓰고 봇이 상수를 쓰면, 화면이 "이 칸을
+    본다" 고 말하면서 봇은 다른 칸을 읽는다. 그 어긋남은 아무 데도 안 뜬다.
+  */
+  const issue = {
+    key: 'KQ-1',
+    fields: {
+      assignee: null,
+      // 기본 칸은 비어 있고, 다른 번호의 칸에 사람이 있다.
+      customfield_10999: { accountId: 'u-son', displayName: '손현지' },
+    },
+  };
+  const members = [{ accountId: 'u-son', name: '손현지', slackId: null }];
+
+  // 기본값(customfield_10132)으로는 못 찾는다.
+  assert.equal(findAssigned(issue, members, 'u-triage'), null);
+  // JQL 이 알려준 칸을 넘기면 찾는다.
+  const hit = findAssigned(issue, members, 'u-triage', 'customfield_10999');
+  assert.equal(hit?.accountId, 'u-son');
+  assert.equal(hit?.field, 'coAssignee');
+});
+
+test('흐름도 — 보는 칸 이름이 필터에서 온다', () => {
+  const other = buildDiagram(
+    ['assigned'],
+    undefined,
+    undefined,
+    null,
+    undefined,
+    ['assignee', '검수자']
+  );
+  assert.match(other, /담당자 · 검수자/);
+  assert.doesNotMatch(other, /공동담당자/);
+  // 알려준 게 없으면 일반 문구로 떨어진다.
+  assert.match(buildDiagram(['assigned']), /담당자 · 공동담당자/);
+});
+
+test('흐름도 — 질문의 명사도 필터에서 온다', () => {
+  /*
+    `look` 만 파생하고 `ask` 를 그냥 두면 같은 것을 두 이름으로 부른다.
+    실측으로 "에픽 밑 **개발 티켓**에" / "레이블 → 스토리 → 에픽 → **개발처리**"
+    가 한 칸 안에 같이 있었다.
+  */
+  const src = buildDiagram(['epic'], undefined, undefined, null, {
+    planTypes: [{ name: '요구사항' }],
+    devTypes: [{ name: '구현' }],
+  });
+  assert.match(src, /에픽 밑 구현에 우리 팀원이 있나/);
+  assert.doesNotMatch(src, /개발 티켓/);
+});
+
+test('흐름도 — 우리 팀 말을 쓰지 않는다', () => {
+  /*
+    "메뉴" 는 프리픽스에 대한 **우리 팀의 해석**이지 필터가 말해 준 게
+    아니다. 다른 프로젝트에서 프리픽스가 모듈이면 그냥 틀린 말이 된다.
+    알아낼 수 없는 건 알아낼 수 있는 말로 바꾼다.
+  */
+  const src = buildDiagram(['siblings']);
+  assert.doesNotMatch(src, /메뉴/);
+  assert.doesNotMatch(src, /BO_/);
+  assert.match(src, /제목 앞머리/);
+});
+
+test('이미 가져간 건 — 알림은 안 가지만 판정은 남는다', () => {
+  /*
+    봇이 가져오는 티켓은 전부 `assignee = 처음 받는 사람` 이고 판정은 그
+    사람을 건너뛴다. 그러니 ①단계가 답한다는 건 **공동담당자 칸에 다른
+    사람이 들어갔다** 는 뜻이고, 1분 주기 사이에 누가 가져갔다는 얘기다.
+    그 사람에게 "이거 당신 겁니다" 를 보내는 건 소음이다.
+
+    다만 **판정 자체는 그대로 나와야 한다.** 상세 화면의 "QA 티켓 중 우리
+    건이 몇 건" 은 알림을 보냈는지와 상관없는 숫자다.
+  */
+  const taken = findAssigned(
+    {
+      key: 'KQ-1',
+      fields: {
+        assignee: { accountId: 'u-triage', displayName: '김가빈' },
+        customfield_10132: { accountId: 'u-son', displayName: '손현지' },
+      },
+    },
+    [{ accountId: 'u-son', name: '손현지', slackId: null }],
+    'u-triage'
+  );
+  assert.equal(taken?.accountId, 'u-son');
+  assert.equal(taken?.field, 'coAssignee');
+});
+
+test('이미 가져간 건 — 아무도 안 가져갔으면 답이 아니다', () => {
+  // 두 칸 다 처음 받는 사람이면 "아직 아무도 안 정했다" 는 표시다.
+  const none = findAssigned(
+    {
+      key: 'KQ-2',
+      fields: {
+        assignee: { accountId: 'u-triage', displayName: '김가빈' },
+        customfield_10132: { accountId: 'u-triage', displayName: '김가빈' },
+      },
+    },
+    [{ accountId: 'u-son', name: '손현지', slackId: null }],
+    'u-triage'
+  );
+  assert.equal(none, null);
+});
+
+test('단계 목록 — 갈림길이 없다는 것을 흐름도 소스가 증명한다', () => {
+  /*
+    읽기 화면에서 흐름도를 걷어낸 근거다. 모든 "아니오" 가 **다음 단계로만**
+    간다 — 갈라지는 곳이 한 군데도 없다. 다이어그램은 갈림길을 그릴 때
+    값어치가 있는데 그릴 갈림길이 없었고, 그 대가로 255px 과 가로 스크롤
+    200px 을 쓰고 있었다.
+
+    나중에 단계가 실제로 갈라지게 되면 이 테스트가 깨진다. 그때는 그림으로
+    되돌릴 이유가 생긴 것이다.
+  */
+  const src = buildDiagram(JUDGE_TIERS);
+  const no = src.split('\n').filter((l) => l.includes('|아니오|'));
+  // 아니오 화살표는 단계 수만큼 (마지막은 판정 불가로).
+  assert.equal(no.length, JUDGE_TIERS.length);
+
+  // 각 '아니오' 의 도착지가 바로 다음 질문이거나 판정 불가여야 한다.
+  no.forEach((line, i) => {
+    const to = line.split('-->')[1].replace('|아니오|', '').trim();
+    assert.equal(to, i === JUDGE_TIERS.length - 1 ? 'none' : `q${i + 1}`);
+  });
+
+  // '예' 는 전부 그 단계의 답으로만 간다 — 다른 단계로 새지 않는다.
+  src
+    .split('\n')
+    .filter((l) => l.includes('|예|'))
+    .forEach((line, i) => {
+      assert.match(line, new RegExp(`q${i} -->\\|예\\| a${i}$`));
+    });
+});
+
+test('추론 — ①은 담당자 칸이 아니라 공동담당자 칸으로 잰다', () => {
+  /*
+    봇이 가져오는 티켓은 JQL 상 담당자가 **전부 처음 받는 사람**이고 판정은
+    그 사람을 건너뛴다. 그러니 "담당자가 적혀 있나" 는 늘 100% 이면서 ①이
+    답할지는 아무것도 말해 주지 않는다. 실제로 화면에 `모든 티켓에 담당자가
+    적혀 있습니다` 라고 떠 있었다 — 참이지만 쓸모가 없었다.
+  */
+  const dead = judgeFits({
+    sampled: 30,
+    coHits: 0, // 공동담당자 칸을 안 쓰는 프로젝트
+    labelHits: 29,
+    prefixHits: 29,
+    parentHits: 7,
+    parentChecked: 8,
+    devTypeCount: 2,
+    prefixKinds: 9,
+  }).find((f) => f.tier === 'assigned')!;
+  assert.equal(dead.verdict, 'dead');
+  assert.match(dead.why, /공동담당자 칸을 안 쓰는/);
+
+  const alive = judgeFits({
+    sampled: 30,
+    coHits: 30,
+    labelHits: 29,
+    prefixHits: 29,
+    parentHits: 7,
+    parentChecked: 8,
+    devTypeCount: 2,
+    prefixKinds: 9,
+  }).find((f) => f.tier === 'assigned')!;
+  assert.equal(alive.verdict, 'ok');
+  assert.doesNotMatch(alive.why, /담당자가 적혀/);
+});
+
+test('추론 — 공동담당자 칸을 표본에서 따로 센다', () => {
+  const r = inferFromSample(
+    [
+      { key: 'A', fields: { assignee: { accountId: 'a' } } },
+      {
+        key: 'B',
+        fields: {
+          assignee: { accountId: 'a' },
+          customfield_10132: { accountId: 'b' },
+        },
+      },
+    ],
+    'KQ'
+  );
+  // 둘 다 담당자는 있지만, 공동담당자는 한 건뿐이다.
+  assert.equal(r.assignedHits, 2);
+  assert.equal(r.coHits, 1);
+});
+
+test('배포대장 — 어떤 페이지가 차수가 되나', () => {
+  /*
+    이 규칙이 tick.ts 안에만 있어서 설정 화면은 "차수 12건" 같은 숫자만
+    말할 수 있었다. 실측으로 12건을 훑어 **2건만** 잡혔는데, 숫자만 보면
+    10건이 어디로 갔는지 모른다. 규칙을 한 곳에 두고 양쪽이 같이 쓴다.
+  */
+  const ok = readCyclePageTitle('Dev) 배포 - 2026-09-14(정기)');
+  assert.equal(ok.kind, 'cycle');
+  assert.equal(ok.kind === 'cycle' && ok.fixVersion, 'release_20260914');
+  assert.equal(ok.kind === 'cycle' && ok.deployYmd, '2026-09-14');
+
+  // 정기배포가 아닌 것은 섞으면 "이번 차수" 가 하루에 몇 번씩 바뀐다.
+  for (const t of [
+    'Dev) 배포 - 2026-09-02(adhoc)',
+    'Dev) 배포 - 2026-09-02(hotfix)',
+  ]) {
+    const r = readCyclePageTitle(t);
+    assert.equal(r.kind, 'skip');
+    assert.match(r.kind === 'skip' ? r.why : '', /잡을 배포에서 뺐습니다/);
+  }
+
+  // 월 페이지가 손자로 섞여 들어오는 트리가 실제로 있었다.
+  const mo = readCyclePageTitle('Dev) 배포 관리 - 2026-02');
+  assert.equal(mo.kind, 'skip');
+  assert.match(mo.kind === 'skip' ? mo.why : '', /날짜가 없습니다/);
+});
+
+test('배포 종류 — 팀마다 괄호에 적는 말이 다르다', () => {
+  /*
+    전에는 괄호 안이 딱 `정기|adhoc|hotfix` 여야 알아봤다. 실측(그룹웨어
+    SPC2 배포대장)에서 `(비정기배포)` 와 `(이그나이트)` 가 둘 다 어디에도
+    안 걸려 **정기로 떨어졌다.** 비정기가 정기로 잡히면 "이번 차수" 가
+    하루에 두 번 바뀐다.
+  */
+  assert.equal(readDeployKind('… - 2026-09-03(비정기배포)'), 'adhoc');
+  assert.equal(readDeployKind('… - 2026-09-20(핫픽스)'), 'hotfix');
+
+  /*
+    순서가 중요하다. `비정기배포` 안에 `정기` 가 들어 있어서, 정기를 먼저
+    보면 비정기가 정기로 잡힌다.
+  */
+  assert.notEqual(readDeployKind('… (비정기배포)'), 'regular');
+
+  // 지금까지 쓰던 표기는 그대로 간다.
+  assert.equal(readDeployKind('Dev) 배포 - 2026-09-14(정기)'), 'regular');
+  assert.equal(readDeployKind('Dev) 배포 - 2026-09-14(adhoc)'), 'adhoc');
+  assert.equal(readDeployKind('Dev) 배포 - 2026-09-14(hotfix)'), 'hotfix');
+
+  /*
+    모르는 말은 정기로 둔다. 차수를 통째로 버리는 것보다 낫다 —
+    `(이그나이트)` 는 벤더 이름이지 배포 종류가 아니다.
+  */
+  assert.equal(readDeployKind('… - 2026-09-17(이그나이트)'), 'regular');
+  assert.equal(readDeployKind('괄호가 없는 제목'), 'regular');
+});
+
+test('개발티켓 타입 — 설정값이 판정에 실제로 닿는다', async () => {
+  /*
+    닿지 않고 있었다. `tick.ts` 가 judge 에 `devIssueTypes` 를 안 넘겨서
+    판정은 늘 `DEFAULT_DEV_ISSUE_TYPES`(['개발처리'])로만 돌았고, 설정
+    화면에서 개발티켓을 바꿔도 판정은 하나도 안 바뀌었다. 화면에는
+    "우리 팀이 개발한 건인지 여기서 가립니다" 라고 적혀 있었다.
+  */
+  const epicKids = [
+    {
+      key: 'X-1',
+      fields: {
+        issuetype: { name: '구현' },
+        summary: '구현 건',
+        assignee: { accountId: 'u-son', displayName: '손현지' },
+      },
+    },
+    {
+      key: 'X-2',
+      fields: {
+        issuetype: { name: '스토리' },
+        summary: '기획 건',
+        assignee: { accountId: 'u-pm', displayName: '기획자' },
+      },
+    },
+  ];
+  const jira = {
+    getIssue: async () => ({
+      key: 'KQ-9',
+      fields: { issuetype: { name: 'Bug' }, parent: { key: 'E-1' } },
+    }),
+    search: async () => epicKids,
+  };
+  const issue = { key: 'KQ-9', fields: { labels: ['KQ-100'] } };
+  const members = [
+    { accountId: 'u-son', name: '손현지', slackId: null },
+    { accountId: 'u-pm', name: '기획자', slackId: null },
+  ];
+
+  // 설정에서 '구현' 을 고르면 기획자가 아니라 손현지가 나와야 한다.
+  const withCfg = await findViaEpic(issue, members, jira, {
+    projectKey: 'KQ',
+    devIssueTypes: ['구현'],
+  });
+  assert.equal(withCfg?.accountId, 'u-son');
+  assert.equal(withCfg?.widened, false);
+
+  /*
+    안 넘기면 기본값('개발처리')으로 거른다 → 걸리는 게 없어 에픽 자식
+    전체로 넓히고, 그러면 기획자까지 후보가 된다. 이게 설정을 안 넘길 때
+    실제로 벌어지던 일이다.
+  */
+  const noCfg = await findViaEpic(issue, members, jira, { projectKey: 'KQ' });
+  assert.equal(noCfg?.widened, true);
+});
+
+test('배포대장 — 비정기 건은 기본으로 건너뛴다', () => {
+  for (const t of [
+    'Dev) 배포 - 2026-09-02(adhoc)',
+    'Dev) 배포 - 2026-09-02(hotfix)',
+  ]) {
+    const r = readCyclePageTitle(t);
+    assert.equal(r.kind, 'skip');
+  }
+  // 정기 건은 옵션과 무관하게 잡힌다.
+  const reg = readCyclePageTitle('Dev) 배포 - 2026-09-14(정기)');
+  assert.equal(reg.kind, 'cycle');
+  assert.equal(reg.kind === 'cycle' && reg.deployKind, 'regular');
+});
+
+test('배포대장 — 켜면 비정기도 잡고, 종류를 표시한다', () => {
+  const r = readCyclePageTitle('Dev) 배포 - 2026-09-02(hotfix)', {
+    deployKinds: ['regular', 'adhoc', 'hotfix'],
+  });
+  assert.equal(r.kind, 'cycle');
+  /*
+    ── 이름이 종류를 따라간다 ──
+
+    전에는 여기서 `release_20260902` 를 기대했다. 종류가 hotfix 인데도
+    이름은 늘 `release_` 로 지었기 때문이다. 그래서 같은 날 adhoc 과
+    hotfix 가 둘 다 있으면 이름이 겹쳤고, 위 주석이 그 사고를 적어 뒀다.
+
+    원인은 겹침이 아니라 **이름을 종류와 무관하게 지은 것**이었다.
+    실측(2026-09-17) Jira 에는 종류별 접두사가 따로 있다.
+      KQ       release_20260914 · adhoc_20260914 · hotfix_20260915
+      AUTOWAY  release_260723   · adhoc_260917   · hotfix_260828
+    이제 종류를 따라가므로 같은 날이어도 안 겹친다.
+  */
+  assert.equal(r.kind === 'cycle' && r.fixVersion, 'hotfix_20260902');
+  assert.equal(r.kind === 'cycle' && r.deployKind, 'hotfix');
+});
+
+test('배포대장 — 차수 이름은 그 프로젝트 규칙을 따른다', () => {
+  /*
+    실측 사고(2026-09-17): 09-17 GW 비정기배포의 차수를 `release_20260917`
+    로 지었다. AUTOWAY 는 `{종류}_yyMMdd` 를 쓰므로 정답은 `adhoc_260917`
+    이고 Jira 에 이미 있었는데, 없는 이름을 찾느라 화면이 "릴리즈가 아직 안
+    만들어졌습니다" 를 띄웠다. 거기서부터 판정·진행률 키가 어긋났다.
+  */
+  const kq = inferFixVersionRule(
+    ['release_20260914', 'adhoc_20260914', 'hotfix_20260828'],
+    { now: new Date('2026-09-17T00:00:00Z') }
+  );
+  const gw = inferFixVersionRule(
+    ['adhoc_260917', 'release_260723', 'hotfix_260828', 'adhoc_260910'],
+    { now: new Date('2026-09-17T00:00:00Z') }
+  );
+  assert.equal(kq?.dateDigits, 8, 'KQ 는 8자리');
+  assert.equal(gw?.dateDigits, 6, 'AUTOWAY 는 6자리');
+
+  const opts = { deployKinds: [...DEPLOY_KINDS] };
+  // 같은 제목이어도 프로젝트 규칙에 따라 이름이 달라진다.
+  assert.equal(
+    (readCyclePageTitle('Dev) 배포 - 2026-09-14(정기)', { ...opts, rule: kq }) as { fixVersion: string }).fixVersion,
+    'release_20260914'
+  );
+  assert.equal(
+    (readCyclePageTitle('Dev) 배포 - 2026-09-10(비정기배포)', { ...opts, rule: gw }) as { fixVersion: string }).fixVersion,
+    'adhoc_260910'
+  );
+
+  /*
+    제목이 종류를 안 말할 때가 있다 — 실측 `…2026-09-17(이그나이트)`.
+    그때는 **Jira 에 실재하는 버전**이 제목의 추측을 이긴다. 그 날짜를
+    가진 버전이 딱 하나일 때만이다. 여럿이면 찍지 않는다.
+  */
+  assert.equal(
+    (readCyclePageTitle('Dev) 배포 관리 - 2026-09-17(이그나이트)', {
+      ...opts,
+      rule: gw,
+      versions: new Set(['adhoc_260917', 'adhoc_260910']),
+    }) as { fixVersion: string }).fixVersion,
+    'adhoc_260917'
+  );
+});
+
+test('배포대장 — adhoc·hotfix 를 독립적으로 켤 수 있다', () => {
+  // hotfix 만 켜면 같은 날 adhoc 은 여전히 건너뛴다.
+  const hotfixOnly = readCyclePageTitle('Dev) 배포 - 2026-09-02(adhoc)', {
+    deployKinds: ['regular', 'hotfix'],
+  });
+  assert.equal(hotfixOnly.kind, 'skip');
+});
+
+test('배포대장 — 켜도 날짜 없는 제목은 여전히 건너뛴다', () => {
+  // 월 페이지가 손자 자리에 섞여 들어오는 트리가 실제로 있었다.
+  const r = readCyclePageTitle('Dev) 배포 관리 - 2026-02', {
+    deployKinds: ['regular', 'adhoc', 'hotfix'],
+  });
+  assert.equal(r.kind, 'skip');
+});
+
+test('추론 — 기획 후보에 한 번 나왔다고 개발 후보에서 지우지 않는다', () => {
+  /*
+    실측 사고: 레이블이 가리킨 티켓 하나가 `개발처리` 타입이었는데,
+    그것 때문에 **20건짜리 1순위 개발처리가 통째로 사라졌다.**
+    화면은 그걸 "표본은 Design Issues" 라는 경고로 내밀었다 — 틀린 경고다.
+
+    양쪽에 다 나오는 타입은 **더 많이 나온 쪽**으로 친다.
+  */
+  const plan = countTypes([
+    { fields: { issuetype: { id: '10001', name: '스토리' } } },
+    { fields: { issuetype: { id: '10205', name: '개발처리' } } },
+  ]);
+  const kids = countTypes([
+    ...Array.from({ length: 20 }, () => ({
+      fields: { issuetype: { id: '10205', name: '개발처리' } },
+    })),
+    { fields: { issuetype: { id: '10001', name: '스토리' } } },
+  ]);
+
+  const planCount = new Map(plan.map((t) => [t.id, t.count]));
+  const dev = kids.filter((t) => t.count > (planCount.get(t.id) ?? 0));
+
+  assert.equal(dev[0]?.name, '개발처리');
+  assert.equal(dev[0]?.count, 20);
+  // 기획 쪽이 더 많은 스토리는 빠진다.
+  assert.equal(
+    dev.some((t) => t.name === '스토리'),
+    false
+  );
+});
+
+test('알림 규칙 검증 — 저장 경로가 쓰는 함수 하나로 모았다', () => {
+  /*
+    실측: 같은 질문에 **세 답**이 있었다.
+
+      검사             SQL   config/route.ts(옛)  types.ts
+      빈 배열 금지      없음   없음                 있음
+      enabled 불린     없음   없음                 있음
+
+    느슨한 쪽이 통과시킨 값은 뒤에서 터진다. 가장 엄한 하나로 모았고,
+    여기서 그 둘을 못 박는다 — 다시 갈라지면 이 테스트가 깨진다.
+  */
+  assert.match(checkAlertRules([]) ?? '', /하나도 없습니다/);
+
+  const one = (over: Record<string, unknown>) => [
+    {
+      id: 'x',
+      label: '테스트',
+      anchor: 'prod',
+      offset: 0,
+      shift: 'none',
+      enabled: true,
+      ...over,
+    },
+  ];
+  assert.equal(checkAlertRules(one({})), null);
+  assert.match(checkAlertRules(one({ enabled: 'yes' })) ?? '', /사용 여부/);
+  assert.match(checkAlertRules(one({ anchor: 'nope' })) ?? '', /기준일/);
+  assert.match(checkAlertRules(one({ offset: 999 })) ?? '', /날짜 차이/);
+});
+
+test('전환 대기 — 차수가 끝나면 필터가 그걸 말한다', () => {
+  /*
+    ── 왜 이 테스트가 있나 ──
+
+    배포일이 지나면 tick 이 `activeCycle` 을 비운다. 안 비우면 SQL 크론이
+    죽은 차수를 계속 믿고 그 차수 QA 스레드에 매일 답글을 단다(실측).
+
+    그런데 `pendingCycleSwitch` 는 바로 그 포인터를 읽는다. 비우는 순간
+    전환 대기 신호도 같이 사라져서, **사람이 Jira 필터를 바꿔야 하는
+    구간이 시작되는 그 시점에** 화면이 초록불이 됐다.
+
+    그래서 포인터가 아니라 필터가 뭘 보고 있는지를 읽게 바꿨다.
+    여기서 경계 세 개를 못 박는다.
+  */
+  const fc = { fixVersion: 'release_20260914' };
+
+  // 배포 전날 — 아직 이 차수를 보는 게 맞다
+  assert.equal(staleFilterCycle(fc, '2026-09-13'), null);
+  // 배포 당일 — 배포가 도는 날이지 넘길 날이 아니다
+  assert.equal(staleFilterCycle(fc, '2026-09-14'), null);
+  // 다음 날부터 사람이 필터를 바꿔야 한다
+  assert.match(staleFilterCycle(fc, '2026-09-15') ?? '', /release_20260914/);
+  assert.match(staleFilterCycle(fc, '2026-09-15') ?? '', /2026-09-14/);
+
+  // 아직 한 번도 필터를 못 읽었으면 아무 말도 하지 않는다
+  assert.equal(staleFilterCycle(null, '2026-09-15'), null);
+  // 날짜가 안 박힌 이름은 판단하지 않는다 — 찍으면 가짜 경보가 된다
+  assert.equal(staleFilterCycle({ fixVersion: 'next' }, '2026-09-15'), null);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 리허설(DRY RUN) 은 DB 도 안 건드린다
+// ─────────────────────────────────────────────────────────────
+
+test('리허설 — 저장소의 모든 쓰기 함수에 가드가 있다', () => {
+  /*
+    ── 왜 소스를 훑어서 검사하나 ──
+
+    실제로 났던 사고를 막는 테스트다. DRY RUN 이 Slack·Jira 클라이언트에만
+    걸려 있어서, dry 인 `post` 가 `{ok:true}` 를 돌려주면 tick 이 발송 성공
+    으로 보고 `markSeen` 을 **진짜로 썼다.** 그러면 1분마다 도는 운영 배치가
+    그 티켓을 이미 알린 걸로 보고 건너뛴다 — 확인하려고 돌린 리허설이 운영
+    알림을 삼킨다. 오류는 한 줄도 안 난다.
+
+    함수를 하나씩 호출해 확인하려면 DB 가 필요하다. 그런데 여기서 잡고 싶은
+    것은 "동작" 이 아니라 **"빠뜨렸는가"** 다. 새 쓰기 함수를 더하면서 가드를
+    안 넣는 것이 사고의 형태이므로, 소스에서 그걸 본다.
+  */
+  const src = readFileSync(
+    new URL('../lib/services/qa-router/repository.ts', import.meta.url),
+    'utf8'
+  );
+
+  const fns = [...src.matchAll(/export (?:async )?function (\w+)/g)];
+  const WRITE = /\.(insert|update|upsert|delete|rpc)\(/;
+  const missing: string[] = [];
+
+  for (let i = 0; i < fns.length; i++) {
+    const name = fns[i][1];
+    const body = src.slice(
+      fns[i].index! + fns[i][0].length,
+      i + 1 < fns.length ? fns[i + 1].index! : src.length
+    );
+    if (!WRITE.test(body)) continue;
+    if (!body.includes('writesDisabled')) missing.push(name);
+  }
+
+  assert.deepEqual(
+    missing,
+    [],
+    `쓰기 함수에 리허설 가드가 없습니다: ${missing.join(', ')}\n` +
+      `저장소에 쓰기를 더할 때는 맨 위에 \`if (writesDisabled) return;\` 을 같이 넣어야 합니다.`
+  );
+
+  // 스위치 자체가 있어야 가드가 뜻을 갖는다.
+  assert.match(src, /export function setWritesDisabled/);
+});
+
+test('리허설 — 배치가 스위치를 실제로 켠다', () => {
+  /*
+    가드가 있어도 켜는 사람이 없으면 아무 일도 안 일어난다. 실제로 그
+    상태였다 — 가드가 없었으니 켤 것도 없었다.
+  */
+  const src = readFileSync(new URL('./qa-router.ts', import.meta.url), 'utf8');
+  assert.match(src, /if \(dryRun\)[\s\S]{0,200}setWritesDisabled\(true\)/);
+});
+
+// ─────────────────────────────────────────────────────────────
+// JQL 구조 파싱 — Jira 가 해석해 준 트리를 읽는다
+// ─────────────────────────────────────────────────────────────
+
+/** 실측 응답 모양대로 만든 단말/묶음 헬퍼. */
+const cl = (field: string, operator: string, ...values: string[]) => ({
+  field: { name: field },
+  operator,
+  operand:
+    values.length === 1 && operator !== 'in' && operator !== 'not in'
+      ? { value: values[0] }
+      : { values: values.map((v) => ({ value: v })) },
+});
+const grp = (operator: 'and' | 'or', ...clauses: unknown[]) => ({
+  operator,
+  clauses,
+});
+
+test('JQL 구조 — 정규식이 못 읽던 표기를 읽는다', () => {
+  /*
+    실측으로 확인한 정규식의 한계다. `project = KQ` 는 읽는데
+    `project in (KQ)` 는 못 읽었고, 못 읽으면 예외가 아니라 null 이라
+    조용히 넘어갔다. Jira 는 둘을 같은 트리로 돌려준다.
+  */
+  const d = deriveFromJqlStructure(
+    grp(
+      'and',
+      cl('project', 'in', 'KQ'),
+      cl('issuetype', 'in', 'Bug', 'Defect'),
+      cl('status', 'not in', 'Done', 'CLOSE', '완료')
+    ) as never
+  );
+  assert.equal(d.projectKey, 'KQ');
+  assert.equal(d.issueType, 'Bug');
+  assert.deepEqual(d.excludeStatuses.sort(), ['CLOSE', 'Done', '완료'].sort());
+});
+
+test('JQL 구조 — 중첩 묶음을 끝까지 내려간다', () => {
+  /*
+    실측 CPO 필터 12571 은 3단이다:
+      and[ project, or[fixVersion×2], or[ or[공동담당자×6], or[assignee×6] ], … ]
+    한 단만 보면 사람이 하나도 안 잡힌다.
+  */
+  const d = deriveFromJqlStructure(
+    grp(
+      'and',
+      cl('project', '=', 'KQ'),
+      grp(
+        'or',
+        grp(
+          'or',
+          cl(
+            '공동담당자[User Picker (single user)]',
+            '=',
+            '637426199e48f2b9a6108c25'
+          )
+        ),
+        grp('or', cl('assignee', '=', '638d49155fce844d606c7682'))
+      )
+    ) as never
+  );
+  assert.equal(d.accountIds.length, 2);
+  assert.deepEqual(d.personFields.map((p) => p.name).sort(), [
+    'assignee',
+    '공동담당자',
+  ]);
+  // 대괄호 타입 힌트를 갈라 둔다 — 같은 이름의 칸이 둘인 인스턴스가 있었다.
+  assert.equal(
+    d.personFields.find((p) => p.name === '공동담당자')?.typeHint,
+    'User Picker (single user)'
+  );
+});
+
+test('JQL 구조 — project 절이 없으면 티켓 키에서 읽는다', () => {
+  // 실측 GW 필터 15127 은 parent 나열로만 범위를 잡아 project 절이 없다.
+  const d = deriveFromJqlStructure(
+    grp(
+      'and',
+      grp(
+        'or',
+        cl('parent', '=', 'ICTQMSCHE-22302'),
+        cl('parent', '=', 'ICTQMSCHE-24806')
+      ),
+      cl('status', '!=', 'Done')
+    ) as never
+  );
+  assert.equal(d.projectKey, 'ICTQMSCHE');
+});
+
+test('JQL 구조 — 그룹 함수는 "모른다" 고 말한다', () => {
+  /*
+    `assignee in membersOf("팀")` 은 트리에 함수 이름만 있고 사람이 없다.
+    조용히 0명으로 두면 판정이 멎는데 화면은 "조건이 없다" 고 말한다 —
+    멀쩡히 적어 둔 사람이 안 적었다는 말을 듣는다.
+  */
+  const d = deriveFromJqlStructure(
+    grp('and', {
+      field: { name: 'assignee' },
+      operator: 'in',
+      operand: { function: 'membersOf', values: [] },
+    }) as never
+  );
+  assert.equal(d.accountIds.length, 0);
+  assert.deepEqual(d.memberFunctions, ['membersOf']);
+});
+
+test('JQL 구조 — 파싱이 실패하면 정규식으로 내려간다', async () => {
+  /*
+    파싱 API 는 왕복 한 번이다. 네트워크가 흔들렸다고 판정이 통째로 멎으면
+    안 된다 — 지금까지 정규식만으로 돌던 필터는 폴백으로도 똑같이 읽힌다.
+  */
+  const jql = 'project = KQ AND issuetype = Bug AND status != Done';
+
+  const viaFallback = await deriveJql(jql, async () => {
+    throw new Error('네트워크 실패');
+  });
+  assert.equal(viaFallback.viaApi, false);
+  assert.equal(viaFallback.projectKey, 'KQ');
+  assert.equal(viaFallback.issueType, 'Bug');
+
+  // null 을 돌려줘도 마찬가지다 (Jira 가 못 읽겠다고 한 경우).
+  const viaNull = await deriveJql(jql, async () => null);
+  assert.equal(viaNull.viaApi, false);
+  assert.equal(viaNull.projectKey, 'KQ');
+
+  // 파서를 아예 안 넘기면 정규식만 쓴다.
+  const noParser = await deriveJql(jql);
+  assert.equal(noParser.viaApi, false);
+  assert.equal(noParser.projectKey, 'KQ');
+});
+
+test('배포대장 월 페이지 — 템플릿을 월로 착각하지 않는다', () => {
+  /*
+    실측(그룹웨어 SPC2) 루트의 자식 순서다. 앞에서 세 개를 집으면 템플릿만
+    열어 보고 "차수 0건" 이라고 답한다 — **배치는 월 전부를 순회해 멀쩡히
+    읽는데** 확인 화면만 틀리는, 전형적인 가짜 경보였다.
+  */
+  assert.equal(monthOrderKey('Dev) CBT 중 배포 건 정리'), null);
+  assert.equal(monthOrderKey('Dev) 배포 관리 - 템플릿'), null);
+  assert.equal(
+    monthOrderKey('Dev) 배포 관리 - yyyy-mm-dd 정기배포(템플릿)'),
+    null
+  );
+
+  // 팀마다 표기가 다르다. 둘 다 같은 키로 모은다.
+  assert.equal(monthOrderKey('Dev) 배포 관리 - 2609'), '202609');
+  assert.equal(monthOrderKey('Dev) 배포 - 2026-09'), '202609');
+
+  // 최근이 먼저 오도록 문자열 정렬이 그대로 먹어야 한다.
+  const sorted = ['2511', '2609', '2601']
+    .map((t) => monthOrderKey(`Dev) 배포 관리 - ${t}`)!)
+    .sort((a, b) => b.localeCompare(a));
+  assert.deepEqual(sorted, ['202609', '202601', '202511']);
+
+  // 13월 같은 건 월 표기가 아니다.
+  assert.equal(monthOrderKey('Dev) 배포 관리 - 2613'), null);
+});
+
+test('상태 — 배포일이 지났다고 다 "조치 필요" 는 아니다', () => {
+  /*
+    실측(2026-09-16): 9/14 배포가 끝나고 다음 QA 는 9/28 시작인데, 그 사이
+    2주 내내 "전환 대기 · 조치 필요" 가 켜져 있었다. 사람이 할 일은 없는
+    구간이다. 그런 경보는 곧 무시되고, 무시되기 시작하면 진짜 경보도 묻힌다.
+  */
+  const at = (iso: string, nextQaStartYmd: string | null) => {
+    const now = new Date(iso);
+    return computeHealth({
+      config: { ...demoConfig('demo', null), enabled: true },
+      state: {
+        ...demoState('release_20260914'),
+        // 방금 확인한 것으로 둔다 — "응답 없음" 이 먼저 잡히면 이 갈래를 못 본다.
+        lastPollAt: new Date(now.getTime() - 30_000).toISOString(),
+        consecutiveFails: 0,
+        activeCycle: null,
+        filterCache: {
+          fixVersion: 'release_20260914',
+          checkedAt: now.toISOString(),
+        },
+      },
+      now,
+      nextQaStartYmd,
+    });
+  };
+
+  // 다음 QA 가 아직 → 끝난 것이다. 할 일 없음. (KST 수요일 14시)
+  const done = at('2026-09-16T05:00:00Z', '2026-09-28');
+  assert.equal(done.label, '차수 완료');
+  assert.equal(done.actionable, false);
+  assert.match(done.detail, /2026-09-28/);
+
+  // 다음 QA 가 시작됐는데 필터가 그대로 → 진짜로 바꿔야 한다. (KST 월요일 14시)
+  const due = at('2026-09-28T05:00:00Z', '2026-09-28');
+  assert.equal(due.label, '전환 대기');
+  assert.equal(due.actionable, true);
+
+  // 일정을 모르면 섣불리 "조치 필요" 라고 하지 않는다.
+  const unknown = at('2026-09-16T05:00:00Z', null);
+  assert.equal(unknown.label, '차수 완료');
+  assert.equal(unknown.actionable, false);
 });

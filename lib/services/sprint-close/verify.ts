@@ -9,6 +9,7 @@
  */
 
 import { JiraClient } from '@/lib/services/jira/client';
+import { monthLabelFromSprint } from './existing-clone';
 import {
   IGNITE_CUSTOM_FIELDS,
   KQ_CUSTOM_FIELDS,
@@ -67,13 +68,6 @@ const skip = (id: string, label: string, detail: string): VerifyCheck => ({
   status: 'skip',
   detail,
 });
-
-/** 다음 달 라벨 계산: "FEHG 2608" → "8월" */
-function monthLabelFromSprint(sprintName: string): string | null {
-  const period = sprintName.split(' ')[1];
-  if (!period || period.length < 4) return null;
-  return `${parseInt(period.slice(2, 4), 10)}월`;
-}
 
 /** KQ 스프린트 이름 매핑: "FEHG 2608" → "KQ 202608" */
 function kqSprintNameForFehg(fehgSprintName: string): string | null {

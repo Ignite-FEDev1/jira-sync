@@ -78,16 +78,22 @@ export async function deprecateTicket(params: {
 
   // 4. 필드 비우기 + 제목 변경
   // priority는 null 설정 불가(Jira 400) — 제외
+  // 마감 배치가 채우는 필드는 모두 되돌린다.
+  // components·fixVersions는 cascade-kq가 원본 KQ 기준으로 패치하므로
+  // 여기서 비우지 않으면 deprecated 티켓에 수정 버전이 남아 릴리스 목록을 오염시킨다.
   const fieldsToReset: Record<string, unknown> = {
     summary: 'deprecated',
     description: null,
     assignee: null,
     labels: [],
+    components: [],
+    fixVersions: [],
     customfield_10020: null, // 스프린트 제거
   };
   // KQ 티켓은 공동담당자를 별도로 비워야 한다 (Jira 자동화는 assignee만 지운다)
   if (ticketKey.startsWith('KQ-')) {
     fieldsToReset[KQ_CUSTOM_FIELDS.CO_ASSIGNEE] = null;
+    fieldsToReset[KQ_CUSTOM_FIELDS.EPIC_LINK] = null;
   }
 
   const updateResult = await client.put(`issue/${ticketKey}`, {
