@@ -15,7 +15,9 @@
  *   SLACK_BOT_TOKEN                           필수 (xoxb · 발송용)
  *   SLACK_READ_TOKEN                          선택 (xoxp · QA 스레드 읽기용)
  *                                             없으면 스레드 기능만 꺼진다
- *   IGNITE_JIRA_EMAIL, IGNITE_JIRA_API_TOKEN  operator 미지정 시 폴백
+ *   IGNITE_JIRA_EMAIL, IGNITE_JIRA_API_TOKEN  operator 미지정 시 폴백 (ignite 대상)
+ *   HMG_JIRA_EMAIL,    HMG_JIRA_API_TOKEN     operator 미지정 시 폴백 (hmg 대상)
+ *                                             폴백도 대상의 인스턴스를 따라간다
  *   QA_ROUTER_ITERATIONS    기본 9   (0 이면 1회만)
  *   QA_ROUTER_INTERVAL_SEC  기본 60
  *   QA_ROUTER_CONFIG_ID     지정 시 그 대상만
@@ -81,6 +83,23 @@ async function main() {
   // 검사를 통과한 뒤에 로드한다 (위 주석 참고)
   const repo = await import('@/lib/services/qa-router/repository');
   const { runTick } = await import('@/lib/services/qa-router/tick');
+
+  /*
+    ── DRY RUN 은 DB 도 안 건드린다 ──
+
+    전에는 Slack·Jira 클라이언트에만 걸려 있었다. 그런데 dry 인 Slack
+    `post` 가 `{ok:true}` 를 돌려주므로 tick 은 발송에 성공한 줄 알고
+    `markSeen` 을 **진짜로 썼다.** 그러면 1분마다 도는 운영 배치가 그 티켓을
+    이미 알린 걸로 보고 건너뛴다 — 확인하려고 돌린 리허설이 운영 알림을
+    삼킨다. 오류는 한 줄도 안 난다.
+
+    저장소 계층에서 한 번에 막는다. 쓰기 지점이 tick 한 곳에만 아홉 군데라
+    호출부마다 막으면 반드시 하나를 빠뜨린다.
+  */
+  if (dryRun) {
+    repo.setWritesDisabled(true);
+    log('DRY RUN · Slack 발송, Jira 재배정, DB 쓰기를 모두 건너뜁니다');
+  }
 
   const slack = createSlackClient({
     token: required('SLACK_BOT_TOKEN'),

@@ -56,9 +56,14 @@ function slim<T>(v: T): T {
   if ('name' in o && 'subtask' in o) {
     return { name: o.name } as unknown as T;
   }
-  // 티켓: 키와 fields 만.
+  /*
+    티켓: 키와 fields, 그리고 **id**.
+
+    id 는 원래 덜어냈다. 이제는 남긴다 — 담당 이력 bulkfetch 가 키가 아니라
+    숫자 id 로 답해서, 그 짝을 못 맞추면 재생 때 이력이 통째로 빈다.
+  */
   if ('key' in o && 'fields' in o) {
-    return { key: o.key, fields: slim(o.fields) } as unknown as T;
+    return { key: o.key, id: o.id, fields: slim(o.fields) } as unknown as T;
   }
 
   const out: Record<string, unknown> = {};
@@ -87,7 +92,11 @@ const DROP = new Set([
 ]);
 
 /** 호출 인자 → 키. 테스트 재생이 이 키로 응답을 찾는다. */
-export function callKey(kind: 'getIssue' | 'search', a: string, fields: string[]) {
+export function callKey(
+  kind: 'getIssue' | 'search' | 'getChangelogs',
+  a: string,
+  fields: string[]
+) {
   return `${kind}|${a}|${[...fields].sort().join(',')}`;
 }
 
@@ -131,7 +140,14 @@ async function main() {
   */
   const sample = await jira.searchAll(
     `project = ${projectKey} AND issuetype = ${d.issueType ?? 'Bug'} ORDER BY created DESC`,
-    ['summary', 'labels', 'issuetype', 'assignee', 'reporter', 'customfield_10132'],
+    [
+      'summary',
+      'labels',
+      'issuetype',
+      'assignee',
+      'reporter',
+      'customfield_10132',
+    ],
     SAMPLE
   );
   console.warn(`표본 ${sample.length}건`);
@@ -149,6 +165,16 @@ async function main() {
       calls[callKey('search', jql, fields)] = slim(r);
       return r;
     },
+    /*
+      이력은 slim 을 안 태운다. `changeHistories[].items[]` 는 `from`·`to` 가
+      accountId **문자열**이라, 사람 객체를 줄이는 slim 규칙이 걸리지 않는다.
+      원본이 이미 작다.
+    */
+    async getChangelogs(keys, fieldIds) {
+      const r = await jira.getChangelogs(keys, fieldIds);
+      calls[callKey('getChangelogs', keys.join(','), fieldIds)] = r;
+      return r;
+    },
   };
 
   const cases: unknown[] = [];
@@ -157,6 +183,7 @@ async function main() {
       projectKey,
       fixVersion: d.fixVersions[0] ?? '',
       triageAccountId: members[0]?.accountId ?? '',
+      jiraFilterId: filterId,
       members,
       onWarn: () => {},
     });
