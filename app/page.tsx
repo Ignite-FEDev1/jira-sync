@@ -1310,7 +1310,8 @@ export default function Home() {
                               <a
                                 href={`${
                                   result.targetProject === 'AUTOWAY' ||
-                                  result.targetProject === 'HMGBOARD'
+                                  result.targetProject === 'HMGBOARD' ||
+                                  result.targetProject === 'MEMBERSHIP'
                                     ? JIRA_ENDPOINTS.HMG
                                     : JIRA_ENDPOINTS.IGNITE
                                 }/browse/${result.targetKey}`}
