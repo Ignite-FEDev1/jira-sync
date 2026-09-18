@@ -125,6 +125,17 @@ export async function getConfig(id: string): Promise<QaRouterConfig | null> {
 export async function createConfig(
   input: QaRouterConfigInput
 ): Promise<QaRouterConfig> {
+  /*
+    리허설에서 부르면 **소리내서 막는다.** 값을 돌려줘야 하는 함수라
+    조용히 no-op 하면 만들지도 않은 대상을 만든 척 답하게 된다 — 그건
+    안 쓰는 것보다 나쁘다. 배치는 이 셋을 부르지 않으므로, 불렸다면
+    그 자체가 잘못이다.
+  */
+  if (writesDisabled) {
+    throw new Error(
+      'createConfig: 리허설(writesDisabled) 중에는 설정을 바꿀 수 없습니다'
+    );
+  }
   const row = must(
     await dbServer
       .from('qa_router_configs')
@@ -140,6 +151,17 @@ export async function updateConfig(
   id: string,
   patch: Partial<QaRouterConfigInput>
 ): Promise<QaRouterConfig> {
+  /*
+    리허설에서 부르면 **소리내서 막는다.** 값을 돌려줘야 하는 함수라
+    조용히 no-op 하면 만들지도 않은 대상을 만든 척 답하게 된다 — 그건
+    안 쓰는 것보다 나쁘다. 배치는 이 셋을 부르지 않으므로, 불렸다면
+    그 자체가 잘못이다.
+  */
+  if (writesDisabled) {
+    throw new Error(
+      'updateConfig: 리허설(writesDisabled) 중에는 설정을 바꿀 수 없습니다'
+    );
+  }
   const row = must(
     await dbServer
       .from('qa_router_configs')
@@ -153,6 +175,17 @@ export async function updateConfig(
 }
 
 export async function deleteConfig(id: string): Promise<void> {
+  /*
+    리허설에서 부르면 **소리내서 막는다.** 값을 돌려줘야 하는 함수라
+    조용히 no-op 하면 만들지도 않은 대상을 만든 척 답하게 된다 — 그건
+    안 쓰는 것보다 나쁘다. 배치는 이 셋을 부르지 않으므로, 불렸다면
+    그 자체가 잘못이다.
+  */
+  if (writesDisabled) {
+    throw new Error(
+      'deleteConfig: 리허설(writesDisabled) 중에는 설정을 바꿀 수 없습니다'
+    );
+  }
   const { error } = await dbServer
     .from('qa_router_configs')
     .delete()
@@ -185,7 +218,11 @@ export async function getJiraCredsByAccountId(
 ): Promise<JiraCreds | null> {
   const col =
     instance === 'hmg'
-      ? { id: 'hmg_account_id', email: 'hmg_jira_email', token: 'hmg_jira_api_token' }
+      ? {
+          id: 'hmg_account_id',
+          email: 'hmg_jira_email',
+          token: 'hmg_jira_api_token',
+        }
       : {
           id: 'ignite_account_id',
           email: 'ignite_jira_email',
@@ -207,6 +244,43 @@ export async function getJiraCredsByAccountId(
 }
 
 // ─────────────────────────────────────────────────────────────
+// 리허설 모드 (읽기만)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 켜면 **이 모듈의 모든 쓰기가 no-op** 이 된다. 읽기는 그대로 돈다.
+ *
+ * ── 왜 여기에 두나 ──
+ *
+ * `QA_ROUTER_DRY_RUN` 은 원래 Slack·Jira 클라이언트에만 걸려 있었다.
+ * "보내지 않는다" 는 지켰는데 "기록하지 않는다" 는 아무도 안 지켰다.
+ *
+ * 그래서 실제로 이런 일이 생긴다. dry run 의 Slack `post` 는
+ * `{ok:true}` 를 돌려주고(보낸 척), tick 은 그걸 발송 성공으로 보고
+ * `markSeen` 을 **진짜로 쓴다.** 그러면 1분마다 도는 운영 배치가 그 티켓을
+ * 이미 알린 걸로 보고 건너뛴다 — **리허설이 운영 알림을 삼킨다.**
+ * 아무 오류도 안 난다. 확인하려고 돌린 것이 확인 대상을 망가뜨린다.
+ *
+ * 호출부마다 `if (!dryRun)` 를 다는 방법도 있었지만, 쓰기 지점이
+ * tick 한 곳에만 아홉 군데다. 하나만 빠뜨려도 같은 사고가 그대로 난다.
+ * 모든 쓰기가 반드시 지나가는 이 모듈에 두면 빠뜨릴 수가 없다.
+ *
+ * ── 쓰지 않아도 흐름은 이어져야 한다 ──
+ *
+ * 리스는 **얻은 것처럼** 답하고(`true`), 상태는 없으면 빈 것을 만들어
+ * 돌려준다. 안 그러면 리허설이 첫 줄에서 멈춰 아무것도 못 본다.
+ */
+let writesDisabled = false;
+
+export function setWritesDisabled(on: boolean): void {
+  writesDisabled = on;
+}
+
+export function areWritesDisabled(): boolean {
+  return writesDisabled;
+}
+
+// ─────────────────────────────────────────────────────────────
 // 리스 락
 // ─────────────────────────────────────────────────────────────
 
@@ -219,6 +293,11 @@ export async function acquireLease(
   holder: string,
   ttlSeconds = 90
 ): Promise<boolean> {
+  /*
+    리허설은 락을 뺏지 않는다. 뺏으면 운영 배치가 그동안 못 돈다 — 안 쓰는
+    것이 목적인데 남을 멈추면 앞뒤가 안 맞는다. 얻은 것처럼 답만 한다.
+  */
+  if (writesDisabled) return true;
   const { data, error } = await dbServer.rpc('qa_router_acquire_lease', {
     p_config_id: configId,
     p_holder: holder,
@@ -232,6 +311,8 @@ export async function releaseLease(
   configId: string,
   holder: string
 ): Promise<void> {
+  // 안 잡았으니 놓을 것도 없다.
+  if (writesDisabled) return;
   const { error } = await dbServer.rpc('qa_router_release_lease', {
     p_config_id: configId,
     p_holder: holder,
@@ -254,6 +335,14 @@ export async function getOrCreateState(
     .maybeSingle();
   if (error) throw new Error(`getOrCreateState: ${error.message}`);
   if (data) return toState(data as StateRow);
+
+  /*
+    리허설이면 행을 만들지 않고 빈 상태를 준다. 처음 도는 대상이라도
+    흐름은 끝까지 볼 수 있어야 한다 — 여기서 멈추면 리허설의 값어치가 없다.
+  */
+  if (writesDisabled) {
+    return toState({ config_id: configId } as StateRow);
+  }
 
   const row = must(
     await dbServer
@@ -280,6 +369,8 @@ export async function saveState(
   configId: string,
   patch: StatePatch
 ): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
   const row: Record<string, unknown> = {};
   if (patch.seen !== undefined) row.seen = patch.seen;
   if (patch.activeCycle !== undefined) row.active_cycle = patch.activeCycle;
@@ -310,6 +401,8 @@ export async function markSeen(
   issueKey: string,
   entry: SeenEntry
 ): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
   const state = await getOrCreateState(configId);
   await saveState(configId, { seen: { ...state.seen, [issueKey]: entry } });
 }
@@ -319,6 +412,8 @@ export async function markSeen(
 // ─────────────────────────────────────────────────────────────
 
 export async function appendEvent(input: QaRouterEventInput): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
   const { error } = await dbServer.from('qa_router_events').insert({
     config_id: input.configId,
     issue_key: input.issueKey,
@@ -355,6 +450,8 @@ export async function recordSideEffect(
   error: string | null,
   now: () => Date = () => new Date()
 ): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
   try {
     const { data } = await dbServer
       .from('qa_router_state')
@@ -379,6 +476,8 @@ export async function appendSystemEvent(
   label: string,
   reason: string
 ): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
   await appendEvent({
     configId,
     issueKey: label,
@@ -430,6 +529,8 @@ export async function upsertCycles(
   configId: string,
   cycles: DeployCycle[]
 ): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
   if (cycles.length === 0) return;
   const { error } = await dbServer.from('qa_router_cycles').upsert(
     cycles.map((c) => ({
@@ -485,6 +586,40 @@ export async function getCycle(
 }
 
 /**
+ * 배포대장이 말하는 **지금 차수**. 아직 안 지난 것 중 가장 가까운 배포다.
+ *
+ * ── 언제 쓰나 ──
+ *
+ * 필터에 `fixVersion` 이 없는 대상에서 쓴다. CPO 는 사람이 차수마다 필터의
+ * fixVersion 을 바꿔 "이번엔 이거다" 를 알려 준다(필터 이름이 아예
+ * `KQ - QA(차수마다 변경)` 이다). 그 손잡이가 없는 프로젝트는 지금 차수를
+ * 물어볼 데가 배포대장뿐이다.
+ *
+ * ── 왜 `>= 오늘` 인가 ──
+ *
+ * 배포일 당일은 아직 이번 차수다. 그날 아침 요약과 배포 알림이 나가야 한다.
+ * 지난 것을 고르면 끝난 차수의 일정을 매일 다시 보고하게 된다 — 실측으로
+ * 한 번 겪은 사고다(tick.ts 의 `배포일 지남` 주석 참고).
+ */
+export async function currentCycleFromLedger(
+  configId: string,
+  todayYmd: string
+): Promise<DeployCycle | null> {
+  const { data, error } = await dbServer
+    .from('qa_router_cycles')
+    .select('fix_version')
+    .eq('config_id', configId)
+    .gte('deploy_ymd', todayYmd)
+    .order('deploy_ymd', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`currentCycleFromLedger: ${error.message}`);
+  if (!data?.fix_version) return null;
+  // 한 번 더 읽는 대신 getCycle 로 전체를 채운다 — 컬럼 매핑이 한 곳에 남는다.
+  return getCycle(configId, data.fix_version as string);
+}
+
+/**
  * 한 차수의 기획티켓 진행 현황을 저장한다.
  *
  * 차수 자체(upsertCycles)와 분리한 이유: 차수 목록은 배포대장에서 오고
@@ -502,6 +637,8 @@ export async function savePlanProgress(
     threadDeployYmd?: string | null;
   } = {}
 ): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
   const patch: Record<string, unknown> = {
     plan_progress: progress,
     plan_collected_at: new Date().toISOString(),
@@ -574,6 +711,8 @@ export async function saveOutcomes(
   fixVersion: string,
   results: { issueKey: string; outcome: string; name: string | null }[]
 ): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
   const at = new Date().toISOString();
   for (const r of results) {
     const { error } = await dbServer

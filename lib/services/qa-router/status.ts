@@ -5,6 +5,8 @@
  * 순수 함수 — DB 접근 없이 config + state 만으로 판단한다.
  */
 
+import { buildFixVersion, type FixVersionRule } from './derive';
+import { DEPLOY_KINDS } from './types';
 import type {
   AlertRule,
   AlertShift,
@@ -98,6 +100,15 @@ export interface HealthInput {
   now: Date;
   /** 최근 판정 이력이 0건인 기간(일). 조용한 고장 감지용. */
   idleDays?: number | null;
+  /**
+   * 다음 차수의 QA 시작일 (배포대장에서 읽은 것). 없으면 모른다는 뜻이다.
+   *
+   * 배포일이 지났다는 사실만으로 "조치 필요" 를 띄우면 다음 QA 가 시작될
+   * 때까지 몇 주 동안 빨간 줄이 켜져 있게 된다 — 실측으로 9/14 배포 뒤
+   * 다음 QA 가 9/28 이라 2주였다. 그 사이에 사람이 할 일은 없다.
+   * 가짜 경보는 곧 무시되고, 무시되기 시작하면 진짜 경보도 같이 묻힌다.
+   */
+  nextQaStartYmd?: string | null;
 }
 
 /**
@@ -106,11 +117,38 @@ export interface HealthInput {
  * 꺼짐 → 응답 없음 → 차수 전환 대기 → 업무시간 외 → 정상
  * "응답 없음"을 위로 올린 이유: 사람이 지금 조치해야 하는 유일한 상태다.
  */
+/**
+ * 지금이 **차수와 차수 사이**인가. 봇이 일부러 쉬는 구간이다.
+ *
+ * 두 가지가 동시에 성립할 때만 참이다.
+ *   ① 필터가 가리키는 차수의 배포일이 지났다 (할 일이 끝났다)
+ *   ② 다음 QA 가 아직 시작 안 했다          (새로 할 일도 없다)
+ *
+ * ②를 안 보면 정작 **필터를 바꿔야 하는 날**까지 조용해진다. 그때는 쉬는
+ * 게 아니라 사람이 손대야 하는 순간이라 경보가 살아 있어야 한다.
+ *
+ * 다음 QA 일정을 모르면(`nextQaStartYmd` 없음) 쉬는 것으로 본다. 배포가
+ * 끝난 건 확실하고, 모를 때 경보를 켜면 몇 주짜리 빨간 줄이 된다.
+ */
+function isBetweenCycles({
+  state,
+  now,
+  nextQaStartYmd,
+}: Pick<HealthInput, 'state' | 'now' | 'nextQaStartYmd'>): boolean {
+  const today = kstYmdOf(now);
+  const past =
+    pendingCycleSwitch(state?.activeCycle ?? null) ??
+    staleFilterCycle(state?.filterCache ?? null, today);
+  if (!past) return false;
+  return !nextQaStartYmd || today < nextQaStartYmd;
+}
+
 export function computeHealth({
   config,
   state,
   now,
   idleDays,
+  nextQaStartYmd,
 }: HealthInput): Health {
   if (!config.enabled) {
     return {
@@ -131,8 +169,25 @@ export function computeHealth({
     : null;
   const stale = lastPoll == null || now.getTime() - lastPoll > staleMs;
 
-  // 업무시간인데 폴링이 끊겼으면 조치가 필요하다.
-  if (working && stale) {
+  /*
+    ── 쉬는 중인지 먼저 본다 ──
+
+    차수가 끝나고 다음 QA 가 아직이면 배치를 **일부러 늦춘다** (10분 주기 →
+    정시 1회, `qa_router_in_qa_window`). 그 구간에서 `heartbeatStaleMinutes`
+    (기본 20분)로 재면 당연히 늘 넘는다.
+
+    그런데 그걸 "응답 없음 · 조치 필요" 라고 띄우고 있었다. 우리가 쉬기로
+    해 놓고 쉰다고 빨간 줄을 켜는 셈이다. 실측(2026-09-17): CPO BO 가
+    09-14 배포 뒤 사흘째 빨간 줄이었고, 같은 판정을 쓰는 슬랙 알림이
+    매시간 나갔다. 다음 QA 는 09-28 이라 2주를 그럴 참이었다.
+
+    가짜 경보는 곧 무시되고, 무시되기 시작하면 진짜 경보도 같이 묻힌다.
+    그래서 "끝난 차수" 판단을 **stale 검사보다 먼저** 한다.
+  */
+  const cycleDone = isBetweenCycles({ state, now, nextQaStartYmd });
+
+  // 업무시간인데 폴링이 끊겼으면 조치가 필요하다. 쉬는 구간은 빼고 본다.
+  if (working && stale && !cycleDone) {
     return {
       tone: 'bad',
       label: '응답 없음',
@@ -166,10 +221,36 @@ export function computeHealth({
     pendingCycleSwitch(state?.activeCycle ?? null) ??
     staleFilterCycle(state?.filterCache ?? null, kstYmdOf(now));
   if (pending) {
+    /*
+      ── 같은 사실, 다른 뜻 ──
+
+      "필터의 배포일이 지났다" 는 두 가지를 뜻할 수 있고, 사람이 할 일이
+      정반대다.
+
+        다음 QA 가 아직   → **끝난 것이다.** 할 일이 없다
+        다음 QA 가 시작됨 → **필터를 바꿔야 한다.** 안 바꾸면 그 차수 티켓이
+                            통째로 안 잡힌다
+
+      전에는 둘을 안 갈라서 배포 다음 날부터 몇 주 내내 "전환 대기 · 조치
+      필요" 였다. 정작 진짜로 바꿔야 하는 날에도 같은 색 같은 글자라
+      구분이 안 된다.
+    */
+    const today = kstYmdOf(now);
+    const nextStarted = !!nextQaStartYmd && today >= nextQaStartYmd;
+    if (!nextStarted) {
+      return {
+        tone: 'off',
+        label: '차수 완료',
+        detail: nextQaStartYmd
+          ? `다음 QA 는 ${nextQaStartYmd} 시작입니다`
+          : '다음 차수를 기다리는 중입니다',
+        actionable: false,
+      };
+    }
     return {
       tone: 'warn',
       label: '전환 대기',
-      detail: pending,
+      detail: `${nextQaStartYmd} 부터 QA 인데 필터가 아직 이전 차수입니다`,
       actionable: true,
     };
   }
@@ -235,6 +316,43 @@ export function cycleStage(
   activeFixVersion: string | null,
   todayYmd: string
 ): { stage: CycleStage; label: string; tone: HealthTone } {
+  /*
+    ── 배포가 끝났으면 무엇보다 먼저 끝난 것이다 ──
+
+    전에는 `fixVersion === activeFixVersion` 을 맨 위에서 봤다. 그래서 필터가
+    아직 그 차수를 가리키고 있으면 **배포일이 지나도 계속 "알림 중"** 이었다.
+    실측(2026-09-17): release_20260914 는 QA 가 09-09 에 끝나고 09-14 에
+    배포까지 나갔는데, 필터를 안 바꿔 뒀다는 이유로 사흘째 초록 "알림 중" 이
+    켜져 있었다. 그 줄만 보면 봇이 지금 그 차수를 돌보는 중으로 읽힌다.
+
+    끊는 기준은 **배포일**이지 QA 종료일이 아니다. QA 가 끝나고 배포까지의
+    며칠 동안은 봇이 할 일이 남아 있다 (운영 배포 알림). 그 구간은 여전히
+    "알림 중" 이 맞다.
+
+    배포일은 출처가 여럿이라(스레드 > 배포대장 본문 > 페이지 제목) 가장
+    늦은 것을 쓴다. 일정이 밀렸는데 옛 날짜로 끝났다고 접으면, 정작 알려야
+    할 배포 당일에 조용해진다.
+  */
+  const deployed = [cycle.threadDeployYmd, cycle.prodYmd, cycle.deployYmd]
+    .filter((d): d is string => Boolean(d))
+    .sort()
+    .pop();
+  if (deployed && deployed < todayYmd) {
+    /*
+      필터가 아직 이 차수를 가리키고 있으면 **숨기지 않고** 다르게 부른다.
+
+      전에는 그 경우를 초록 "알림 중" 으로 뒀는데, 그건 지금 알림이 나가는
+      것처럼 읽힌다. 그렇다고 그냥 "지난 차수" 로 접으면 봇이 어디를 보고
+      있는지가 화면에서 사라진다 — 둘 다 곤란해서 이름을 따로 준다.
+
+      회색인 이유는 이 줄만으로는 할 일이 정해지지 않기 때문이다. 필터를
+      지금 바꿔야 하는지는 **다음 차수 QA 가 시작됐는지**에 달렸고, 그
+      판단은 대상 전체 상태(`computeHealth`)가 한다.
+    */
+    const label = cycle.fixVersion === activeFixVersion ? '배포 완료' : '지난 차수';
+    return { stage: 'past', label, tone: 'off' };
+  }
+
   if (cycle.fixVersion === activeFixVersion) {
     // "보는 중"은 주체가 모호하고 옆 라벨(예정·전환 대기)과 성격이 어긋났다.
     // 실제 동작은 이 차수 티켓을 찾아 담당자에게 알리는 것이다.
@@ -607,7 +725,10 @@ export function overdueSlot(
   const hour = kst.getUTCHours();
 
   // 오늘 이미 지나온 슬롯 중 가장 늦은 것. tick 이 고르는 것과 같은 규칙이다.
-  const due = [...hours].sort((a, b) => a - b).reverse().find((h) => hour >= h);
+  const due = [...hours]
+    .sort((a, b) => a - b)
+    .reverse()
+    .find((h) => hour >= h);
   if (due === undefined) return null;
 
   const slotStart = Date.parse(
@@ -668,9 +789,51 @@ const KIND_LABEL: Record<DeployKind, string> = {
   hotfix: 'hotfix',
 };
 
+/**
+ * 배포대장 제목의 괄호에서 배포 종류를 읽는다.
+ *
+ * ── 왜 정확히 일치를 안 보나 ──
+ *
+ * 전에는 `/\((정기|adhoc|hotfix)\)/` 였다. 괄호 안이 **딱 그 세 글자**여야
+ * 맞았다. 팀마다 적는 말이 다르다는 걸 못 담은 규칙이다.
+ *
+ * 실측(그룹웨어 SPC2 배포대장):
+ *   `Dev) 배포 관리 - 2026-09-03(비정기배포)`   → 셋 중 아무것도 아님
+ *   `Dev) 배포 관리 - 2026-09-17(이그나이트)`   → 셋 중 아무것도 아님
+ * 둘 다 정기로 떨어졌다. **비정기 배포가 정기로 잡혀** 차수가 하루에 두 번
+ * 바뀔 수 있었다.
+ *
+ * ── 순서가 중요하다 ──
+ *
+ * `비정기배포` 안에는 `정기` 가 들어 있다. 정기를 먼저 보면 비정기가 정기로
+ * 잡힌다. 그래서 **비정기를 먼저** 본다.
+ *
+ * 모르는 말(`이그나이트` 같은 벤더명)은 정기로 둔다. 차수를 통째로 버리는
+ * 것보다 낫고, 아니면 설정에서 종류를 빼면 된다.
+ */
+export function readDeployKind(title: string): DeployKind {
+  const inside = /\(([^)]*)\)/.exec(title)?.[1]?.trim().toLowerCase() ?? '';
+  if (!inside) return 'regular';
+  if (inside.includes('비정기') || inside.includes('adhoc')) return 'adhoc';
+  if (inside.includes('hotfix') || inside.includes('핫픽스')) return 'hotfix';
+  return 'regular';
+}
+
 export function readCyclePageTitle(
   title: string,
-  opts: { deployKinds?: DeployKind[] } = {}
+  opts: {
+    deployKinds?: DeployKind[];
+    /**
+     * 그 프로젝트의 버전 이름 규칙. 없으면 종류+8자리 폴백으로 짓는다.
+     * 호출자가 Jira 버전 목록에서 `inferFixVersionRule` 로 만들어 넘긴다.
+     */
+    rule?: FixVersionRule | null;
+    /**
+     * 그 프로젝트에 **실제로 있는** 버전 이름들. 제목이 배포 종류를 안 말할 때
+     * 이게 제일 센 증거가 된다. 안 넘기면 제목 추측만으로 짓는다.
+     */
+    versions?: Set<string>;
+  } = {}
 ): CyclePage {
   /*
     adhoc·hotfix 는 정기배포가 아니다. QA 기간이 따로 없고 차수 번호도
@@ -680,9 +843,7 @@ export function readCyclePageTitle(
     안 넘기면 지금까지와 똑같이 돈다. 정기·adhoc·hotfix 는 서로 독립이라
     "hotfix 는 보고 adhoc 은 뺀다" 도 된다.
   */
-  const kindM = /\((정기|adhoc|hotfix)\)/i.exec(title);
-  const deployKind: DeployKind =
-    kindM?.[1] === 'adhoc' ? 'adhoc' : kindM?.[1] === 'hotfix' ? 'hotfix' : 'regular';
+  const deployKind = readDeployKind(title);
   const allowed = opts.deployKinds ?? ['regular'];
   if (!allowed.includes(deployKind)) {
     return {
@@ -692,10 +853,136 @@ export function readCyclePageTitle(
   }
   const dm = title.match(/(\d{4})-(\d{2})-(\d{2})/);
   if (!dm) return { kind: 'skip', why: '제목에 날짜가 없습니다' };
-  return {
-    kind: 'cycle',
-    deployYmd: `${dm[1]}-${dm[2]}-${dm[3]}`,
-    fixVersion: `release_${dm[1]}${dm[2]}${dm[3]}`,
+  const deployYmd = `${dm[1]}-${dm[2]}-${dm[3]}`;
+  /*
+    ── 차수 이름은 **프로젝트가 정한다** ──
+
+    전에는 `release_${YYYYMMDD}` 로 박혀 있었다. KQ 만 보고 만든 값이라
+    두 군데가 틀렸다.
+      · 접두사를 늘 `release` — 비정기배포인데도 release 로 지었다
+      · 날짜를 늘 8자리      — AUTOWAY 는 6자리를 쓴다
+
+    실측(2026-09-17) Jira 에서 직접 받은 버전 목록:
+      KQ       release_20260914 · adhoc_20260914 · hotfix_20260828  (8자리 411건)
+      AUTOWAY  adhoc_260917 · release_260723 · hotfix_260828        (6자리 30건)
+
+    09-17 GW 비정기배포의 정답은 `adhoc_260917` 이고 Jira 에 이미 있었는데,
+    봇은 없는 `release_20260917` 을 찾아 "릴리즈가 아직 안 만들어졌습니다"
+    를 띄웠다. 거기서부터 판정·진행률 키가 전부 어긋났다.
+
+    이제 `rule` 을 받아 짓는다. 규칙은 그 프로젝트의 **실제 버전 이름들**에서
+    역추론한 것이라 새 프로젝트가 붙어도 코드를 안 고친다.
+    규칙이 없거나(버전 0개) 그 종류의 접두사가 안 보이면 폴백으로 내려간다.
+  */
+  /*
+    ── 제목이 종류를 안 말할 때가 있다 ──
+
+    실측 `Dev) 배포 관리 - 2026-09-17(이그나이트)` 에는 정기/비정기/핫픽스가
+    어디에도 없다. `readDeployKind` 는 기본값 `regular` 를 주고, 그러면
+    `release_260917` 을 짓는데 실제 차수는 `adhoc_260917` 이다.
+
+    이때는 **Jira 에 이미 있는 버전**이 제목보다 정확한 증거다. 그 날짜를
+    가진 버전이 딱 하나면 그게 이 차수다. 여럿이면 제목의 추측을 쓴다 —
+    둘 중 하나를 찍으면 틀렸을 때 조용히 엉뚱한 차수를 잡는다.
+  */
+  const guess = buildFixVersion(
+    opts.rule ?? null,
     deployKind,
-  };
+    deployYmd,
+    DEPLOY_KINDS
+  );
+  const sameDay = [...(opts.versions ?? [])].filter((v) =>
+    endsWithYmd(v, deployYmd)
+  );
+  const resolved = sameDay.length === 1 ? sameDay[0] : null;
+  const fixVersion = resolved ?? guess ?? fallbackName();
+
+  /*
+    ── 찾아낸 버전이 종류도 말해 준다 ──
+
+    제목에서 읽은 종류는 **추측**이다. 실측 `…2026-09-17(이그나이트)` 처럼
+    종류가 아예 안 적힌 제목이 있고, 그때 `readDeployKind` 는 기본값
+    `regular` 를 준다. 그런데 Jira 에서 찾은 버전이 `adhoc_260917` 이면
+    이 차수는 비정기다 — 접두사가 곧 종류다.
+
+    추측보다 사실이 세다. 버전을 실제로 찾았을 때만 덮어쓴다. 지어낸 이름
+    (`guess`·`fallbackName`)은 종류에서 만든 것이라 되먹이면 아무 정보가 없다.
+
+    실측(2026-09-17) 이 한 줄로 배포방 17건 중 `GW 비정기배포 260917` 의
+    유형이 regular → adhoc 으로 바로잡혔다.
+  */
+  const fromVersion = resolved
+    ? DEPLOY_KINDS.find((k) => {
+        const p = buildFixVersion(opts.rule ?? null, k, deployYmd, DEPLOY_KINDS);
+        return p !== null && p === resolved;
+      })
+    : undefined;
+  if (fromVersion) {
+    /*
+      종류가 바뀌면 "잡을 배포" 검사를 다시 해야 한다. 제목만 보고 정기라고
+      통과시킨 페이지가 실은 비정기였는데, 설정이 비정기를 안 잡는다면
+      여기서 걸러야 한다 — 안 그러면 껐다고 믿는 배포가 조용히 들어온다.
+    */
+    if (!allowed.includes(fromVersion)) {
+      return {
+        kind: 'skip',
+        why: `잡을 배포에서 뺐습니다 (${KIND_LABEL[fromVersion]} · Jira 버전 ${resolved})`,
+      };
+    }
+    return { kind: 'cycle', deployYmd, fixVersion, deployKind: fromVersion };
+  }
+
+  /*
+    규칙도 없고 Jira 버전도 못 받은 경우의 **마지막 추측**.
+
+    지금까지 쓰던 모양 그대로다 — 증거가 없을 때 동작이 바뀌면, 버전 조회가
+    잠깐 실패한 사이에 차수 키가 갈려 이벤트·진행률이 둘로 쪼개진다.
+    정기배포를 `release` 로 적는 것은 두 프로젝트(KQ·AUTOWAY) 모두에서
+    관찰된 값이라 근거 없는 값은 아니다. 다만 **추측이므로 마지막에만** 쓴다.
+  */
+  function fallbackName(): string {
+    const prefix = deployKind === 'regular' ? 'release' : deployKind;
+    return `${prefix}_${dm![1]}${dm![2]}${dm![3]}`;
+  }
+  return { kind: 'cycle', deployYmd, fixVersion, deployKind };
+}
+
+/** 버전 이름이 이 날짜로 끝나나. 6자리(yyMMdd)·8자리(YYYYMMDD) 둘 다 본다. */
+function endsWithYmd(version: string, deployYmd: string): boolean {
+  const ymd = deployYmd.replace(/-/g, '');
+  return version.endsWith(ymd) || version.endsWith(ymd.slice(2));
+}
+
+// ─────────────────────────────────────────────────────────────
+// 배포대장 월 페이지
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 제목에서 "몇 년 몇 월" 을 뽑아 정렬 키(`YYYYMM`)로 만든다. 월 페이지가
+ * 아니면 null.
+ *
+ * ── 왜 필요한가 ──
+ *
+ * 루트의 자식이 전부 월 페이지인 것은 아니다. 실측(그룹웨어 SPC2):
+ *
+ *   Dev) CBT 중 배포 건 정리                        ← 월 아님
+ *   Dev) 배포 관리 - yyyy-mm-dd 정기배포(템플릿)     ← 월 아님
+ *   Dev) 배포 관리 - 템플릿                          ← 월 아님
+ *   Dev) 배포 관리 - 2511 … 2609                    ← 여기부터 월
+ *
+ * 앞에서 세 개를 집으면 템플릿만 열어 보고 "차수 0건" 이라고 답한다.
+ * **배치는 월 전부를 순회하므로 멀쩡히 읽는데** 확인 화면만 틀린 셈이고,
+ * 그건 가짜 경보다. 이 저장소에서 가짜 경보는 곧 무시된다.
+ *
+ * 표기가 팀마다 다르다. 둘 다 받는다.
+ *   `Dev) 배포 - 2026-09`      (YYYY-MM)
+ *   `Dev) 배포 관리 - 2609`    (YYMM)
+ */
+export function monthOrderKey(title: string): string | null {
+  const full = /(20\d{2})-(0[1-9]|1[0-2])(?!\d)/.exec(title);
+  if (full) return full[1] + full[2];
+  // 끝자리 4숫자를 YYMM 으로 본다. 월이 13 이상이면 월 표기가 아니다.
+  const short = /(?:^|\D)(\d{2})(0[1-9]|1[0-2])\s*$/.exec(title.trim());
+  if (short) return `20${short[1]}${short[2]}`;
+  return null;
 }

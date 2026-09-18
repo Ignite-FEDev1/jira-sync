@@ -15,7 +15,7 @@
  */
 
 import {
-  deriveFromJql,
+  deriveJql,
   inferFixVersionRule,
   matchSlackUsers,
   parseFixVersion,
@@ -154,7 +154,12 @@ export async function deriveContext(
   rule: FixVersionRule | null;
 }> {
   const filter = await deps.jira.getFilter(cfg.jiraFilterId);
-  const d = deriveFromJql(filter.jql);
+  /*
+    Jira 에게 JQL 해석을 맡긴다. 정규식은 본 적 있는 표기만 읽어서,
+    `project in (…)` 처럼 흔한 형태에도 조용히 null 을 돌려줬다.
+    파싱 API 가 안 되면 정규식으로 내려간다 (deriveJql 안에서 처리).
+  */
+  const d = await deriveJql(filter.jql, (q) => deps.jira.parseJql(q));
   if (!d.projectKey)
     throw new Error(`필터 ${cfg.jiraFilterId} JQL 에서 project 를 찾지 못함`);
   if (d.fixVersions.length === 0) {
@@ -206,6 +211,8 @@ export async function deriveContext(
     rule = {
       kinds: [],
       separator: '',
+      // 패턴에 적힌 자릿수를 되읽는다. 못 읽으면 지금까지 쓰던 8 이다.
+      dateDigits: cfg.fixVersionPattern.includes('\\d{6}') ? 6 : 8,
       matched: 0,
       considered: 0,
       total: 0,
@@ -265,7 +272,9 @@ export async function deriveContext(
             : `${id} · ${info.error}`
       );
     } else if (info.isArchived) {
-      channelProblems.push(`#${info.name} · 보관된 채널이라 발송할 수 없습니다`);
+      channelProblems.push(
+        `#${info.name} · 보관된 채널이라 발송할 수 없습니다`
+      );
     } else if (!info.isMember) {
       channelProblems.push(
         `#${info.name} · 봇이 이 채널에 없습니다. 초대해 주세요`
@@ -286,6 +295,7 @@ export async function deriveContext(
       members,
       fixVersionRule: rule?.display ?? null,
       fixVersionPattern: rule?.pattern ?? null,
+      cycleAxisField: d.cycleAxisField,
       channelNames,
       derivedAt: (deps.now?.() ?? new Date()).toISOString(),
     },
@@ -440,6 +450,11 @@ export async function collectCycles(
 
   // Jira 버전은 한 번만 받아서 대조한다 (418개 중 release_ 는 61개).
   let versionNames = new Set<string>();
+  /*
+    같은 목록으로 **이름 규칙**도 뽑는다. 차수 이름을 지을 때 쓴다.
+    없으면 `readCyclePageTitle` 이 폴백으로 내려간다.
+  */
+  let rule: FixVersionRule | null = null;
   try {
     const projectKey = await deps.jira.resolveProjectKey(
       // 파생값이 없을 수도 있으니 필터에서 다시 읽지 않고 프로젝트 키를 직접 쓴다.
@@ -447,9 +462,11 @@ export async function collectCycles(
         /project\s*=\s*"?([\w-]+)"?/i
       )?.[1] ?? ''
     );
-    versionNames = new Set(
-      (await deps.jira.getProjectVersions(projectKey)).map((v) => v.name)
+    const names = (await deps.jira.getProjectVersions(projectKey)).map(
+      (v) => v.name
     );
+    versionNames = new Set(names);
+    rule = inferFixVersionRule(names);
   } catch (e) {
     // 버전 조회가 실패해도 차수 목록 자체는 만들 수 있다.
     deps.log?.(`Jira 버전 목록 조회 실패: ${(e as Error).message}`);
@@ -466,6 +483,8 @@ export async function collectCycles(
       */
       const read = readCyclePageTitle(kid.title, {
         deployKinds: cfg.deployKinds,
+        rule,
+        versions: versionNames,
       });
       if (read.kind !== 'cycle') continue;
       const { deployYmd, fixVersion } = read;
@@ -573,8 +592,21 @@ export async function runTick(
       finishOk 를 부르지 않는다 — lastPollAt 을 갱신하면 주기가 영영 다시
       시작돼 설정한 간격이 안 지켜진다.
     */
+    /*
+      리허설은 이 검사를 건너뛴다.
+
+      `lastPollAt` 은 **운영 배치가** 1분마다 갱신한다. 리허설은 아무것도
+      쓰지 않으므로 그 값을 자기 것으로 만들 수가 없고, 그래서 언제 돌려도
+      늘 `too_soon` 에서 끝난다 — 확인하려고 만든 모드가 확인을 못 하는
+      상태였다.
+
+      간격을 두는 이유가 "Jira 를 너무 자주 두드리지 않는다" 인데, 리허설은
+      사람이 손으로 한 번 돌리는 것이라 그 걱정이 없다.
+    */
     // 리스는 아래 finally 가 푼다. 여기서 또 풀면 두 번 부르는 셈이다.
-    if (tooSoon(cfg, state.lastPollAt, now())) return { status: 'too_soon' };
+    if (!repo.areWritesDisabled() && tooSoon(cfg, state.lastPollAt, now())) {
+      return { status: 'too_soon' };
+    }
 
     // ── 차수 목록 (하루 1회) ──
     // 배포대장은 하루에 몇 번씩 바뀌는 문서가 아니다. 매 tick 마다 트리를 훑으면
@@ -641,7 +673,46 @@ export async function runTick(
         }
       }
     }
-    if (!derived || !fixVersion) throw new Error('파생 컨텍스트를 만들지 못함');
+    if (!derived) throw new Error('파생 컨텍스트를 만들지 못함');
+
+    /*
+      ── 차수를 어디서 아나 ──
+
+      두 갈래다.
+
+        ① 필터가 말해 준다 (`fixVersion` 조건)
+           CPO 가 이 방식이다. 사람이 차수마다 필터를 바꿔 "이번엔 이거다"
+           를 알려 준다 — 필터 이름이 아예 `KQ - QA(차수마다 변경)` 이다.
+
+        ② 배포대장이 말해 준다
+           필터에 fixVersion 이 없는 프로젝트가 있다. 실측(그룹웨어
+           ICTQMSCHE): 프로젝트에 릴리즈 버전이 **0개**다. 여러 팀이 같이
+           쓰는 프로젝트라 우리가 버전을 만들 수도 없다. 그런 대상은 지금
+           차수를 물어볼 데가 배포대장뿐이다.
+
+      전에는 ①이 없으면 여기서 통째로 죽었다(`파생 컨텍스트를 만들지 못함`).
+      차수를 모른다고 **판정 알림까지** 멎을 이유는 없다 — "이 티켓 누구
+      것" 은 차수와 무관하게 답할 수 있다.
+
+      ── 조회를 좁히는 것과 차수를 아는 것은 다른 일이다 ──
+
+      ①일 때만 조회에 `AND fixVersion` 을 더한다. ②는 티켓에 fixVersion 이
+      아예 안 달려 있어서, 더하면 **0건**이 된다. 차수 이름은 배포대장 제목
+      에서 만든 `release_YYYYMMDD` 를 그대로 쓴다 (이벤트·진행률의 키다).
+    */
+    const narrowByFixVersion = !!fixVersion;
+    if (!fixVersion && cfg.confluenceDeployRootId) {
+      const fromLedger = await repo.currentCycleFromLedger(
+        cfg.id,
+        kstYmd(now())
+      );
+      if (fromLedger) {
+        fixVersion = fromLedger.fixVersion;
+        log(
+          `차수를 배포대장에서 읽음 · ${fixVersion} (필터에 fixVersion 없음)`
+        );
+      }
+    }
 
     /*
       ── 기획티켓 진행 (하루 두 번) ──
@@ -789,6 +860,7 @@ export async function runTick(
       rule = {
         kinds: [],
         separator: '',
+        dateDigits: derived.fixVersionPattern.includes('\\d{6}') ? 6 : 8,
         matched: 0,
         considered: 0,
         total: 0,
@@ -797,20 +869,47 @@ export async function runTick(
       };
     }
 
-    const parsedFv = parseFixVersion(fixVersion, { rule });
-    if (!parsedFv) {
+    /*
+      차수를 끝내 못 찾았으면(필터에도 배포대장에도 없음) **판정 알림만**
+      돌린다. 아래 차수 블록을 통째로 건너뛰고 조회로 바로 간다.
+
+      죽지 않는 게 중요하다. 차수는 ②번 기능(현황 보고)의 재료일 뿐이고,
+      ①번 기능(판정 알림)은 차수를 몰라도 답할 수 있다. 여기서 던지면
+      차수를 안 쓰는 팀은 봇을 아예 못 쓴다.
+    */
+    const parsedFv = fixVersion ? parseFixVersion(fixVersion, { rule }) : null;
+    if (fixVersion && !parsedFv) {
       throw new Error(
         `차수 이름 해석 실패: ${fixVersion} (규칙 ${rule?.display ?? '자동 감지 실패'})`
       );
     }
-    log(
-      `활성 차수 ${parsedFv.raw} · ${parsedFv.kind} · 배포일 ${parsedFv.deployYmd}`
-    );
+    if (!parsedFv) {
+      log('차수를 모릅니다 · 판정 알림만 돕니다 (차수 현황은 쉽니다)');
+      if (state.activeCycle) {
+        await repo.saveState(cfg.id, { activeCycle: null });
+      }
+    }
+    /*
+      여기부터 차수 블록이다. 차수를 모르면 통째로 건너뛰고 조회로 간다 —
+      안에 있는 것(종료 판정, 일정 조회, 시작 스레드)이 전부 "이번 차수가
+      무엇인가" 를 전제한다.
+    */
+    /*
+      차수 스레드. 차수를 모르면 null 이고, 그때 판정 알림은 스레드 없이
+      채널에 바로 나간다. 아래 차수 블록이 `cycle` 을 자기 안에서만 쓰므로
+      밖으로 꺼낼 값은 이것 하나다.
+    */
+    let cycleThreadTs: string | null = null;
 
-    // ── 사이클 종료 (배포일 지남) ──
-    if (kstYmd(now()) > parsedFv.deployYmd) {
-      log(`배포일(${parsedFv.deployYmd}) 지남 · 필터 전환 대기`);
-      /*
+    if (parsedFv) {
+      log(
+        `활성 차수 ${parsedFv.raw} · ${parsedFv.kind} · 배포일 ${parsedFv.deployYmd}`
+      );
+
+      // ── 사이클 종료 (배포일 지남) ──
+      if (kstYmd(now()) > parsedFv.deployYmd) {
+        log(`배포일(${parsedFv.deployYmd}) 지남 · 필터 전환 대기`);
+        /*
         ── 끝난 차수를 가리키는 포인터를 지운다 ──
 
         여기서 조기 반환하면 **이쪽(판정 알림)만** 멎는다. `activeCycle` 을
@@ -825,96 +924,144 @@ export async function runTick(
         이미 비어 있으면 쓰지 않는다 — 이 분기는 필터가 다음 차수로
         바뀔 때까지 매 tick 지나간다.
       */
-      if (state.activeCycle) {
-        await repo.saveState(cfg.id, { activeCycle: null });
+        if (state.activeCycle) {
+          await repo.saveState(cfg.id, { activeCycle: null });
+        }
+        await finishOk(cfg, state, log, deps, opsChannel);
+        return { status: 'cycle_ended', fixVersion: parsedFv.raw };
       }
-      await finishOk(cfg, state, log, deps, opsChannel);
-      return { status: 'cycle_ended', fixVersion };
-    }
 
-    // ── 사이클 스케줄 · QA 시작 전이면 조용히 종료 ──
-    let cycle: ActiveCycle | null = state.activeCycle;
-    const sameCycle = cycle?.fixVersion === fixVersion;
-    const scheduleStale =
-      !cycle?.cachedAt ||
-      now().getTime() - new Date(cycle.cachedAt).getTime() > SCHEDULE_TTL_MS;
-    if (!sameCycle || !cycle?.schedule || scheduleStale) {
-      const resolved =
-        parsedFv.kind === 'release'
-          ? await resolveSchedule(cfg, parsedFv.deployYmd, deps)
-          : null;
-      cycle = {
-        fixVersion,
-        schedule: resolved?.schedule ?? null,
-        deployPageId: resolved?.pageId ?? null,
-        threadTs: sameCycle ? (cycle?.threadTs ?? null) : null,
-        cachedAt: now().toISOString(),
-      };
-      await repo.saveState(cfg.id, { activeCycle: cycle });
-    }
+      // ── 사이클 스케줄 · QA 시작 전이면 조용히 종료 ──
+      let cycle: ActiveCycle | null = state.activeCycle;
+      const sameCycle = cycle?.fixVersion === parsedFv.raw;
+      const scheduleStale =
+        !cycle?.cachedAt ||
+        now().getTime() - new Date(cycle.cachedAt).getTime() > SCHEDULE_TTL_MS;
+      if (!sameCycle || !cycle?.schedule || scheduleStale) {
+        const resolved =
+          parsedFv.kind === 'release'
+            ? await resolveSchedule(cfg, parsedFv.deployYmd, deps)
+            : null;
+        cycle = {
+          // parsedFv.raw 는 fixVersion 과 같은 문자열이다. 이쪽을 쓰면
+          // "차수를 아는 경우" 라는 사실이 타입으로도 드러난다.
+          fixVersion: parsedFv.raw,
+          schedule: resolved?.schedule ?? null,
+          deployPageId: resolved?.pageId ?? null,
+          threadTs: sameCycle ? (cycle?.threadTs ?? null) : null,
+          cachedAt: now().toISOString(),
+        };
+        await repo.saveState(cfg.id, { activeCycle: cycle });
+      }
 
-    const qaStart = cycle.schedule?.qaStartYmd;
-    if (qaStart && kstYmd(now()) < qaStart) {
-      log(`개발 단계 · QA 시작 ${qaStart} · 조용히 종료`);
-      await finishOk(cfg, state, log, deps, opsChannel);
-      return { status: 'not_started', fixVersion, qaStartYmd: qaStart };
-    }
+      const qaStart = cycle.schedule?.qaStartYmd;
+      if (qaStart && kstYmd(now()) < qaStart) {
+        log(`개발 단계 · QA 시작 ${qaStart} · 조용히 종료`);
+        await finishOk(cfg, state, log, deps, opsChannel);
+        return {
+          status: 'not_started',
+          fixVersion: parsedFv.raw,
+          qaStartYmd: qaStart,
+        };
+      }
 
-    // ── 사이클 시작 알림 (스레드 부모) ──
-    if (!cycle.threadTs) {
-      const header = buildCycleHeader({
-        cycleLabel: cycle.schedule?.cycleLabel ?? parsedFv.raw,
-        fixVersion: parsedFv.raw,
-        qaStartYmd: cycle.schedule?.qaStartYmd ?? null,
-        qaEndYmd: cycle.schedule?.qaEndYmd ?? null,
-        /*
+      // ── 사이클 시작 알림 (스레드 부모) ──
+      if (!cycle.threadTs) {
+        const header = buildCycleHeader({
+          cycleLabel: cycle.schedule?.cycleLabel ?? parsedFv.raw,
+          fixVersion: parsedFv.raw,
+          qaStartYmd: cycle.schedule?.qaStartYmd ?? null,
+          qaEndYmd: cycle.schedule?.qaEndYmd ?? null,
+          /*
           배포대장 본문이 아니라 차수 이름(release_YYYYMMDD)의 날짜를 쓴다.
           실측 release_20260914 은 본문이 9/10 으로 남아 있었는데 제목·Jira
           릴리스·QA 팀 스레드가 모두 9/14 였다. 스레드 머리글에 본문 값을
           적으면 차수 이름과 어긋난 날짜가 채널에 박힌다.
         */
-        prodYmd: parsedFv.deployYmd,
-        deployPageUrl: cycle.deployPageId
-          ? `${deps.jiraBaseUrl}/wiki/spaces/CPO/pages/${cycle.deployPageId}`
-          : null,
-        filterUrl: `${deps.jiraBaseUrl}/issues?filter=${cfg.jiraFilterId}`,
-      });
-      const res = await deps.slack.post(
-        cfg.slackChannelId,
-        header.text,
-        header.blocks
-      );
-      if (res.ok && res.ts) {
-        // 새 사이클이면 seen 을 비운다 — 새 스레드에 다시 알려야 한다.
-        const freshCycle = state.activeCycle?.fixVersion !== fixVersion;
-        cycle = { ...cycle, threadTs: res.ts, startedAt: now().toISOString() };
-        await repo.saveState(cfg.id, {
-          activeCycle: cycle,
-          ...(freshCycle ? { seen: {} } : {}),
+          prodYmd: parsedFv.deployYmd,
+          /*
+          스페이스를 안 박는다. `/wiki/spaces/CPO/…` 로 두면 CPO 가 아닌
+          대상은 없는 경로를 가리키는데, 링크는 깨져도 조용하다 — 누른
+          사람만 권한 없음을 본다. pageId 만으로 여는 경로를 쓴다
+          (같은 이유로 SQL 쪽도 바꿨다: 20260916_qa_router_wiki_base.sql).
+        */
+          deployPageUrl: cycle.deployPageId
+            ? `${deps.jiraBaseUrl}/wiki/pages/viewpage.action?pageId=${cycle.deployPageId}`
+            : null,
+          filterUrl: `${deps.jiraBaseUrl}/issues?filter=${cfg.jiraFilterId}`,
         });
-        log(`사이클 시작 알림 발송 · thread ${res.ts}`);
-      } else {
-        if (isFatalSlackError(res.error)) {
-          throw new Error(
-            `Slack 발송 불가: ${res.error} · 채널 ${cfg.slackChannelId} 에 봇이 없거나 토큰이 무효합니다`
+        const res = await deps.slack.post(
+          cfg.slackChannelId,
+          header.text,
+          header.blocks
+        );
+        if (res.ok && res.ts) {
+          // 새 사이클이면 seen 을 비운다 — 새 스레드에 다시 알려야 한다.
+          const freshCycle = state.activeCycle?.fixVersion !== fixVersion;
+          cycle = {
+            ...cycle,
+            threadTs: res.ts,
+            startedAt: now().toISOString(),
+          };
+          await repo.saveState(cfg.id, {
+            activeCycle: cycle,
+            ...(freshCycle ? { seen: {} } : {}),
+          });
+          log(`사이클 시작 알림 발송 · thread ${res.ts}`);
+        } else {
+          if (isFatalSlackError(res.error)) {
+            throw new Error(
+              `Slack 발송 불가: ${res.error} · 채널 ${cfg.slackChannelId} 에 봇이 없거나 토큰이 무효합니다`
+            );
+          }
+          log(
+            `사이클 시작 알림 실패: ${res.error} · 이번 tick 은 스레드 없이 진행`
           );
         }
-        log(
-          `사이클 시작 알림 실패: ${res.error} · 이번 tick 은 스레드 없이 진행`
-        );
       }
+      cycleThreadTs = cycle.threadTs ?? null;
     }
+    // ── 차수 블록 끝 ──
 
     // ── 신규 조회 (시간 윈도 없음) ──
-    const excl = derived.excludeStatuses
-      .map((s) => (/[^A-Za-z0-9_-]/.test(s) ? `"${s}"` : s))
-      .join(', ');
+    /*
+      필터를 **흉내 내지 않고 그대로 실행한다.**
+
+      전에는 JQL 을 정규식으로 뜯어(project·issuetype·제외상태) 비슷한 것을
+      다시 조립했다. 그 방식은 두 가지를 동시에 틀리게 만든다.
+
+        ① 뜯지 못한 조건이 조용히 사라진다
+           정규식이 아는 형태(`project =`)만 읽으므로, `project in (…)` 이나
+           `statusCategory != Done` 을 쓰는 필터는 그 조건 **없이** 조회된다.
+           더 많이 잡히고 오류는 안 난다.
+        ② 화면과 배치가 어긋난다
+           확인 화면도 같은 조립을 따로 하므로, 한쪽만 고치면 "화면은 30건인데
+           배치는 0건" 이 된다.
+
+      `filter = {id}` 는 Jira 가 해석한다. 우리가 JQL 문법을 알 필요가 없고,
+      필터에 무엇이 들어 있든 그대로 반영된다.
+
+      덧붙이는 두 조건은 **좁히기만** 한다.
+        · assignee    필터가 보는 팀원 전체 중 트리아지 한 명으로
+        · fixVersion  필터가 여러 차수를 담고 있어도 이번 차수 하나로
+                      (실측: 12571 은 release_20260914 와
+                       release_assessment_mig 둘을 담고 있다)
+
+      전환 전 실측으로 재조립 JQL 과 결과가 같은 것을 확인했다 (5개 조합,
+      비어 있지 않은 케이스 포함).
+    */
+    /*
+      fixVersion 은 **필터가 말해 준 경우에만** 덧붙인다.
+
+      차수를 배포대장에서 읽은 대상은 티켓에 fixVersion 이 아예 안 달려
+      있다(실측: ICTQMSCHE 는 프로젝트에 릴리즈 버전이 0개다). 그런데도
+      덧붙이면 조회가 **0건**이 되고, 오류는 안 나므로 "요즘 조용하네" 로
+      읽힌다. 그때는 필터 자체가 이미 범위를 정하고 있으니 좁힐 필요도 없다.
+    */
     const jql =
-      `project = ${derived.projectKey}` +
-      (derived.issueType ? ` AND issuetype = ${derived.issueType}` : '') +
+      `filter = ${cfg.jiraFilterId}` +
       ` AND assignee = ${cfg.triageAccountId}` +
-      ` AND fixVersion = "${fixVersion}"` +
-      (excl ? ` AND status not in (${excl})` : '') +
+      (narrowByFixVersion ? ` AND fixVersion = "${fixVersion}"` : '') +
       ` ORDER BY created DESC`;
 
     /*
@@ -929,8 +1076,15 @@ export async function runTick(
       'issuetype',
       'assignee',
       'reporter',
+      /*
+        차수를 가르는 칸. 판정 ③이 "같은 차수의 형제" 를 찾을 때 이 값으로
+        범위를 잡는다. 어떤 칸인지는 필터 JQL 이 정한다 — KQ 는 fixVersion,
+        GW 는 parent(`차세대 그룹웨어 0917 비정기배포 QA 요청의 건`)다.
+        안 읽어 오면 형제를 찾을 범위가 아예 없어진다.
+      */
+      derived.cycleAxisField,
       cfg.coAssigneeField,
-    ]);
+    ].filter((f): f is string => Boolean(f)));
     log(`${cfg.name} · 트리아지 배정 활성 티켓 ${found.length}건`);
 
     /*
@@ -979,7 +1133,9 @@ export async function runTick(
         const result = await judge(issue, deps.jira, {
           projectKey: derived.projectKey!,
           fixVersion,
+          cycleAxisField: derived.cycleAxisField,
           triageAccountId: cfg.triageAccountId,
+          jiraFilterId: cfg.jiraFilterId,
           members: derived.members,
           selfAccountId: cfg.reassignMode === 'off' ? null : cfg.selfAccountId,
           /*
@@ -1052,7 +1208,8 @@ export async function runTick(
                 cfg.slackChannelId,
                 msg.text,
                 msg.blocks,
-                cycle.threadTs
+                // 차수를 모르면 스레드가 없다. 채널에 바로 나간다.
+                cycleThreadTs ?? undefined
               );
             })();
         const ok = res.ok;

@@ -17,6 +17,7 @@
  */
 
 import type { Classification, Judgement, RelatedLinks } from './message';
+import type { ChangelogEntry } from './triage';
 import type { DerivedMember, JudgeTier } from './types';
 import { JUDGE_TIERS } from './types';
 
@@ -26,6 +27,11 @@ import { JUDGE_TIERS } from './types';
 
 export interface JiraIssue {
   key: string;
+  /**
+   * 숫자 id. 변경이력 bulkfetch 응답이 키가 아니라 이 값으로 돌아온다.
+   * 조회할 때 따로 요청하지 않아도 Jira 가 늘 얹어 주지만, 안 올 수도 있게 둔다.
+   */
+  id?: string;
   /**
    * optional 이다. Jira 는 요청한 필드가 **모두 비어 있으면 fields 객체를 생략**한다.
    * 실측: `GET /issue/KQ-18292?fields=parent` (parent 없는 이슈)
@@ -82,6 +88,67 @@ export function personAt(
 export interface JiraPort {
   getIssue(key: string, fields: string[]): Promise<JiraIssue>;
   search(jql: string, fields: string[]): Promise<JiraIssue[]>;
+  /**
+   * 담당자 **변경이력**. 없으면 판정은 현재 담당자만 보고 돈다.
+   *
+   * optional 인 이유는 이게 **더 나은 근거일 뿐 필수가 아니기** 때문이다.
+   * 데모·테스트·옛 호출부가 안 넘겨도 동작이 그대로여야 한다.
+   */
+  getChangelogs?(
+    issueKeys: string[],
+    fieldIds: string[]
+  ): Promise<ChangelogEntry[]>;
+}
+
+/**
+ * 티켓을 **거쳐 간** 우리 팀원들. 지금 담당자가 아니어도 센다.
+ *
+ * ── 왜 현재 담당자만으로는 부족한가 ──
+ *
+ * 프로젝트에 따라 담당자가 **일이 끝나면 되돌려진다.** 실측 GW(ICTQMSCHE):
+ * 우리 팀이 고쳐서 넘기면 담당자가 HMG 쪽으로 돌아간다. 그래서 끝난 형제를
+ * 지금 보면 우리가 맡았던 흔적이 하나도 없다 — 정작 담당이 가장 확실한
+ * 건들인데 근거에서 통째로 빠진다.
+ *
+ * 변경이력은 되돌려져도 지워지지 않는다. 실측(2026-09-16) GW 176건:
+ *   현재 담당자만  93건 답 · 76 맞음 (정확도 82% · 커버리지 53%)
+ *   이력까지      135건 답 · 113 맞음 (정확도 84% · 커버리지 77%)
+ * 맞은 건이 37건 늘고 틀린 건은 5건 느는 데 그쳤다.
+ *
+ * 되돌리지 않는 프로젝트(KQ)에서는 이력이 현재 담당자와 거의 같아 변화가 없다.
+ * 그래서 프로젝트를 가릴 필요가 없다 — 한쪽에서 이득, 다른 쪽에서 무해다.
+ *
+ * 트리아지는 뺀다. 모든 티켓이 그를 거치므로 세면 언제나 그가 이긴다
+ * (실측: 안 뺐을 때 정확도 10%).
+ */
+export function heldByMembers(
+  entry: ChangelogEntry | undefined,
+  current: string | null | undefined,
+  memberIds: Set<string>,
+  triageAccountId: string
+): Set<string> {
+  const out = new Set<string>();
+  const take = (a: string | null | undefined): void => {
+    if (a && a !== triageAccountId && memberIds.has(a)) out.add(a);
+  };
+  take(current);
+
+  /* 가장 오래된 변경의 `from` 이 생성 당시 값이다. `to` 는 전부 담는다. */
+  let oldest = Infinity;
+  let original: string | null | undefined;
+  for (const h of entry?.changeHistories ?? []) {
+    const at = Number(h.created);
+    for (const it of h.items ?? []) {
+      if (it.fieldId !== 'assignee') continue;
+      take(it.to);
+      if (Number.isFinite(at) && at < oldest) {
+        oldest = at;
+        original = it.from;
+      }
+    }
+  }
+  take(original);
+  return out;
 }
 
 /** 공동담당자 커스텀필드. ignitecorp 인스턴스 고정값. */
@@ -110,27 +177,90 @@ export const DEFAULT_DEV_ISSUE_TYPES = ['개발처리'];
 // ─────────────────────────────────────────────────────────────
 
 /**
- * 제목의 대괄호 토큰에서 메뉴 프리픽스를 뽑는다.
- * "[BO_주문관리] 목록 정렬 오류" → "BO_주문관리"
- * 여러 개면 BO_/FO_/APP_ 로 시작하는 것을 우선하고, 없으면 마지막 것을 쓴다.
+ * 제목의 대괄호 토큰을 **좁은 것부터 넓은 것 순으로** 돌려준다.
+ *
+ *   "[BO_주문관리] 목록 정렬 오류"      → ["BO_주문관리"]
+ *   "[BO][홈 뉴스 관리] 저장 불가"       → ["홈 뉴스 관리", "BO"]
+ *   "[긴급][BO_주문관리] 정렬 오류"      → ["BO_주문관리", "긴급"]
+ *
+ * ── 왜 여럿을 돌려주나 ──
+ *
+ * 전에는 하나만 골랐고, 그 고르는 규칙이 `/^(BO|FO|APP)_/` 였다. KQ 의
+ * 작명법을 코드가 외우고 있었다는 뜻이다. 다른 프로젝트는 그 모양으로
+ * 안 쓴다 — 실측 GW 는 `[BO][홈 뉴스 관리]` 처럼 **플랫폼과 메뉴를 따로**
+ * 적는다. 그 규칙으로는 `BO` 도 `홈 뉴스 관리` 도 우선권을 못 받는다.
+ *
+ * 프로젝트 이름을 아는 대신 **일반 규칙**을 쓴다: 긴 토큰이 좁다.
+ * `BO_주문관리`(9) > `긴급`(2), `홈 뉴스 관리`(7) > `BO`(2).
+ * 길이가 같으면 뒤에 적힌 것이 좁다 — 앞에서 뒤로 좁혀 쓰는 관례를 따른다.
+ *
+ * 부르는 쪽은 좁은 것부터 근거를 찾아 보고, 없으면 넓은 것으로 물러난다.
  */
+export function extractPrefixes(summary: string | undefined | null): string[] {
+  if (!summary) return [];
+  const tokens = [...summary.matchAll(/\[([^\]]+)\]/g)].map((m, i) => ({
+    t: m[1].trim(),
+    i,
+  }));
+  return tokens
+    .filter((x) => x.t.length > 0)
+    .sort((a, b) => b.t.length - a.t.length || b.i - a.i)
+    .map((x) => x.t);
+}
+
+/** 가장 좁은 프리픽스 하나. 문구·집계용. */
 export function extractPrefix(
   summary: string | undefined | null
 ): string | null {
-  if (!summary) return null;
-  const tokens = [...summary.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]);
-  if (tokens.length === 0) return null;
-  return (
-    tokens.find((t) => /^(BO|FO|APP)_/.test(t)) ?? tokens[tokens.length - 1]
-  );
+  return extractPrefixes(summary)[0] ?? null;
 }
 
-/** 레이블에서 기획 KQ 참조만 골라낸다. ('FE1', '엔글QA' 같은 일반 레이블 제외) */
+/**
+ * 프리픽스를 **비교용 열쇠**로 눕힌다.
+ *
+ * 같은 메뉴를 사람마다 다르게 적는다. 실측 GW 한 배포 건 안에서만
+ * `[홈 화면 관리]`·`[홈화면관리]`, `[권한설정]`·`[권한 설정]`,
+ * `[업무시스템]`·`[업무시스템PC/Mobile]` 이 같이 나왔다. 문자열이 정확히
+ * 같아야 형제로 세던 규칙으로는 이게 전부 남남이 된다 — 실측 89건이
+ * "앞머리는 있는데 같은 앞머리 형제가 없다" 로 판정불가가 됐다.
+ *
+ * 띄어쓰기·구분기호·대소문자만 걷어낸다. 글자를 바꾸지는 않는다 —
+ * 거기까지 가면 다른 메뉴를 같은 것으로 접어 버린다.
+ */
+export function prefixKey(s: string): string {
+  return s.replace(/[\s_·・/\-–—]+/g, '').toLowerCase();
+}
+
+/**
+ * 근거로 쓸 만큼 **좁은** 프리픽스인가.
+ *
+ * 짧은 토큰은 메뉴가 아니라 분류표다. 실측 GW 는 `[BO]`·`[FO]`·`[APP]` 를
+ * 플랫폼 표시로 쓰고 그 뒤에 진짜 메뉴를 적는다 (`[BO][홈 뉴스 관리]`).
+ * 이걸 근거로 세면 "BO 티켓을 맡은 사람" 이 나오는데, BO 는 팀 전체가
+ * 나눠 맡으므로 다수결이 그냥 **제일 바쁜 사람**을 가리킨다.
+ *
+ * 실측(2026-09-16): 길이 제한 없이 돌렸더니 커버리지는 51%→81% 로 올랐지만
+ * 정확도가 84%→57% 로 무너졌다. 맞은 건 6건 느는 동안 틀린 건 48건 늘었다.
+ * 못 맞히는 것보다 **틀린 사람을 부르는 것**이 비싸다.
+ */
+const MIN_PREFIX_KEY = 3;
+
+/**
+ * 레이블에서 **티켓 참조**만 골라낸다. ('FE1', '엔글QA' 같은 일반 레이블 제외)
+ *
+ * `projectKey` 를 주면 그 프로젝트 것만, 안 주면 **티켓 키 모양이면 전부**
+ * 센다. 후자가 기본인 이유는 참조 프로젝트가 QA 프로젝트와 다르기 때문이다 —
+ * KQ 는 QA 가 `kiacpo_qa` 인데 레이블은 기획 `KQ-18432` 를 가리킨다.
+ * 그래서 "QA 프로젝트 키" 로는 거를 수가 없고, 예전엔 `'KQ'` 라는 글자를
+ * 코드가 들고 있었다. 모양으로 거르면 프로젝트가 늘어도 그대로 돈다.
+ */
 export function extractRefKeys(
   labels: string[] | undefined | null,
-  projectKey = 'KQ'
+  projectKey?: string
 ): string[] {
-  const re = new RegExp(`^${projectKey}-\\d+$`);
+  const re = projectKey
+    ? new RegExp(`^${projectKey}-\\d+$`)
+    : /^[A-Z][A-Z0-9_]+-\d+$/;
   return (labels ?? []).filter((l) => re.test(l));
 }
 
@@ -296,7 +426,7 @@ export async function findViaEpic(
   const names = new Map(members.map((m) => [m.accountId, m.name]));
   const devTypes = opts.devIssueTypes ?? DEFAULT_DEV_ISSUE_TYPES;
   const coField = opts.coAssigneeField ?? CO_ASSIGNEE_FIELD;
-  const refKeys = extractRefKeys(issue.fields?.labels, opts.projectKey ?? 'KQ');
+  const refKeys = extractRefKeys(issue.fields?.labels, opts.projectKey);
 
   for (const refKq of refKeys) {
     try {
@@ -508,7 +638,7 @@ export async function findViaRefOwner(
   } = {}
 ): Promise<RefOwnerMatch | null> {
   const memberIds = new Set(members.map((m) => m.accountId));
-  const refKeys = extractRefKeys(issue.fields?.labels, opts.projectKey ?? 'KQ');
+  const refKeys = extractRefKeys(issue.fields?.labels, opts.projectKey);
 
   const devTypes = opts.devIssueTypes ?? DEFAULT_DEV_ISSUE_TYPES;
   const evidence: string[] = [];
@@ -596,51 +726,319 @@ export interface SiblingMatch {
   name: string;
   prefix: string;
   votes: number;
+  /** 같은 앞머리로 센 형제 전체. `votes / total` 이 곧 이 판정의 세기다. */
+  total: number;
+  /** 표가 갈렸을 때 진 쪽. 비어 있으면 만장일치다. */
+  runnersUp: { name: string; votes: number }[];
   /** 센 형제 티켓. 근거로 쓴 것을 확인할 수 있어야 한다. */
   tickets: EvidenceTicket[];
 }
 
+/**
+ * 형제를 찾을 범위. **"차수 한 묶음"** 을 JQL 조각으로 만든다.
+ *
+ * 좁으면 근거가 없고, 넓으면 지난 차수의 담당이 섞여 들어온다. 문제는
+ * 차수를 무엇으로 가르는지가 프로젝트마다 다르다는 것이다.
+ *
+ *   KQ        `fixVersion = release_20260914`
+ *   ICTQMSCHE `parent = ICTQMSCHE-24034`          (릴리즈 버전이 아예 없다)
+ *   다음 프로젝트  `sprint = …` 일 수도, `component = …` 일 수도 있다
+ *
+ * 그래서 **칸 이름을 코드가 외우지 않는다.** 필터 JQL 에서 구조로 뽑아
+ * (`deriveJql().cycleAxisField`) 설정에 저장해 두고, 여기서는 그 칸을
+ * 티켓에서 읽어 같은 값을 가진 형제를 부른다.
+ *
+ * `filter = {id}` 로 물러나는 건 **마지막**이다. 그 필터는 대기열이라
+ * "아직 아무도 안 맡은" 티켓만 남기고, 근거가 될 끝난 형제는 원래 없다.
+ * 실측(2026-09-16): 그걸 범위로 쓰던 동안 GW 배정 181건이 전부 판정불가였다.
+ */
+export function cycleScopeJql(
+  issue: JiraIssue,
+  ctx: {
+    projectKey: string;
+    fixVersion: string | null;
+    cycleAxisField?: string | null;
+    jiraFilterId: string;
+  }
+): string {
+  if (ctx.fixVersion) {
+    return `project = ${ctx.projectKey} AND fixVersion = "${ctx.fixVersion}"`;
+  }
+  const f = ctx.cycleAxisField;
+  if (f) {
+    const v = jqlValueAt(issue.fields, f);
+    if (v) return `${f} = ${v}`;
+  }
+  return `filter = ${ctx.jiraFilterId}`;
+}
+
+/**
+ * 티켓의 한 칸을 **JQL 에 그대로 넣을 수 있는 값**으로 읽는다.
+ *
+ * Jira 는 칸마다 모양이 다르다. 티켓 참조는 `{key}`, 버전·스프린트·컴포넌트는
+ * `{name}`, 선택형은 `{value}`, 그냥 글자면 문자열이다. 배열인 칸도 있다.
+ * 어느 칸이 올지 모르므로 **모양을 보고** 고른다 — 칸 이름을 아는 대신에.
+ */
+function jqlValueAt(
+  fields: JiraIssue['fields'],
+  field: string
+): string | null {
+  const raw = fields?.[field];
+  const one = Array.isArray(raw) ? raw[0] : raw;
+  if (one == null) return null;
+  if (typeof one === 'string') return JSON.stringify(one);
+  if (typeof one === 'number') return String(one);
+  if (typeof one !== 'object') return null;
+  const o = one as { key?: unknown; name?: unknown; value?: unknown };
+  // 티켓 키는 따옴표를 안 쓴다 — `parent = "KQ-1"` 은 Jira 가 거부한다.
+  if (typeof o.key === 'string') return o.key;
+  if (typeof o.name === 'string') return JSON.stringify(o.name);
+  if (typeof o.value === 'string') return JSON.stringify(o.value);
+  return null;
+}
+
 export async function findViaSiblings(
   issue: JiraIssue,
-  prefix: string,
+  /** 좁은 것부터 넓은 것 순. 앞에서 근거가 나오면 거기서 멈춘다. */
+  prefixes: string[],
   members: DerivedMember[],
   jira: JiraPort,
-  ctx: { projectKey: string; fixVersion: string; triageAccountId: string }
+  ctx: {
+    projectKey: string;
+    fixVersion: string | null;
+    /** 차수를 가르는 칸. 필터 JQL 에서 뽑아 설정에 저장한 값이다. */
+    cycleAxisField?: string | null;
+    triageAccountId: string;
+    /** 차수 축도 못 잡았을 때의 마지막 범위. */
+    jiraFilterId: string;
+    onWarn?: (msg: string) => void;
+  }
 ): Promise<SiblingMatch | null> {
+  if (prefixes.length === 0) return null;
   const memberIds = new Set(members.map((m) => m.accountId));
+  const scope = cycleScopeJql(issue, ctx);
+  /*
+    `assignee is not EMPTY` 만 걸고 **트리아지를 안 뺀다.**
+
+    전에는 `assignee != {트리아지}` 로 걸러 조회했다. 현재 담당자만 볼 때는
+    맞는 조건이었지만, 이제는 이력을 본다 — 지금 트리아지에게 돌아가 있는
+    티켓도 **그 전에 우리 팀원이 맡았던** 근거를 갖고 있을 수 있다.
+    트리아지 본인은 `heldByMembers` 가 어차피 뺀다.
+  */
   const sibs = await jira.search(
-    `project = ${ctx.projectKey} AND fixVersion = "${ctx.fixVersion}"` +
-      ` AND assignee != ${ctx.triageAccountId} AND assignee is not EMPTY AND key != ${issue.key}`,
+    scope + ` AND assignee is not EMPTY AND key != ${issue.key}`,
     ['summary', 'assignee']
   );
 
-  const votes = new Map<
+  /*
+    형제의 담당 **이력**을 한 번에 받아 온다. 조회 한 번이 더 늘지만, 실측
+    GW 에서 맞는 판정이 76→113건으로 늘었다. 못 받으면(포트에 없거나 실패)
+    현재 담당자만 보고 도는 예전 동작으로 떨어진다.
+  */
+  let logs: Map<string, ChangelogEntry> = new Map();
+  if (jira.getChangelogs && sibs.length > 0) {
+    try {
+      const got = await jira.getChangelogs(
+        sibs.map((s) => s.key),
+        ['assignee']
+      );
+      /*
+        bulkfetch 는 키로 물어도 **숫자 id 로** 답한다. 그 짝을 여기서 되돌린다.
+        id 가 없는 형제(픽스처처럼 덜어낸 응답)는 아예 안 담는다 — 빈 문자열을
+        열쇠로 쓰면 그런 형제들이 서로의 이력을 덮어쓴다.
+      */
+      const byId = new Map<string, string>();
+      for (const s of sibs) if (s.id) byId.set(String(s.id), s.key);
+      for (const e of got) {
+        const id = String(e.issueId ?? '');
+        const k = byId.get(id) ?? (byId.size === 0 ? id : null);
+        if (k) logs.set(k, e);
+      }
+    } catch (e) {
+      logs = new Map();
+      ctx.onWarn?.(
+        `형제 담당이력 조회 실패 (현재 담당자만 봅니다): ${(e as Error).message}`
+      );
+    }
+  }
+
+  /*
+    형제를 한 번만 훑어 "비교용 열쇠 → 형제 목록" 으로 만들어 둔다.
+
+    **우리 팀원이 아닌 형제도 담는다.** 전에는 여기서 걸러 버렸는데, 그러면
+    "이 메뉴는 우리 게 아니다" 라는 근거를 통째로 버리게 된다. 같은 메뉴
+    형제 8건이 전부 타팀인데 우리 팀원 1건이 섞여 있으면, 예전 규칙은 그
+    1건만 보고 "우리 건" 이라고 답했다.
+
+    실측(2026-09-16): 트리아지에서 **타팀으로** 넘어간 CPO 56건 중 42건,
+    GW 28건 중 14건을 "우리 팀 아무개 건" 이라고 잘못 불렀다. 판정불가보다
+    비싼 오답이다 — 우리 팀원을 불러다 남의 티켓을 보게 만든다.
+  */
+  const byKey = new Map<
     string,
-    { n: number; name: string; tickets: EvidenceTicket[] }
+    { id: string; name: string; isMember: boolean; s: JiraIssue }[]
   >();
   for (const s of sibs) {
-    if (extractPrefix(s.fields?.summary) !== prefix) continue;
-    const id = s.fields?.assignee?.accountId;
-    if (!id || !memberIds.has(id)) continue;
-    const cur = votes.get(id) ?? {
-      n: 0,
-      name: s.fields?.assignee?.displayName ?? id,
-      tickets: [],
-    };
-    cur.n++;
-    cur.tickets.push({
-      key: s.key,
-      summary: s.fields?.summary ?? null,
-      name: cur.name,
-    });
-    votes.set(id, cur);
-  }
-  if (votes.size === 0) return null;
+    /*
+      한 형제가 여러 사람에게 표를 줄 수 있다. 우리 팀원 둘이 차례로 맡았다면
+      둘 다 근거다 — 누가 최종인지는 다수결이 정한다.
+    */
+    const held = heldByMembers(
+      logs.get(s.key),
+      s.fields?.assignee?.accountId,
+      memberIds,
+      ctx.triageAccountId
+    );
+    const holders: { id: string; name: string; isMember: boolean }[] = [
+      ...held,
+    ].map((id) => ({
+      id,
+      name: members.find((m) => m.accountId === id)?.name ?? id,
+      isMember: true,
+    }));
+    /*
+      우리 팀원이 아무도 안 거쳤으면 현재 담당자를 타팀 표로 남긴다.
+      판정을 바꾸지는 않고 근거 문장에만 실린다.
+    */
+    if (holders.length === 0) {
+      const id = s.fields?.assignee?.accountId;
+      if (!id || id === ctx.triageAccountId) continue;
+      holders.push({
+        id,
+        name: s.fields?.assignee?.displayName ?? id,
+        isMember: false,
+      });
+    }
+    /*
+      형제도 **가장 좁은 토큰 하나로만** 센다. 대상과 같은 규칙이어야 한다.
 
-  const [accountId, v] = [...votes.entries()].sort(
-    (a, b) => b[1].n - a[1].n || a[0].localeCompare(b[0])
-  )[0];
-  return { accountId, name: v.name, prefix, votes: v.n, tickets: v.tickets };
+      토큰을 전부 색인해 봤더니 `[FO] 로그인 안됨` 같은 단일 토큰 티켓이
+      `[FO][로그인]`·`[FO][조직도]` 를 전부 형제로 끌어왔다. FO 는 플랫폼이라
+      그 다수결은 담당자가 아니라 그 차수에 제일 바쁜 사람이다.
+      실측(2026-09-16): 정확도 84%→72%, 틀린 건 15→30.
+    */
+    const p = extractPrefixes(s.fields?.summary)[0];
+    const k = p ? prefixKey(p) : '';
+    if (k.length === 0) continue;
+    byKey.set(k, [...(byKey.get(k) ?? []), ...holders.map((h) => ({ ...h, s }))]);
+  }
+  if (byKey.size === 0) return null;
+
+  /*
+    **가장 좁은 것 하나만** 쓴다. 못 찾았다고 넓은 토큰으로 물러나지 않는다.
+
+    실측(2026-09-16) GW: `[BO][홈 뉴스 관리]` 에서 `홈뉴스관리` 형제를 못
+    찾으면 `BO` 로 물러나게 해 봤다. 커버리지는 51%→81% 로 올랐는데 정확도가
+    84%→57% 로 무너졌다. `BO` 는 팀 전체가 나눠 맡는 플랫폼 표시라, 다수결이
+    담당자가 아니라 **그 차수에 제일 바쁜 사람**을 가리킨다.
+
+    넓은 토큰으로 답을 만드느니 판정불가로 두는 게 낫다. 판정불가는 사람이
+    한 번 보면 끝이지만, 틀린 호출은 두 사람의 시간을 쓴다.
+  */
+  for (const prefix of prefixes.slice(0, 1)) {
+    const want = prefixKey(prefix);
+    if (want.length === 0) continue;
+    /*
+      ① 열쇠가 같은 형제. 띄어쓰기·구분기호·대소문자 차이는 이미 걷혔다.
+         **길이를 안 따진다** — 짧아도 같은 앞머리는 같은 앞머리다.
+      ② 없으면 **한쪽이 다른 쪽으로 시작하는** 형제까지 센다.
+         실측 GW: `권한 설정 팝업` 은 `권한설정` 형제와 같은 메뉴다.
+         여기만 길이를 따진다. `홈` 은 `홈화면관리`·`홈뉴스관리` 를 다 삼키고,
+         그 셋은 실제로 담당자가 다르다 (실측: 정확도 84%→57%).
+    */
+    let hits = byKey.get(want);
+    if (!hits && want.length >= MIN_PREFIX_KEY) {
+      hits = [];
+      for (const [k, v] of byKey) {
+        if (k.length < MIN_PREFIX_KEY) continue;
+        if (k.startsWith(want) || want.startsWith(k)) hits.push(...v);
+      }
+      if (hits.length === 0) hits = undefined;
+    }
+    if (!hits) continue;
+
+    const votes = new Map<
+      string,
+      { n: number; name: string; isMember: boolean; tickets: EvidenceTicket[] }
+    >();
+    const seen = new Set<string>();
+    /*
+      한 형제가 같은 사람에게 두 번 표를 주지 않게 한다. 다른 사람에게는
+      줄 수 있다 — 우리 팀원 둘이 차례로 맡은 형제는 둘 다의 근거다.
+      예전 dedup 은 티켓 키만 봐서 뒤에 온 사람 표를 조용히 버렸다.
+    */
+    const counted = new Set<string>();
+    for (const h of hits) {
+      const once = `${h.s.key} @ ${h.id}`;
+      if (counted.has(once)) continue;
+      counted.add(once);
+      seen.add(h.s.key);
+      const cur = votes.get(h.id) ?? {
+        n: 0,
+        name: h.name,
+        isMember: h.isMember,
+        tickets: [],
+      };
+      cur.n++;
+      cur.tickets.push({
+        key: h.s.key,
+        summary: h.s.fields?.summary ?? null,
+        name: h.name,
+      });
+      votes.set(h.id, cur);
+    }
+    if (votes.size === 0) continue;
+
+    /*
+      ── 타팀 형제는 세되, **판정을 뒤집지는 않는다** ──
+
+      우리 팀원 표가 하나라도 있으면 그 안에서 고른다. 타팀 표가 더 많아도
+      마찬가지고, 우리 팀원이 아무도 없으면 답을 내지 않는다(판정불가).
+
+      두 가지를 실측으로 시도했다가 둘 다 접었다 (2026-09-16).
+        · 전체 다수결로 1위가 타팀이면 "우리 건 아님"
+          → GW 82%→37%. 우리 팀 건 176건 중 100건을 잘못 밀어냈다.
+        · 우리 팀원이 **한 명도 없을 때만** "우리 건 아님"
+          → GW 82%→53%. 밀어낸 43건이 거의 다 실제로 우리 건이었다.
+        · CPO 는 둘 다 이득이 없었다 (144→145). 형제까지 내려오는 건이
+          8건뿐이라 바꿀 게 없다.
+
+      이유는 GW 의 운영 방식이다 — 우리가 고쳐서 넘기고 나면 담당자가
+      **HMG 쪽으로 되돌아간다.** 그래서 끝난 형제를 지금 보면 우리 팀원이
+      맡았던 흔적이 남지 않는다. "타팀이 많다"도 "우리가 없다"도 이 프로젝트
+      에서는 신호가 아니라 잡음이다.
+
+      그래서 타팀 표는 **문장에만** 싣는다. 판정을 바꾸지 않고, 읽는 사람이
+      "이 메뉴는 주로 타팀이 보네" 를 알아볼 수 있게만 한다.
+    */
+    const ranked = [...votes.entries()].sort(
+      (a, b) => b[1].n - a[1].n || a[0].localeCompare(b[0])
+    );
+    const mine = ranked.filter(([, r]) => r.isMember);
+    if (mine.length === 0) continue;
+    const [accountId, v] = mine[0];
+    return {
+      accountId,
+      name: v.name,
+      prefix,
+      votes: v.n,
+      total: seen.size,
+      /*
+        진 사람도 담는다. "12건이 손현지 담당" 만 적으면 **경쟁자가 있었는지**
+        를 안 말한다. 실측 GW 형제 판정은 답을 낸 것 중 16%가 틀렸는데, 그
+        대부분이 표가 갈린 건이었다 — 사람이 그걸 보면 바로 알아본다.
+
+        1위로 뽑힌 사람만 뺀다. 타팀이 표가 더 많아 밀려난 경우 그 사람들도
+        여기 남아야 한다 — "우리 팀에선 손현지가 유일하지만 이 메뉴는 주로
+        타팀이 본다" 가 읽는 사람에게 중요한 정보다.
+      */
+      runnersUp: ranked
+        .filter(([id]) => id !== accountId)
+        .map(([, r]) => ({ name: r.name, votes: r.n })),
+      tickets: v.tickets,
+    };
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -649,8 +1047,20 @@ export async function findViaSiblings(
 
 export interface JudgeContext {
   projectKey: string;
-  fixVersion: string;
+  /**
+   * 이번 차수. **null 일 수 있다** — 필터에도 배포대장에도 차수가 없는
+   * 대상이 있다. 그때도 판정은 돈다 ("이 티켓 누구 것" 은 차수와 무관하다).
+   */
+  fixVersion: string | null;
+  /**
+   * 차수를 가르는 **칸 이름**. `fixVersion` 이 없는 대상에서 형제 범위를
+   * 잡는 데 쓴다. 필터 JQL 구조에서 뽑아 설정에 저장한 값이고, 코드는 어떤
+   * 이름이 올지 모른다 — `parent` 일 수도 `Sprint` 일 수도 있다.
+   */
+  cycleAxisField?: string | null;
   triageAccountId: string;
+  /** 차수 축도 못 잡았을 때 형제 티켓의 범위를 잡는 데 쓴다. */
+  jiraFilterId: string;
   members: DerivedMember[];
   /** 자동 재배정 대상 판단용. reassign_mode='self_only' 일 때 이 사람만 auto_self. */
   selfAccountId?: string | null;
@@ -730,12 +1140,13 @@ export async function judge(
     ctx.triageAccountId,
     ctx.coAssigneeField
   );
-  const prefix = extractPrefix(issue.fields?.summary);
+  const prefixes = extractPrefixes(issue.fields?.summary);
+  const prefix = prefixes[0] ?? null;
 
   const steps: Record<JudgeTier, () => Promise<JudgeResult | null>> = {
     assigned: async () => assignedResult(assigned, ctx),
     epic: () => epicResult(issue, jira, ctx),
-    siblings: () => siblingsResult(issue, prefix, jira, ctx),
+    siblings: () => siblingsResult(issue, prefixes, jira, ctx),
     ref_owner: () => refOwnerResult(issue, jira, ctx, assigned),
   };
 
@@ -814,7 +1225,14 @@ async function epicResult(
   ctx: JudgeContext
 ): Promise<JudgeResult | null> {
   const epic = await findViaEpic(issue, ctx.members, jira, {
-    projectKey: ctx.projectKey.startsWith('KQ') ? 'KQ' : undefined,
+    /*
+      참조 프로젝트를 좁히지 않는다. 레이블이 가리키는 곳은 QA 프로젝트가
+      아니라 **기획 프로젝트**라서, 여기서 아는 키(`kiacpo_qa`)로는 못 거른다.
+      예전엔 `projectKey.startsWith('KQ') ? 'KQ' : undefined` 였다 — 코드가
+      한 프로젝트의 작명을 외우고 있었고, 다른 대상에서는 그 조건이 거짓이라
+      조용히 `'KQ'` 기본값으로 떨어져 남의 프로젝트 레이블을 찾고 있었다.
+      이제 `extractRefKeys` 가 **티켓 키 모양**으로 거른다.
+    */
     devIssueTypes: ctx.devIssueTypes,
     coAssigneeField: ctx.coAssigneeField,
     onWarn: ctx.onWarn,
@@ -869,9 +1287,7 @@ async function epicResult(
         titles: {
           [epic.refKq]: epic.refSummary,
           [epic.epicKey]: epic.epicSummary,
-          ...Object.fromEntries(
-            epic.devTickets.map((t) => [t.key, t.summary])
-          ),
+          ...Object.fromEntries(epic.devTickets.map((t) => [t.key, t.summary])),
         },
       },
     };
@@ -889,26 +1305,49 @@ async function epicResult(
 */
 async function siblingsResult(
   issue: JiraIssue,
-  prefix: string | null,
+  prefixes: string[],
   jira: JiraPort,
   ctx: JudgeContext
 ): Promise<JudgeResult | null> {
-  if (!prefix) return null;
+  if (prefixes.length === 0) return null;
   try {
-    const sib = await findViaSiblings(issue, prefix, ctx.members, jira, {
+    const sib = await findViaSiblings(issue, prefixes, ctx.members, jira, {
       projectKey: ctx.projectKey,
       fixVersion: ctx.fixVersion,
+      cycleAxisField: ctx.cycleAxisField,
       triageAccountId: ctx.triageAccountId,
+      jiraFilterId: ctx.jiraFilterId,
+      onWarn: ctx.onWarn,
     });
     if (sib) {
       const slackId =
         ctx.members.find((m) => m.accountId === sib.accountId)?.slackId ?? null;
+      /*
+        표가 갈렸으면 **갈렸다고 적는다.**
+
+        전에는 이긴 쪽만 적었다 ("이번 차수 [BO] QA 티켓 12건이 손현지 담당").
+        읽는 사람은 그게 만장일치인지 12대 11인지 알 수가 없었다. 실측
+        (2026-09-16) GW 형제 판정은 답을 낸 92건 중 15건이 틀렸는데, 표가
+        갈린 건이 그 대부분이었다 — 진 쪽 이름만 보였어도 사람이 1초 만에
+        잡아낼 수 있던 것들이다.
+      */
+      const split = sib.runnersUp
+        .map((r) => `${r.name} ${r.votes}건`)
+        .join(', ');
+      /*
+        갈렸을 때 "N건 중 M건" 이라고 쓰지 않는다. 한 형제를 우리 팀원 둘이
+        차례로 맡았으면 **양쪽 다 근거**라서 표 합이 형제 수보다 클 수 있다.
+        분수처럼 적으면 숫자가 안 맞아 보인다. 형제 수와 표를 따로 적는다.
+      */
+      const count = split
+        ? `형제 ${sib.total}건 · ${sib.name} ${sib.votes}건 (${split})`
+        : `형제 ${sib.votes}건이 모두 ${sib.name} 담당`;
       return {
         classification: classify(sib.accountId, ctx.selfAccountId),
         accountId: sib.accountId,
         name: sib.name,
         slackId,
-        reason: `이번 차수 [${prefix}] QA 티켓 ${sib.votes}건이 ${sib.name} 담당`,
+        reason: `이번 차수 [${sib.prefix}] ${count}`,
         evidence: { tickets: sib.tickets },
         tier: 2,
         via: 'siblings',
@@ -957,7 +1396,6 @@ async function refOwnerResult(
   let ref: RefOwnerMatch | null = null;
   try {
     ref = await findViaRefOwner(issue, ctx.members, jira, {
-      projectKey: ctx.projectKey.startsWith('KQ') ? 'KQ' : undefined,
       devIssueTypes: ctx.devIssueTypes,
       coAssigneeField: ctx.coAssigneeField,
       onWarn: ctx.onWarn,

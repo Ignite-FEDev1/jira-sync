@@ -172,3 +172,37 @@ export function pickTriage(
 
   return { ...top, teamHits, scanned, rivals, strength, why };
 }
+
+/**
+ * 여러 칸을 훑어 가장 근거가 많은 추천을 고른다.
+ *
+ * ── 왜 한 칸으로는 안 되나 ──
+ *
+ * `pickTriage` 는 칸 하나(`fieldId`)의 변경이력만 본다. CPO 는 QA 가
+ * **공동담당자** 칸에 창구를 적어서 그 칸이 맞았다.
+ *
+ * 그런데 그 칸을 아예 안 쓰는 프로젝트가 있다. 실측(그룹웨어 ICTQMSCHE):
+ * 판정 경로 추론이 "① 안 돎 · 공동담당자 칸을 안 쓰는 프로젝트" 라고 답했고,
+ * 실제 티켓은 **assignee** 가 김가빈에서 유재용으로 옮겨 갔다. 공동담당자
+ * 칸만 보면 이력이 0건이라 "근거를 못 찾았습니다" 가 나온다 — 근거는 있는데
+ * 엉뚱한 칸을 본 것이다.
+ *
+ * 그래서 후보 칸을 모두 훑고 **가장 많이 센 쪽**을 쓴다. 칸이 하나뿐인
+ * 프로젝트는 지금까지와 결과가 같다.
+ *
+ * @param fieldIds 볼 칸들. 순서는 상관없다. 빈 것은 알아서 걸러진다.
+ */
+export function pickTriageAcross(
+  logs: ChangelogEntry[],
+  members: { accountId: string; name: string }[],
+  fieldIds: string[]
+): TriageGuess | null {
+  let best: TriageGuess | null = null;
+  for (const fieldId of [...new Set(fieldIds)].filter(Boolean)) {
+    const g = pickTriage(logs, members, fieldId);
+    if (!g) continue;
+    // 근거 건수가 많은 쪽. 같으면 먼저 본 칸을 둔다.
+    if (!best || g.teamHits > best.teamHits) best = g;
+  }
+  return best;
+}

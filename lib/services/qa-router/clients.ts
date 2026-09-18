@@ -9,7 +9,7 @@
 
 import type { JiraIssue, JiraPort } from './judge';
 import type { SlackMessage, SlackReader } from './qa-thread';
-import type { JiraFieldMeta } from './derive';
+import type { JiraFieldMeta, JqlClause } from './derive';
 import type { ChangelogEntry } from './triage';
 
 const NET_RETRY_DELAYS_MS = [3_000, 9_000, 20_000];
@@ -78,6 +78,24 @@ export interface JiraUser {
 
 export interface JiraClient extends JiraPort {
   getFilter(filterId: string): Promise<JiraFilter>;
+  /**
+   * 대시보드 차트 한 칸이 보고 있는 필터 번호.
+   *
+   * 팀이 공유하는 건 대시보드 주소다. 거기엔 필터 번호가 없고 가젯 번호만
+   * 있어서(`?maximized=17305`), 그대로는 무엇을 보는지 알 수 없다.
+   * 가젯 설정을 읽으면 `{type:'filter', id:'15127'}` 이 나온다.
+   *
+   * 필터가 아닌 가젯(프로젝트 기준 차트 등)이면 던진다 — 봇은 필터만 쓴다.
+   */
+  resolveGadgetFilterId(dashboardId: string, gadgetId: string): Promise<string>;
+  /**
+   * JQL 을 Jira 가 해석한 조건 트리로 받는다.
+   *
+   * 우리가 정규식으로 뜯으면 **본 적 있는 표기만** 읽힌다. Jira 는 자기
+   * 문법을 알아서 `=` 든 `in` 이든 중첩 괄호든 같은 모양으로 돌려준다.
+   * 못 읽으면 null 이고, 부르는 쪽이 정규식으로 내려간다.
+   */
+  parseJql(jql: string): Promise<JqlClause | null>;
   /**
    * JQL 의 프로젝트 식별자를 REST 가 받는 정식 키로 바꾼다.
    * JQL 은 이름·키·id 를 모두 받지만 REST 경로는 키나 id 만 받는다.
@@ -162,6 +180,40 @@ export function createJiraClient(opts: {
   return {
     getFilter: (filterId) => call<JiraFilter>(`/filter/${filterId}`),
 
+    async parseJql(jql) {
+      /*
+        `validation=none` 을 붙인다. 우리는 구조만 필요하고, 값이 실제로
+        존재하는지(없는 프로젝트 키 등)는 관심이 아니다. 검증을 켜면 남의
+        프로젝트를 참조하는 필터에서 통째로 실패한다.
+      */
+      const d = await call<{
+        queries?: { structure?: { where?: JqlClause }; errors?: string[] }[];
+      }>('/jql/parse?validation=none', {
+        method: 'POST',
+        body: JSON.stringify({ queries: [jql] }),
+      });
+      const q = d.queries?.[0];
+      if (!q || (q.errors?.length ?? 0) > 0) {
+        log(`JQL 구조 파싱 실패 · 정규식으로 내려갑니다`);
+        return null;
+      }
+      return q.structure?.where ?? null;
+    },
+
+    async resolveGadgetFilterId(dashboardId, gadgetId) {
+      const d = await call<{
+        value?: { type?: string; id?: string; name?: string };
+      }>(`/dashboard/${dashboardId}/items/${gadgetId}/properties/config`);
+      const v = d.value ?? {};
+      if (v.type !== 'filter' || !v.id) {
+        throw new Error(
+          `이 차트는 필터를 보고 있지 않습니다 (type=${v.type ?? '알 수 없음'}). 필터를 쓰는 차트를 펼쳐서 그 주소를 넣어 주세요.`
+        );
+      }
+      log(`가젯 ${gadgetId} → 필터 ${v.id} (${v.name ?? '이름 없음'})`);
+      return v.id;
+    },
+
     async resolveProjectKey(identifier) {
       const d = await call<{ values?: Array<{ key: string; name: string }> }>(
         `/project/search?query=${encodeURIComponent(identifier)}&maxResults=5`
@@ -214,7 +266,7 @@ export function createJiraClient(opts: {
     getChangelogs: async (issueKeys, fieldIds) =>
       issueKeys.length === 0
         ? []
-        : (
+        : ((
             await call<{ issueChangeLogs?: ChangelogEntry[] }>(
               '/changelog/bulkfetch',
               {
@@ -226,7 +278,7 @@ export function createJiraClient(opts: {
                 }),
               }
             )
-          ).issueChangeLogs ?? [],
+          ).issueChangeLogs ?? []),
 
     getIssue: (key, fields) =>
       call<JiraIssue>(`/issue/${key}?fields=${fields.join(',')}`),
