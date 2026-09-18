@@ -29,7 +29,7 @@ import type { RunLogger } from './run-log';
 import type { FehgIssueLink } from './cascade-kq';
 
 /** HMG 인스턴스에 속한 프로젝트 키 */
-const HMG_PROJECT_KEYS = ['AUTOWAY', 'HMGBOARD'];
+const HMG_PROJECT_KEYS = ['AUTOWAY', 'HMGBOARD', 'MEMBERSHIP'];
 
 /**
  * KQ가 이 상태일 때는 건드리지 않는다.
