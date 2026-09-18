@@ -128,7 +128,7 @@ export async function mapFieldsFromDb(
         if (sprint && sprint.length > 0) {
           const mappedSprintId = await mapSprintToTarget(
             sprint[0].name,
-            targetProjectKey as 'KQ' | 'HDD' | 'HMGBOARD' | 'AUTOWAY'
+            targetProjectKey as 'KQ' | 'AUTOWAY' | 'MEMBERSHIP'
           );
           if (mappedSprintId) {
             fields[target_field] = mappedSprintId;

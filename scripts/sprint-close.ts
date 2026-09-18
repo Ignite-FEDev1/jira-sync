@@ -759,7 +759,7 @@ async function main() {
 
           await transitionIssue(client, ticket.key, FEHG_TRANSITIONS.DONE);
 
-          // 원본에 연결된 짝꿍(AUTOWAY/HMGBOARD · KQ)도 같이 종료.
+          // 원본에 연결된 짝꿍(AUTOWAY · KQ)도 같이 종료.
           // 데일리 싱크가 `due >= 오늘-1개월` 조건 때문에 놓치는 티켓을 여기서 메운다.
           const sourceCounterparts = await syncCounterpartStatuses({
             fehgKey: ticket.key,

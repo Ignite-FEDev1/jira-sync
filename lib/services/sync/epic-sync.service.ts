@@ -1,7 +1,7 @@
 // 에픽 전용 동기화 서비스
-// - 자식 티켓 sync와 독립적으로, FEHG의 [GW]/[HB]/[HM] 에픽들을
-//   AUTOWAY/HMGBOARD/MEMBERSHIP에 매칭/생성 + 상태 동기화 수행
-// - 모드: all | autoway | hmgboard | membership | single (에픽 키 직접 지정)
+// - 자식 티켓 sync와 독립적으로, FEHG의 [GW]/[HM] 에픽들을
+//   AUTOWAY/MEMBERSHIP에 매칭/생성 + 상태 동기화 수행
+// - 모드: all | autoway | membership | single (에픽 키 직접 지정)
 
 import { JiraIssue } from '@/lib/types/jira';
 import { dbServer } from '@/lib/db';
@@ -14,7 +14,6 @@ import { clearTransitionCache } from './transition-helper';
 export type EpicSyncMode =
   | 'all'
   | 'autoway'
-  | 'hmgboard'
   | 'membership'
   | 'single';
 
@@ -29,7 +28,7 @@ export interface EpicSyncOptions {
 export interface EpicSyncResult {
   fehgKey: string;
   fehgSummary: string;
-  targetProject: 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP';
+  targetProject: 'AUTOWAY' | 'MEMBERSHIP';
   targetKey: string | null;
   success: boolean;
   error?: string;
@@ -43,16 +42,15 @@ export interface EpicSyncSummary {
 }
 
 const TARGET_PREFIX: Record<
-  'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP',
-  '[GW]' | '[HB]' | '[HM]'
+  'AUTOWAY' | 'MEMBERSHIP',
+  '[GW]' | '[HM]'
 > = {
   AUTOWAY: '[GW]',
-  HMGBOARD: '[HB]',
   MEMBERSHIP: '[HM]',
 };
 
 async function findHmgProfileId(
-  targetName: 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP'
+  targetName: 'AUTOWAY' | 'MEMBERSHIP'
 ): Promise<string | null> {
   const { data: project } = await dbServer
     .from('projects')
@@ -72,7 +70,7 @@ async function findHmgProfileId(
 
 async function fetchFehgEpicsByPrefix(
   sourceProject: string,
-  prefix: '[GW]' | '[HB]' | '[HM]',
+  prefix: '[GW]' | '[HM]',
   logger: SyncLogger
 ): Promise<JiraIssue[]> {
   logger.info(`${sourceProject} 에픽 조회 중 (${prefix} prefix)...`);
@@ -113,17 +111,16 @@ export async function executeEpicSync(
   const results: EpicSyncResult[] = [];
 
   // 프로필 ID 미리 조회 (runtime BFS transition을 위해 필요)
-  const [autowayProfileId, hmgboardProfileId, membershipProfileId] =
+  const [autowayProfileId, membershipProfileId] =
     await Promise.all([
       findHmgProfileId('AUTOWAY'),
-      findHmgProfileId('HMGBOARD'),
       findHmgProfileId('MEMBERSHIP'),
     ]);
 
   // 처리할 (FEHG 에픽, 대상 프로젝트) 페어 결정
   const pairs: Array<{
     epic: JiraIssue;
-    target: 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP';
+    target: 'AUTOWAY' | 'MEMBERSHIP';
     profileId: string | null;
   }> = [];
 
@@ -149,8 +146,6 @@ export async function executeEpicSync(
       summary.startsWith('[GW-QA지원]')
     ) {
       pairs.push({ epic, target: 'AUTOWAY', profileId: autowayProfileId });
-    } else if (summary.startsWith(TARGET_PREFIX.HMGBOARD)) {
-      pairs.push({ epic, target: 'HMGBOARD', profileId: hmgboardProfileId });
     } else if (summary.startsWith(TARGET_PREFIX.MEMBERSHIP)) {
       pairs.push({
         epic,
@@ -159,7 +154,7 @@ export async function executeEpicSync(
       });
     } else {
       logger.warning(
-        `${options.epicKey}: [GW]/[HB]/[HM] prefix 없음 - 대상 결정 불가 (summary: "${summary}")`
+        `${options.epicKey}: [GW]/[HM] prefix 없음 - 대상 결정 불가 (summary: "${summary}")`
       );
       return emptySummary();
     }
@@ -172,16 +167,6 @@ export async function executeEpicSync(
       );
       for (const epic of gwEpics) {
         pairs.push({ epic, target: 'AUTOWAY', profileId: autowayProfileId });
-      }
-    }
-    if (options.mode === 'all' || options.mode === 'hmgboard') {
-      const hbEpics = await fetchFehgEpicsByPrefix(
-        sourceProject,
-        '[HB]',
-        logger
-      );
-      for (const epic of hbEpics) {
-        pairs.push({ epic, target: 'HMGBOARD', profileId: hmgboardProfileId });
       }
     }
     if (options.mode === 'all' || options.mode === 'membership') {

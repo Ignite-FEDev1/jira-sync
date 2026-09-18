@@ -53,7 +53,7 @@ export async function GET(request: NextRequest) {
 
     // 티켓 조회
     const requestData: FetchDeploymentTicketsRequest = {
-      project: project as 'groupware' | 'hmg-board' | 'cpo',
+      project: project as 'groupware' | 'cpo',
       userName,
       baseMonth,
     };

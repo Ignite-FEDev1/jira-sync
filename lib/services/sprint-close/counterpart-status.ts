@@ -2,7 +2,7 @@
  * FEHG 티켓의 짝꿍 티켓 상태를 FEHG에 맞춰 동기화한다.
  *
  * 짝꿍 두 종류:
- *   hmg — 원본의 customfield_10306이 가리키는 AUTOWAY/HMGBOARD 티켓
+ *   hmg — 원본의 customfield_10306이 가리키는 AUTOWAY 티켓
  *   kq  — 원본에 Blocks 링크로 걸린 KQ 티켓
  *
  * 왜 필요한가:
@@ -29,7 +29,7 @@ import type { RunLogger } from './run-log';
 import type { FehgIssueLink } from './cascade-kq';
 
 /** HMG 인스턴스에 속한 프로젝트 키 */
-const HMG_PROJECT_KEYS = ['AUTOWAY', 'HMGBOARD', 'MEMBERSHIP'];
+const HMG_PROJECT_KEYS = ['AUTOWAY'];
 
 /**
  * KQ가 이 상태일 때는 건드리지 않는다.

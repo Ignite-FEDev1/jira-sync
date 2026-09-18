@@ -1122,7 +1122,7 @@ export default function FieldMappingsPage() {
               </div>
             </div>
           ) : (
-            /* HMG 대상: 연결 필드 설정 (동기화 대상 에픽은 [GW]/[HB] 접두사로 자동 판정) */
+            /* HMG 대상: 연결 필드 설정 (동기화 대상 에픽은 [GW] 접두사로 자동 판정) */
             <div className="space-y-3 rounded-md border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/20 p-3">
               <div className="flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-400">
                 <Link2 className="h-3.5 w-3.5" />

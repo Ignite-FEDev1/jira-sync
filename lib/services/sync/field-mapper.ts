@@ -14,7 +14,7 @@ import { mapSprintToTarget } from './sprint-mapper';
  */
 export async function mapFieldsForIgniteProject(
   fehgTicket: JiraIssue,
-  targetProject: 'KQ' | 'HDD'
+  targetProject: 'KQ'
 ): Promise<Record<string, unknown>> {
   const fields: Record<string, unknown> = {};
   const fehgFields = fehgTicket.fields;
@@ -66,14 +66,14 @@ export async function mapFieldsForIgniteProject(
 }
 
 /**
- * FEHG 티켓 필드를 HMG 인스턴스 (AUTOWAY/HMGBOARD)용으로 변환
+ * FEHG 티켓 필드를 HMG 인스턴스 (AUTOWAY/MEMBERSHIP)용으로 변환
  * DB 매핑 프로필이 없을 때의 하드코딩 폴백 경로
  */
 export async function mapFieldsForAutoway(
   fehgTicket: JiraIssue,
   assigneeAccountId: string,
   teamUsers?: SyncOptions['teamUsers'],
-  targetProjectKey: 'AUTOWAY' | 'HMGBOARD' = 'AUTOWAY'
+  targetProjectKey: 'AUTOWAY' | 'MEMBERSHIP' = 'AUTOWAY'
 ): Promise<Record<string, unknown>> {
   const fields: Record<string, unknown> = {};
   const fehgFields = fehgTicket.fields;
@@ -134,7 +134,6 @@ export async function mapFieldsForAutoway(
   }
 
   // 스프린트 매핑 (FEHG 스프린트 이름 → 대상 보드 스프린트 ID)
-  // AUTOWAY: "GW YYYYMM", HMGBOARD: "HB YYYYMM"
   const fehgSprint = fehgFields[IGNITE_CUSTOM_FIELDS.SPRINT] as
     | Array<{ id: number; name: string }>
     | undefined;

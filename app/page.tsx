@@ -488,7 +488,7 @@ export default function Home() {
     }
   };
 
-  // 에픽 동기화 핸들러 — FEHG의 [GW]/[HB] 에픽들을 AUTOWAY/HMGBOARD로
+  // 에픽 동기화 핸들러 — FEHG의 [GW]/[HM] 에픽들을 AUTOWAY/MEMBERSHIP으로
   // 매칭 또는 생성하고 상태를 동기화 (자식 티켓 sync와 독립)
   const handleEpicSync = async () => {
     if (epicSyncMode === 'single' && !epicSyncId) {
@@ -510,11 +510,9 @@ export default function Home() {
 
       const modeLabel =
         epicSyncMode === 'all'
-          ? '전체 (AUTOWAY + HMGBOARD + MEMBERSHIP)'
+          ? '전체 (AUTOWAY + MEMBERSHIP)'
           : epicSyncMode === 'autoway'
           ? 'AUTOWAY'
-          : epicSyncMode === 'hmgboard'
-          ? 'HMGBOARD'
           : epicSyncMode === 'membership'
           ? 'MEMBERSHIP'
           : `단일 에픽 (${epicKey})`;
@@ -968,7 +966,6 @@ export default function Home() {
                       <SelectContent>
                         <SelectItem value="all">전체</SelectItem>
                         <SelectItem value="autoway">AUTOWAY</SelectItem>
-                        <SelectItem value="hmgboard">HMGBOARD</SelectItem>
                         <SelectItem value="membership">MEMBERSHIP</SelectItem>
                         <SelectItem value="single">에픽 번호 입력</SelectItem>
                       </SelectContent>
@@ -1003,14 +1000,14 @@ export default function Home() {
                         maxLength={10}
                       />
                       <p className="text-xs text-muted-foreground">
-                        [GW]/[HB]/[HM] prefix로 대상 자동 결정 • {sourceProject}
+                        [GW]/[HM] prefix로 대상 자동 결정 • {sourceProject}
                         -{epicSyncId || 'XXX'}
                       </p>
                     </div>
                   )}
 
                   <p className="text-xs text-muted-foreground">
-                    FEHG의 [GW]/[HB]/[HM] 에픽을 AUTOWAY/HMGBOARD/MEMBERSHIP으로
+                    FEHG의 [GW]/[HM] 에픽을 AUTOWAY/MEMBERSHIP으로
                     매칭/생성하고 상태를 동기화합니다.
                   </p>
                 </div>
@@ -1079,10 +1076,7 @@ export default function Home() {
                                 <div className="flex items-start justify-between gap-3">
                                   <div>
                                     <div className="font-semibold">
-                                      Black Duck ·{' '}
-                                      {projectKey === 'hmg-board'
-                                        ? 'HB'
-                                        : projectKey}
+                                      Black Duck · {projectKey}
                                     </div>
                                     <div className="text-xs text-muted-foreground">
                                       {blackduck.project?.name ?? '-'} ·{' '}
@@ -1185,10 +1179,7 @@ export default function Home() {
                                 <div className="flex items-start justify-between gap-3">
                                   <div>
                                     <div className="font-semibold">
-                                      SonarQube ·{' '}
-                                      {projectKey === 'hmg-board'
-                                        ? 'HB'
-                                        : projectKey}
+                                      SonarQube · {projectKey}
                                     </div>
                                     <div className="text-xs text-muted-foreground">
                                       {sonarqube.projectKey}
@@ -1364,7 +1355,6 @@ export default function Home() {
                               <a
                                 href={`${
                                   result.targetProject === 'AUTOWAY' ||
-                                  result.targetProject === 'HMGBOARD' ||
                                   result.targetProject === 'MEMBERSHIP'
                                     ? JIRA_ENDPOINTS.HMG
                                     : JIRA_ENDPOINTS.IGNITE

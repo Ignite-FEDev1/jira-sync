@@ -1,13 +1,8 @@
 // 동기화 관련 타입 정의
 
-// 동기화 대상 프로젝트 (HB는 HMGBOARD로 이관됨)
-export type SyncTargetProject = 'KQ' | 'HDD' | 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP';
-
-// HMG 인스턴스 동기화 대상 (코드 분기에서 사용)
-export type HmgTargetProject = 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP';
-
-// Ignite 인스턴스 동기화 대상
-export type IgniteTargetProject = 'KQ' | 'HDD';
+export type SyncTargetProject = 'KQ' | 'AUTOWAY' | 'MEMBERSHIP';
+export type HmgTargetProject = 'AUTOWAY' | 'MEMBERSHIP';
+export type IgniteTargetProject = 'KQ';
 
 // 동기화 모드
 export type SyncMode =

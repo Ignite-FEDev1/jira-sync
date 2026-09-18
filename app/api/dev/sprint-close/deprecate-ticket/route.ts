@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
 
     if (needsHmg && !hmg) {
       const error =
-        'HMG 자격이 없어 AUTOWAY/HMGBOARD 티켓을 정리할 수 없습니다';
+        'HMG 자격이 없어 AUTOWAY 티켓을 정리할 수 없습니다';
       log.error(error);
       const run = await log.finish('failed', { error });
       return NextResponse.json({ success: false, error, run }, { status: 500 });

@@ -1,4 +1,4 @@
-// FEHG 부모 에픽 → AUTOWAY/HMGBOARD 에픽 매칭 또는 신규 생성 + 상태 동기화
+// FEHG 부모 에픽 → AUTOWAY/MEMBERSHIP 에픽 매칭 또는 신규 생성 + 상태 동기화
 //
 // 조회 순서:
 //   1단계: FEHG 에픽 customfield_10306 URL → HMG key 추출 (ID 기반)
@@ -26,7 +26,7 @@ export interface FehgParentInfo {
   summary: string;
 }
 
-type TargetProject = 'AUTOWAY' | 'HMGBOARD' | 'MEMBERSHIP';
+type TargetProject = 'AUTOWAY' | 'MEMBERSHIP';
 
 // 대상 프로젝트 에픽 목록 캐시: projectKey → (exact summary → epic key)
 const targetEpicsCache = new Map<TargetProject, Map<string, string>>();

@@ -244,9 +244,6 @@ export default function CreateTicketPage() {
     if (summary.startsWith('[GW]')) {
       return 'text-green-700 font-medium data-[highlighted]:bg-green-50 data-[state=checked]:bg-green-100 data-[state=checked]:text-green-800';
     }
-    if (summary.startsWith('[HB]')) {
-      return 'text-purple-700 font-medium data-[highlighted]:bg-purple-50 data-[state=checked]:bg-purple-100 data-[state=checked]:text-purple-800';
-    }
     return 'text-gray-700';
   };
 

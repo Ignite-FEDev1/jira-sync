@@ -9,7 +9,7 @@ import type {
 } from '@/lib/types/deploy-room';
 
 export type DeployType = 'regular' | 'adhoc' | 'hotfix';
-export type ProjectKey = 'groupware' | 'cpo' | 'hmg-board';
+export type ProjectKey = 'groupware' | 'cpo';
 
 export interface DeployProject {
   id: ProjectKey;
@@ -21,12 +21,6 @@ export interface DeployProject {
 export const DEPLOY_PROJECTS: readonly DeployProject[] = [
   { id: 'groupware', name: 'Groupware', shortName: 'GW', enabled: true },
   { id: 'cpo', name: 'CPO', shortName: 'CPO', enabled: false },
-  {
-    id: 'hmg-board',
-    name: 'HMG Board',
-    shortName: 'HMG Board',
-    enabled: false,
-  },
 ] as const;
 
 export const DEPLOY_TYPES: readonly { id: DeployType; name: string }[] = [
