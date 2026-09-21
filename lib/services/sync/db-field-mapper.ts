@@ -6,6 +6,7 @@ import { dbServer } from '@/lib/db';
 import { IGNITE_CUSTOM_FIELDS } from '@/lib/constants/jira';
 import { mapSprintToTarget } from './sprint-mapper';
 import { stripAdfMediaNodes } from './field-mapper';
+import { isEmptySourceValue, isClearableTarget, clearValueFor, ClearContext } from './clear-policy';
 
 interface DbFieldMapping {
   source_field: string;
@@ -73,10 +74,13 @@ export async function mapFieldsFromDb(
   fehgTicket: JiraIssue,
   profileId: string,
   targetProjectKey: string,
-  teamUsers?: TeamUserForMapping[]
-): Promise<Record<string, unknown>> {
+  teamUsers?: TeamUserForMapping[],
+  mode: 'create' | 'update' = 'create',
+  ctx: ClearContext = {}
+): Promise<{ fields: Record<string, unknown>; cleared: string[] }> {
   const mappings = await getFieldMappings(profileId);
   const fields: Record<string, unknown> = {};
+  const cleared: string[] = [];
   const fehgFields = fehgTicket.fields;
 
   // 프로필의 소스/타겟 인스턴스가 다른지 확인
@@ -106,7 +110,12 @@ export async function mapFieldsFromDb(
       case 'copy': {
         // 단순 복사
         const value = getFieldValue(fehgTicket, fehgFields, source_field);
-        if (value !== undefined && value !== null) {
+        if (isEmptySourceValue(value)) {
+          if (mode === 'update' && isClearableTarget(target_field, ctx)) {
+            fields[target_field] = clearValueFor(target_field);
+            cleared.push(target_field);
+          }
+        } else {
           // assignee는 accountId 형태로 래핑
           if (source_field === 'assignee' && typeof value === 'object' && value !== null && 'accountId' in value) {
             fields[target_field] = { accountId: (value as { accountId: string }).accountId };
@@ -126,22 +135,40 @@ export async function mapFieldsFromDb(
           | Array<{ id: number; name: string }>
           | undefined;
 
-        if (sprint && sprint.length > 0) {
-          const mappedSprintId = await mapSprintToTarget(
-            sprint[0].name,
-            targetProjectKey as 'KQ' | 'AUTOWAY' | 'MEMBERSHIP'
-          );
-          if (mappedSprintId) {
-            fields[target_field] = mappedSprintId;
+        if (isEmptySourceValue(sprint)) {
+          // 소스 스프린트가 비어 있으면 타겟도 비움
+          if (mode === 'update' && isClearableTarget(target_field, ctx)) {
+            fields[target_field] = null;
+            cleared.push(target_field);
           }
+          break;
         }
+
+        const mappedSprintId = await mapSprintToTarget(
+          sprint![0].name,
+          targetProjectKey as 'KQ' | 'AUTOWAY' | 'MEMBERSHIP'
+        );
+        if (mappedSprintId) {
+          fields[target_field] = mappedSprintId;
+        }
+        // 소스에 스프린트는 있는데 대상에 짝이 없는 경우 — 건드리지 않음
         break;
       }
 
       case 'account_map': {
         // 계정 매핑 (Ignite accountId → HMG accountId)
         const sourceValue = getFieldValue(fehgTicket, fehgFields, source_field);
-        if (sourceValue && typeof sourceValue === 'object' && 'accountId' in sourceValue) {
+
+        if (isEmptySourceValue(sourceValue)) {
+          // 소스 담당자가 비어 있으면 타겟도 비움
+          if (mode === 'update' && isClearableTarget(target_field, ctx)) {
+            fields[target_field] = null;
+            cleared.push(target_field);
+          }
+          break;
+        }
+
+        if (typeof sourceValue === 'object' && 'accountId' in (sourceValue as object)) {
           const igniteAccountId = (sourceValue as { accountId: string }).accountId;
 
           // 1순위: teamUsers 메모리 lookup (브라우저 환경에서 RLS 우회)
@@ -157,6 +184,7 @@ export async function mapFieldsFromDb(
           if (hmgAccountId) {
             fields[target_field] = { accountId: hmgAccountId };
           }
+          // hmgAccountId가 없으면 키 자체를 빼서 타겟 담당자를 유지
         }
         break;
       }
@@ -164,7 +192,12 @@ export async function mapFieldsFromDb(
       default: {
         // 알 수 없는 transform_type → copy로 폴백
         const fallbackValue = getFieldValue(fehgTicket, fehgFields, source_field);
-        if (fallbackValue !== undefined && fallbackValue !== null) {
+        if (isEmptySourceValue(fallbackValue)) {
+          if (mode === 'update' && isClearableTarget(target_field, ctx)) {
+            fields[target_field] = clearValueFor(target_field);
+            cleared.push(target_field);
+          }
+        } else {
           fields[target_field] = fallbackValue;
         }
         break;
@@ -172,7 +205,7 @@ export async function mapFieldsFromDb(
     }
   }
 
-  return fields;
+  return { fields, cleared };
 }
 
 // 계정 매핑 캐시 (동기화 세션 동안 유지)

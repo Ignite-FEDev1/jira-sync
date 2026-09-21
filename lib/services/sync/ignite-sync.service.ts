@@ -109,7 +109,7 @@ export class IgniteSyncService {
 
       // 1. 필드 매핑 (DB 기반 또는 하드코딩)
       const mappedFields = syncProfileId
-        ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProject)
+        ? (await mapFieldsFromDb(fehgTicket, syncProfileId, targetProject, undefined, 'update')).fields
         : await mapFieldsForIgniteProject(fehgTicket, targetProject);
 
       // 2. 필드 업데이트

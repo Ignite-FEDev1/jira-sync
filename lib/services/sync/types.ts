@@ -22,6 +22,7 @@ export interface SyncResult {
   message?: string;
   error?: string;
   isNewlyCreated?: boolean; // 신규 생성 여부
+  clearedFields?: string[]; // 빈 값으로 덮어쓴 필드 목록
 }
 
 // 동기화 요약
