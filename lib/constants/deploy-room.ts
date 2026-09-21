@@ -140,6 +140,33 @@ export function getGitlabLabelFilter(
   return null;
 }
 
+/**
+ * deployType + deployDate → GitLab MR 타겟브랜치 prefix 목록
+ * 날짜 형식이 yyMMdd(261007)와 yyyyMMdd(20261007) 두 가지 모두 사용될 수 있으므로 둘 다 반환한다.
+ * 브랜치명 뒤에 임의 접미사가 붙을 수 있어 startsWith 비교용으로 사용한다.
+ *
+ * 예)
+ * - 정기배포(regular), 2026-10-07 → ['release/261007', 'release/20261007']
+ * - 비정기배포(adhoc), 2026-10-07 → ['adhoc/261007', 'adhoc/20261007']
+ * - 핫픽스(hotfix), 2026-10-07 → ['hotfix/261007', 'hotfix/20261007']
+ */
+export function getTargetBranchPrefixes(
+  deployType: DeployType,
+  deployDate: string
+): string[] {
+  let typePrefix: string;
+  if (deployType === 'regular') typePrefix = 'release/';
+  else if (deployType === 'adhoc') typePrefix = 'adhoc/';
+  else if (deployType === 'hotfix') typePrefix = 'hotfix/';
+  else return [];
+
+  const [year, month, day] = deployDate.split('-');
+  const yyMMdd = year.slice(2) + month + day; // '261007'
+  const yyyyMMdd = year + month + day; // '20261007'
+
+  return [`${typePrefix}${yyMMdd}`, `${typePrefix}${yyyyMMdd}`];
+}
+
 /** 배포일(YYYY-MM-DD) → yyMMdd 변환 (타이틀 자동생성용) */
 export function deployDateToYYMMDD(deployDate: string): string {
   const [year, month, day] = deployDate.split('-');

@@ -79,6 +79,8 @@ export interface DeployRoomTemplate {
   gitlabProjects: string[];
   teamMembers: string[];
   checklist: DeployRoomTemplateChecklist[];
+  pinnedBeforeItems: string[];
+  pinnedAfterItems: string[];
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
