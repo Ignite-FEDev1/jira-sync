@@ -47,6 +47,12 @@ import {
   type JiraIssue,
   type JiraPort,
 } from '@/lib/services/qa-router/judge';
+import { JUDGE_TIERS } from '@/lib/services/qa-router/types';
+import type {
+  JudgeTier,
+  QaRouterConfig,
+  QaRouterState,
+} from '@/lib/services/qa-router/types';
 import {
   findTriageHandoff,
   flattenChanges,
@@ -73,21 +79,33 @@ function arg(name: string): string | null {
 const REWOUND_FIELDS = ['assignee'];
 
 /**
- * 모든 응답을 `at` 시점으로 되감아 주는 포트.
+ * Jira 읽기 캐시. **변형 비교의 전제다.**
  *
- * 되감기에 이력이 필요하고, 이력은 티켓을 본 **뒤에야** 무엇이 필요한지
- * 안다. 그래서 티켓이 들어올 때마다 이력을 받아 캐시한다. 왕복이 늘지만
- * 백테스트는 하루에 몇 번 돌리는 것이라 정확도가 우선이다.
+ * 변형을 4개 돌리면 같은 티켓을 4번 조회한다. 왕복이 4배로 느는 것도
+ * 문제지만, 더 나쁜 것은 그사이 누가 티켓을 바꾸면 변형끼리 **다른 데이터를
+ * 보고 채점된다**는 것이다. 그러면 차이가 변형 때문인지 데이터 때문인지
+ * 알 수 없다. 한 번 읽은 것을 실행 내내 고정한다.
  *
- * 캐시는 표본 하나 안에서만 유효하다 — 같은 티켓이라도 시점이 다르면
- * 되감은 값이 다르다. 그래서 이력(시점 무관)만 공유하고 되감기는 매번 한다.
+ * 이력·티켓 본문은 시점과 무관한 값이라 캐시가 안전하다. 되감기는 캐시된
+ * 원본에 `at` 을 적용해 매번 새로 한다.
  */
+interface ReadCache {
+  logs: Map<string, FieldChange[]>;
+  issue: Map<string, JiraIssue>;
+  search: Map<string, JiraIssue[]>;
+}
+
+export function newReadCache(): ReadCache {
+  return { logs: new Map(), issue: new Map(), search: new Map() };
+}
+
 function rewindingPort(
   real: ReturnType<typeof createJiraClient>,
   at: number,
   coAssigneeField: string | null,
-  logs: Map<string, FieldChange[]>
+  cache: ReadCache
 ): JiraPort {
+  const logs = cache.logs;
   const fields = coAssigneeField
     ? [...REWOUND_FIELDS, coAssigneeField]
     : REWOUND_FIELDS;
@@ -159,12 +177,22 @@ function rewindingPort(
 
   return {
     async getIssue(key, f) {
-      const i = await real.getIssue(key, f);
+      const ck = `${key}|${f.join(',')}`;
+      let i = cache.issue.get(ck);
+      if (!i) {
+        i = await real.getIssue(key, f);
+        cache.issue.set(ck, i);
+      }
       await ensureLogs([i]);
       return rewind(i);
     },
     async search(jql, f) {
-      const rs = await real.search(jql, f);
+      const ck = `${jql}|${f.join(',')}`;
+      let rs = cache.search.get(ck);
+      if (!rs) {
+        rs = await real.search(jql, f);
+        cache.search.set(ck, rs);
+      }
       await ensureLogs(rs);
       return rs.map(rewind);
     },
@@ -238,6 +266,99 @@ function isCorrect(
   return classification === 'ask_other';
 }
 
+// ─────────────────────────────────────────────────────────────
+// 변형
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 시험할 변형. **진단에서 나온 것만 사전 등록한다.**
+ *
+ * 조합을 늘려 가며 최고를 고르면 표본(KQ 35 · GW 19)의 잡음에 맞춰진다.
+ * 그래서 후보를 미리 정해 두고, 이긴 것은 **다른 기간 표본으로 재확인**한다.
+ *
+ * 넷 다 `ctx` 로만 표현된다 — 판정 코드를 한 줄도 안 고치고 잰다.
+ *   dropTier4      `tiers` 에서 ref_owner 를 뺀다
+ *   dropTypeFilter `devIssueTypes: []`
+ *     · Tier 2 는 `devKids.length === 0` → `widened` 로 전체를 후보로 본다
+ *     · Tier 4 는 `continue` 로 개발 후보가 전멸하고 참조 담당자만 남는다
+ *   두 티어에 미치는 방향이 반대라, 이 변형은 "타입 필터 해제" 라기보다
+ *   **"Tier 2 확대 + Tier 4 축소"** 로 읽어야 한다.
+ */
+interface Variant {
+  name: string;
+  dropTier4?: boolean;
+  dropTypeFilter?: boolean;
+}
+
+const VARIANTS: Variant[] = [
+  { name: 'base' },
+  { name: 'no-t4', dropTier4: true },
+  { name: 'no-type', dropTypeFilter: true },
+  { name: 'no-t4+no-type', dropTier4: true, dropTypeFilter: true },
+];
+
+interface ScoreDeps {
+  jira: ReturnType<typeof createJiraClient>;
+  cache: ReadCache;
+  cfg: QaRouterConfig;
+  projectKey: string;
+  derived: NonNullable<QaRouterState['derived']>;
+  memberIds: Set<string>;
+  tiers: JudgeTier[];
+  devIssueTypes: string[] | undefined;
+}
+
+async function scoreAll(samples: Sample[], d: ScoreDeps): Promise<Scored[]> {
+  const out: Scored[] = [];
+  for (const s of samples) {
+    const port = rewindingPort(
+      d.jira,
+      s.at,
+      d.cfg.coAssigneeField ?? null,
+      d.cache
+    );
+    /*
+      대상 티켓도 되감아서 넘긴다. 이게 없으면 Tier 1 이 담당자 칸에서
+      정답을 그냥 읽는다 — 이 스크립트의 존재 이유다.
+    */
+    const target = await port.getIssue(s.key, [
+      'summary',
+      'labels',
+      'assignee',
+      'parent',
+      'issuetype',
+      ...(d.cfg.coAssigneeField ? [d.cfg.coAssigneeField] : []),
+    ]);
+    const r = await judge(target, port, {
+      projectKey: d.projectKey,
+      fixVersion: null,
+      cycleAxisField: d.derived.cycleAxisField,
+      triageAccountId: d.cfg.triageAccountId,
+      jiraFilterId: d.cfg.jiraFilterId,
+      members: d.derived.members,
+      devIssueTypes: d.devIssueTypes,
+      coAssigneeField: d.cfg.coAssigneeField ?? undefined,
+      tiers: d.tiers,
+    });
+    const expectedIsMember = d.memberIds.has(s.expected);
+    out.push({
+      ...s,
+      got: r.accountId ?? null,
+      via: r.via,
+      classification: r.classification,
+      reason: r.reason,
+      expectedIsMember,
+      ok: isCorrect(
+        s.expected,
+        expectedIsMember,
+        r.accountId ?? null,
+        r.classification
+      ),
+    });
+  }
+  return out;
+}
+
 async function main() {
   // 리허설: 이 스크립트는 **읽기만** 한다.
   repo.setWritesDisabled(true);
@@ -253,6 +374,16 @@ async function main() {
   const want = arg('config');
   const days = Number(arg('days') ?? '120');
   const limit = Number(arg('limit') ?? '400');
+  /*
+    ── 겹치지 않는 기간으로 재확인하려고 둔다 ──
+
+    변형을 여러 개 돌려 최고를 고르면 그 표본의 잡음에 맞춰진다(과적합).
+    이긴 변형이 **다른 기간**에서도 이겨야 믿을 수 있다.
+
+      --days 90                최근 90일 (튜닝용)
+      --days 240 --skip-days 90  90~240일 전 (검증용, 위와 겹치지 않음)
+  */
+  const skipDays = Number(arg('skip-days') ?? '0');
 
   const configs = (await repo.listConfigs()).filter(
     (c) => !want || c.name === want
@@ -297,7 +428,9 @@ async function main() {
     const jql =
       `project = "${projectKey}"` +
       (derived.issueType ? ` AND issuetype = "${derived.issueType}"` : '') +
-      ` AND updated >= -${days}d ORDER BY updated DESC`;
+      ` AND updated >= -${days}d` +
+      (skipDays > 0 ? ` AND updated <= -${skipDays}d` : '') +
+      ` ORDER BY updated DESC`;
     const pool = await jira.searchAll(
       jql,
       ['summary', 'labels', 'assignee', 'parent', 'issuetype'],
@@ -333,54 +466,54 @@ async function main() {
 
     console.log(
       `\n═══ ${cfg.name} · 표본 ${samples.length}건 ` +
-        `(최근 ${days}일 ${pool.length}건 중 트리아지 경유 + 인계 완료)`
+        `(${skipDays > 0 ? `${skipDays}~${days}일 전` : `최근 ${days}일`} ` +
+        `${pool.length}건 중 트리아지 경유 + 인계 완료)`
     );
     if (samples.length === 0) continue;
 
-    const scored: Scored[] = [];
-    for (const s of samples) {
-      const logs = new Map<string, FieldChange[]>();
-      const port = rewindingPort(
+    /*
+      Jira 읽기를 **변형 전체가 공유한다.** 같은 데이터로 채점해야 차이가
+      변형 때문이라고 말할 수 있다.
+    */
+    const cache = newReadCache();
+    const baseTiers = cfg.judgeTiers ?? JUDGE_TIERS;
+    const run = (v: Variant) =>
+      scoreAll(samples, {
         jira,
-        s.at,
-        cfg.coAssigneeField ?? null,
-        logs
-      );
-      /*
-        대상 티켓도 되감아서 넘긴다. 이게 없으면 Tier 1 이 담당자 칸에서
-        정답을 그냥 읽는다 — 이 스크립트의 존재 이유다.
-      */
-      const target = await port.getIssue(s.key, [
-        'summary',
-        'labels',
-        'assignee',
-        'parent',
-        'issuetype',
-        ...(cfg.coAssigneeField ? [cfg.coAssigneeField] : []),
-      ]);
-      const r = await judge(target, port, {
+        cache,
+        cfg,
         projectKey,
-        fixVersion: null,
-        cycleAxisField: derived.cycleAxisField,
-        triageAccountId: cfg.triageAccountId,
-        jiraFilterId: cfg.jiraFilterId,
-        members: derived.members,
-        devIssueTypes: cfg.devIssueTypeName ? [cfg.devIssueTypeName] : undefined,
-        coAssigneeField: cfg.coAssigneeField ?? undefined,
-        tiers: cfg.judgeTiers ?? undefined,
+        derived,
+        memberIds,
+        tiers: v.dropTier4
+          ? baseTiers.filter((t) => t !== 'ref_owner')
+          : baseTiers,
+        devIssueTypes: v.dropTypeFilter
+          ? []
+          : cfg.devIssueTypeName
+            ? [cfg.devIssueTypeName]
+            : undefined,
       });
-      const expectedIsMember = memberIds.has(s.expected);
-      scored.push({
-        ...s,
-        got: r.accountId ?? null,
-        via: r.via,
-        classification: r.classification,
-        reason: r.reason,
-        expectedIsMember,
-        ok: isCorrect(s.expected, expectedIsMember, r.accountId ?? null, r.classification),
-      });
+
+    if (arg('variants') !== null) {
+      const rows: { name: string; scored: Scored[] }[] = [];
+      for (const v of VARIANTS) {
+        // 순서대로 돈다. 캐시가 차 있어 두 번째부터는 Jira 왕복이 거의 없다.
+        rows.push({ name: v.name, scored: await run(v) });
+      }
+      variantTable(rows);
+      const save = arg('save');
+      if (save) {
+        writeFileSync(
+          save,
+          JSON.stringify({ config: cfg.name, variants: rows }, null, 2)
+        );
+        console.log(`\n저장: ${save}`);
+      }
+      continue;
     }
 
+    const scored = await run({ name: 'base' });
     report(scored);
     const save = arg('save');
     if (save) {
@@ -475,6 +608,69 @@ function report(scored: Scored[]) {
       );
       console.log(`      ${s.summary.slice(0, 66)}`);
     }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 변형 비교표
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 변형을 한 표로 세운다.
+ *
+ * ── 왜 한 숫자로 안 줄이나 ──
+ *
+ * 정확도와 커버리지는 서로 당긴다. 답을 덜 하면 정확도가 오르고, 많이 하면
+ * 내린다. F1 처럼 하나로 합치면 **어느 쪽을 잃었는지 사라진다** — 그리고
+ * 여기서 두 손실의 값이 다르다.
+ *
+ *   오지목  엉뚱한 팀원이 남의 일을 본다 (신뢰를 깎는다)
+ *   놓침    담당자가 모른 채 지나간다 (원래 상태로 돌아간다)
+ *
+ * 어느 쪽이 더 비싼지는 팀이 정할 문제라 코드가 가중치를 정하지 않는다.
+ * 대신 둘을 나란히 보여 주고 사람이 고르게 한다.
+ */
+function variantTable(rows: { name: string; scored: Scored[] }[]) {
+  const pct = (n: number, d: number) =>
+    d === 0 ? '  - ' : `${String(Math.round((n / d) * 100)).padStart(3)}%`;
+
+  console.log(
+    '\n변형            정확도(우리팀)   커버리지      오지목  놓침   타팀"아님"'
+  );
+  console.log('─'.repeat(74));
+  for (const r of rows) {
+    const mine = r.scored.filter((s) => s.expectedIsMember);
+    const ans = mine.filter((s) => s.got);
+    const ok = ans.filter((s) => s.ok);
+    const bad = ans.filter((s) => !s.ok);
+    const misnamed = bad.filter((s) => s.classification !== 'ask_other');
+    const missed = bad.filter((s) => s.classification === 'ask_other');
+    const theirs = r.scored.filter((s) => !s.expectedIsMember);
+    const theirsOk = theirs.filter((s) => s.ok);
+    console.log(
+      `${r.name.padEnd(15)} ` +
+        `${pct(ok.length, ans.length)} ${String(`${ok.length}/${ans.length}`).padEnd(8)} ` +
+        `${pct(ans.length, mine.length)} ${String(`${ans.length}/${mine.length}`).padEnd(8)} ` +
+        `${String(misnamed.length).padStart(4)}  ${String(missed.length).padStart(4)}  ` +
+        `${theirs.length ? `${theirsOk.length}/${theirs.length}` : '-'}`
+    );
+  }
+
+  // 단계별로 어디가 달라졌나 — 표 하나로는 원인이 안 보인다
+  console.log('\n단계별 (우리 팀 건 · 맞음/답함)');
+  const tiers = [...new Set(rows.flatMap((r) => r.scored.map((s) => s.via)))]
+    .filter((v) => v !== 'none')
+    .sort();
+  console.log(`${''.padEnd(15)} ${tiers.map((t) => t.padStart(12)).join('')}`);
+  for (const r of rows) {
+    const cells = tiers.map((t) => {
+      const v = r.scored.filter((s) => s.expectedIsMember && s.via === t);
+      return (v.length === 0
+        ? '-'
+        : `${v.filter((s) => s.ok).length}/${v.length}`
+      ).padStart(12);
+    });
+    console.log(`${r.name.padEnd(15)} ${cells.join('')}`);
   }
 }
 
