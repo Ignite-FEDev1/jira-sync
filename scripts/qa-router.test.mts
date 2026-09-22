@@ -35,6 +35,11 @@ import {
   extractJqlStrings,
   pickLedgerFixVersion,
 } from '../lib/services/qa-router/ledger-jql';
+import {
+  findTriageHandoff,
+  flattenChanges,
+  valueAt,
+} from '../lib/services/qa-router/rewind';
 import { DEPLOY_KINDS } from '../lib/services/qa-router/types';
 import type { DeployCycle } from '../lib/services/qa-router/types';
 import {
@@ -3656,4 +3661,143 @@ test('상태 — 배포일이 지났다고 다 "조치 필요" 는 아니다', (
   const unknown = at('2026-09-16T05:00:00Z', null);
   assert.equal(unknown.label, '차수 완료');
   assert.equal(unknown.actionable, false);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 티켓 상태 되감기
+//
+// 백테스트의 전제다. 판정 당시 상태로 안 되감으면 대상 티켓의 담당자 칸에
+// 정답이 이미 들어가 있어서 Tier 1 이 추론 없이 답을 읽는다 — 100% 가
+// 나오지만 아무것도 증명하지 않는다.
+//
+// 이 계산이 틀리면 측정 전체가 조용히 거짓이 되므로 여기서 고정한다.
+// ─────────────────────────────────────────────────────────────
+
+/** 실측 모양: bulkfetch 는 created 를 epoch ms **문자열**로 준다. */
+const CL_BULK = {
+  issueId: '100',
+  changeHistories: [
+    { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'qa' }] },
+    { created: '2000', items: [{ fieldId: 'assignee', from: 'qa', to: 'triage' }] },
+    { created: '3000', items: [{ fieldId: 'assignee', from: 'triage', to: 'park' }] },
+  ],
+};
+
+test('flattenChanges — epoch ms 문자열과 ISO 를 둘 다 읽고 시각순으로 정렬한다', () => {
+  const mixed = {
+    changeHistories: [
+      // 일부러 거꾸로 넣는다. bulkfetch 는 최신을 먼저 준다.
+      { created: '2026-09-14T00:00:00.000Z', items: [{ fieldId: 'assignee', from: 'a', to: 'b' }] },
+      { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'a' }] },
+    ],
+  };
+  const cs = flattenChanges(mixed);
+  assert.equal(cs.length, 2);
+  assert.equal(cs[0].at, 1000);
+  assert.equal(cs[1].at, Date.parse('2026-09-14T00:00:00.000Z'));
+  assert.ok(cs[0].at < cs[1].at);
+});
+
+test('flattenChanges — 시각을 못 읽은 항목은 버린다', () => {
+  /*
+    0 으로 두면 "아주 오래전" 으로 취급돼 되감기에서 조용히 결과를 바꾼다.
+    모르는 것을 아는 척하지 않는다.
+  */
+  const cs = flattenChanges({
+    changeHistories: [
+      { created: 'not-a-date', items: [{ fieldId: 'assignee', to: 'x' }] },
+      { created: undefined, items: [{ fieldId: 'assignee', to: 'y' }] },
+      { created: '500', items: [{ fieldId: 'assignee', to: 'z' }] },
+    ],
+  });
+  assert.equal(cs.length, 1);
+  assert.equal(cs[0].to, 'z');
+});
+
+test('valueAt — 그 시각의 담당자를 되돌린다', () => {
+  const cs = flattenChanges(CL_BULK);
+  // 지금은 park 이 쥐고 있다
+  assert.equal(valueAt('park', cs, 'assignee', 5000), 'park');
+  // 트리아지 배정(2000) 시점 — **정답(park)이 보이면 안 된다**
+  assert.equal(valueAt('park', cs, 'assignee', 2000), 'triage');
+  // 그 전에는 qa
+  assert.equal(valueAt('park', cs, 'assignee', 1500), 'qa');
+  // 아무것도 없던 때
+  assert.equal(valueAt('park', cs, 'assignee', 500), null);
+});
+
+test('valueAt — 기준 시각의 변경은 이미 일어난 것으로 본다', () => {
+  /*
+    판정은 트리아지 배정 **직후**에 돈다. 그 배정까지 되돌리면 봇이 실제로
+    보는 것과 다른 상태(배정 전 담당자)를 채점하게 된다.
+  */
+  const cs = flattenChanges(CL_BULK);
+  assert.equal(valueAt('park', cs, 'assignee', 2000), 'triage');
+  assert.equal(valueAt('park', cs, 'assignee', 1999), 'qa');
+});
+
+test('valueAt — 다른 필드의 변경에 영향받지 않는다', () => {
+  const cs = flattenChanges({
+    changeHistories: [
+      { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'park' }] },
+      { created: '2000', items: [{ fieldId: 'status', from: 'open', to: 'done' }] },
+      { created: '3000', items: [{ fieldId: 'customfield_10132', from: null, to: 'son' }] },
+    ],
+  });
+  assert.equal(valueAt('park', cs, 'assignee', 1500), 'park');
+  // 공동담당자는 1500 시점에 아직 비어 있었다
+  assert.equal(valueAt('son', cs, 'customfield_10132', 1500), null);
+});
+
+test('findTriageHandoff — 트리아지 구간과 인계 대상을 찾는다', () => {
+  const h = findTriageHandoff(flattenChanges(CL_BULK), 'triage');
+  assert.equal(h?.assignedAt, 2000);
+  assert.equal(h?.handedTo, 'park');
+  assert.equal(h?.handedAt, 3000);
+});
+
+test('findTriageHandoff — 아직 트리아지가 쥐고 있으면 정답이 없다', () => {
+  const h = findTriageHandoff(
+    flattenChanges({
+      changeHistories: [
+        { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'triage' }] },
+      ],
+    }),
+    'triage'
+  );
+  assert.equal(h?.assignedAt, 1000);
+  // 표본에서 빠져야 한다 — 채점할 정답이 없다
+  assert.equal(h?.handedTo, null);
+});
+
+test('findTriageHandoff — 되돌아온 티켓은 마지막 구간을 쓴다', () => {
+  /*
+    트리아지 → 박 → 트리아지 → 손. 앞 구간의 판정이 틀렸다는 뜻이므로
+    가장 최근 것이 지금 코드가 답해야 하는 문제에 가깝다.
+  */
+  const h = findTriageHandoff(
+    flattenChanges({
+      changeHistories: [
+        { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'triage' }] },
+        { created: '2000', items: [{ fieldId: 'assignee', from: 'triage', to: 'park' }] },
+        { created: '3000', items: [{ fieldId: 'assignee', from: 'park', to: 'triage' }] },
+        { created: '4000', items: [{ fieldId: 'assignee', from: 'triage', to: 'son' }] },
+      ],
+    }),
+    'triage'
+  );
+  assert.equal(h?.assignedAt, 3000);
+  assert.equal(h?.handedTo, 'son');
+});
+
+test('findTriageHandoff — 트리아지를 거치지 않은 티켓은 표본이 아니다', () => {
+  const h = findTriageHandoff(
+    flattenChanges({
+      changeHistories: [
+        { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'park' }] },
+      ],
+    }),
+    'triage'
+  );
+  assert.equal(h, null);
 });
