@@ -329,11 +329,10 @@ export function cycleStage(
     며칠 동안은 봇이 할 일이 남아 있다 (운영 배포 알림). 그 구간은 여전히
     "알림 중" 이 맞다.
 
-    배포일은 출처가 여럿이라(스레드 > 배포대장 본문 > 페이지 제목) 가장
-    늦은 것을 쓴다. 일정이 밀렸는데 옛 날짜로 끝났다고 접으면, 정작 알려야
-    할 배포 당일에 조용해진다.
+    배포일은 배포대장 제목과 본문 중 **늦은 것**을 쓴다. 일정이 밀렸는데
+    옛 날짜로 끝났다고 접으면, 정작 알려야 할 배포 당일에 조용해진다.
   */
-  const deployed = [cycle.threadDeployYmd, cycle.prodYmd, cycle.deployYmd]
+  const deployed = [cycle.prodYmd, cycle.deployYmd]
     .filter((d): d is string => Boolean(d))
     .sort()
     .pop();
@@ -486,13 +485,11 @@ export function staleFilterCycle(
 
 /** 날짜를 말하는 출처. 신뢰 순서대로다. */
 export type ScheduleSource =
-  | 'thread'
   | 'ledgerTitle'
   | 'fixVersion'
   | 'ledgerBody';
 
 export const SOURCE_LABEL: Record<ScheduleSource, string> = {
-  thread: 'QA 스레드',
   ledgerTitle: '배포대장 제목',
   fixVersion: 'Jira 릴리스',
   ledgerBody: '배포대장 본문',
@@ -503,19 +500,18 @@ export interface ResolvedYmd {
   /** 이 값을 준 출처 */
   source: ScheduleSource | null;
   /**
-   * 1순위(QA 스레드)를 못 읽어 아래 순위로 정한 값인가.
-   * 화면에 "추정"이라고 적어야 하는 경우다.
+   * 더 믿을 출처를 못 읽어 아래 순위로 정한 값인가.
+   *
+   * **지금은 항상 false 다.** 배포대장 하나만 보기 때문에 그걸 읽었으면
+   * 확정이고, 못 읽었으면 값 자체가 없다. 전에는 QA 스레드가 1순위였고
+   * 스레드가 없는 대상(GW)은 "추정" 배지가 영구히 붙어 있었다.
+   *
+   * 자리를 남겨 둔다 — 출처가 다시 둘 이상이 되면 쓸 곳이 여기다.
    */
   estimated: boolean;
   /** 값이 다른 나머지 출처. 배포대장이 어긋나 있다는 신호라 숨기지 않는다. */
   others: { source: ScheduleSource; ymd: string }[];
-  /**
-   * 말해야 하는데 아직 값이 없는 출처.
-   *
-   * "추정"이라고만 적으면 무엇을 못 읽어서 추정인지 알 수 없다. QA 종료는
-   * 규칙상 **배포대장 종료 AND 스레드 종료 공유** 둘 다 만족해야 하는데,
-   * 한쪽만 보고 정한 값이라는 사실이 화면에 있어야 한다.
-   */
+  /** 말해야 하는데 아직 값이 없는 출처. `estimated` 와 같은 이유로 지금은 늘 빈 배열이다. */
   pending: ScheduleSource[];
 }
 
@@ -545,49 +541,73 @@ export function fixVersionYmd(fixVersion: string): string | null {
 /**
  * 운영 배포일.
  *
- * 신뢰 1·2위(QA 스레드 제목 · 배포대장 제목)끼리만 늦은 쪽을 고른다.
- * 3위(fixVersion)와 4위(배포대장 본문)는 표시용이다 — 잘못 만들어진 버전
- * 하나가 전체를 끌고 가면 안 된다.
+ * **배포대장 제목과 본문 중 늦은 쪽**이다. 제목은 항상 있고(그걸로 차수를
+ * 찾는다) 본문은 없을 수 있으니 제목이 기준선이 된다. 일정이 밀리면 제목이
+ * 먼저 갱신되므로 늦은 쪽을 고르는 것이 맞다.
+ *
+ * 전에는 QA 스레드 제목이 1순위였다. 그 경로를 걷어냈다 — 개인 토큰이
+ * 필요하고 KQ 에만 있는 흐름이라 다른 프로젝트로 옮길 수 없었다. 게다가
+ * 스레드가 없는 대상(GW)은 `estimated` 가 늘 true 라 화면에 "추정" 배지가
+ * 영구히 붙어 있었다. 못 찾을 것을 기다리는 표시였다.
+ *
+ * `fixVersion` 은 표시용으로만 남긴다 — 잘못 만들어진 버전 하나가 전체를
+ * 끌고 가면 안 된다.
  */
 export function resolveDeployYmd(cycle: DeployCycle): ResolvedYmd {
-  const picked = latest([
-    { source: 'thread', ymd: cycle.threadDeployYmd },
+  const cands: { source: ScheduleSource; ymd: string | null }[] = [
     { source: 'ledgerTitle', ymd: cycle.deployYmd },
-  ]);
-  const extra: { source: ScheduleSource; ymd: string | null }[] = [
-    { source: 'fixVersion', ymd: fixVersionYmd(cycle.fixVersion) },
     { source: 'ledgerBody', ymd: cycle.prodYmd },
   ];
+  const picked = latest(cands);
+  /*
+    진 후보도 `others` 에 담는다.
+
+    여기 들어가는 값은 화면에서 "불일치" 로 표시된다. 제목과 본문이 서로
+    다른 날을 가리키는 것은 대장 자체가 어긋났다는 뜻이라, 늦은 쪽을 고른
+    뒤 조용히 버리면 사람이 고칠 기회를 잃는다 — 실측 release_20260914 가
+    제목 09-14, 본문 09-10 이었다.
+  */
+  const extra: { source: ScheduleSource; ymd: string | null }[] = [
+    ...cands,
+    { source: 'fixVersion', ymd: fixVersionYmd(cycle.fixVersion) },
+  ];
+  /*
+    같은 날짜는 한 번만 적는다. 화면이 `불일치 09-14 · 09-14` 를 내면 읽는
+    사람은 두 날이 다른 줄 알고 두 번 확인한다. 출처 이름은 먼저 오는 쪽,
+    즉 대장 쪽을 남긴다 — fixVersion 은 그 날짜를 보고 만든 파생값이다.
+  */
+  const seen = new Set<string>();
   const others = extra.filter(
-    (o): o is { source: ScheduleSource; ymd: string } =>
-      !!o.ymd && o.ymd !== picked?.ymd
+    (o): o is { source: ScheduleSource; ymd: string } => {
+      if (!o.ymd || o.ymd === picked?.ymd || seen.has(o.ymd)) return false;
+      seen.add(o.ymd);
+      return true;
+    }
   );
   return {
     ymd: picked?.ymd ?? null,
     source: picked?.source ?? null,
-    estimated: !cycle.threadDeployYmd,
+    // 배포대장에서 읽은 값이다. 기다릴 다른 출처가 없으므로 추정이 아니다.
+    estimated: false,
     others,
-    pending: cycle.threadDeployYmd ? [] : ['thread'],
+    pending: [],
   };
 }
 
 /**
- * QA 종료일.
+ * QA 종료일. 배포대장 본문에서 읽는다.
  *
- * 종료는 배포대장 일정과 QA 스레드 공유가 **둘 다** 만족해야 하므로
- * 늦은 쪽이 답이다. 대장 9/10 · 스레드 9/13 이면 9/13.
+ * 전에는 QA 스레드 공유와 늦은 쪽을 골랐는데, 스레드 경로를 걷어내면서
+ * 남은 출처가 배포대장 하나다. 본문에 일정이 없는 대상(GW)은 null 이고,
+ * 그 줄은 알림에서 저절로 빠진다.
  */
 export function resolveQaEndYmd(cycle: DeployCycle): ResolvedYmd {
-  const picked = latest([
-    { source: 'thread', ymd: cycle.threadQaEndYmd },
-    { source: 'ledgerBody', ymd: cycle.qaEndYmd },
-  ]);
   return {
-    ymd: picked?.ymd ?? null,
-    source: picked?.source ?? null,
-    estimated: !cycle.threadQaEndYmd,
+    ymd: cycle.qaEndYmd ?? null,
+    source: cycle.qaEndYmd ? 'ledgerBody' : null,
+    estimated: false,
     others: [],
-    pending: cycle.threadQaEndYmd ? [] : ['thread'],
+    pending: [],
   };
 }
 

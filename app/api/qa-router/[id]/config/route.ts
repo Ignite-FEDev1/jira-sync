@@ -59,7 +59,6 @@ interface Body {
    */
   coAssigneeField?: unknown;
   slackOpsChannelId?: unknown;
-  qaThreadChannelId?: unknown;
   planIssueTypeId?: unknown;
   devIssueTypeId?: unknown;
   confluenceDeployRootId?: unknown;
@@ -78,8 +77,9 @@ interface Body {
     쓰이므로 여기서 update 에 넣지 않기만 하면 기존 값이 유지된다.
     받아 주면 화면 밖 경로로 다시 들어와 아무도 모르게 바뀔 수 있다.
 
-    qaThreadTitlePattern 은 받지 않는다 — 컬럼은 있지만 읽는 코드가 없다.
-    저장되는데 아무 일도 안 일어나는 값은 거짓말이다.
+    qa_thread_* 두 컬럼도 받지 않는다. QA 스레드에서 완료를 읽는 경로를
+    걷어내면서 읽는 코드가 사라졌다 — 저장되는데 아무 일도 안 일어나는
+    값은 거짓말이다.
 
     coAssigneeField 는 **이제 받는다.** judge/outcome/tick 이 전부 이 값을
     읽도록 바꿨다 (전에는 모듈 상수였다). 값은 사람이 고르는 게 아니라
@@ -129,7 +129,6 @@ export type ConfigField =
   | 'coAssigneeField'
   | 'slackChannelId'
   | 'slackOpsChannelId'
-  | 'qaThreadChannelId'
   | 'planIssueTypeId'
   | 'devIssueTypeId'
   | 'confluenceDeployRootId'
@@ -339,10 +338,9 @@ function checkPipeline(
     row.deploy_kinds = kinds;
   }
 
-  // ── 채널 두 개. 비우면 폴백(알림 채널)을 쓰라는 뜻이라 null 로 저장한다. ──
+  // ── 운영 채널. 비우면 폴백(알림 채널)을 쓰라는 뜻이라 null 로 저장한다. ──
   for (const [key, column, label] of [
     ['slackOpsChannelId', 'slack_ops_channel_id', '운영 채널'],
-    ['qaThreadChannelId', 'qa_thread_channel_id', 'QA 스레드 채널'],
   ] as const) {
     if (b[key] === undefined) continue;
     const v = typeof b[key] === 'string' ? (b[key] as string).trim() : '';

@@ -48,8 +48,6 @@ export type ConfigRow = {
   slack_channel_id: string;
   slack_fallback_channel_id: string | null;
   slack_ops_channel_id: string | null;
-  qa_thread_channel_id: string | null;
-  qa_thread_title_pattern: string | null;
   plan_issue_type_id: string | null;
   dev_issue_type_id: string | null;
   plan_issue_type_name: string | null;
@@ -125,8 +123,6 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
       그때 undefined 가 흘러가면 JQL 이 `issuetype = undefined` 가 된다.
       폴백 값은 컬럼이 생기기 전에 코드에 박혀 있던 값과 똑같다.
     */
-    qaThreadChannelId: r.qa_thread_channel_id ?? null,
-    qaThreadTitlePattern: r.qa_thread_title_pattern ?? '%s 정기배포 QA',
     planIssueTypeId: r.plan_issue_type_id ?? '10001',
     devIssueTypeId: r.dev_issue_type_id ?? '10205',
     planIssueTypeName: r.plan_issue_type_name ?? '스토리',

@@ -938,29 +938,6 @@ export default function QaRouterSettingsPage() {
             ]}
           />
           <Fixed
-            label="QA 스레드 채널"
-            value={config.qaThreadChannelId ?? '없음'}
-            /*
-              ID 를 눌러 열 수 있게 한다.
-
-              이름을 대신 띄우는 것이 더 낫겠지만, `tick.ts` 는 알림 채널
-              둘만 조회한다 — 여기 이름을 채우려면 매 틱마다 Slack 호출이
-              하나 늘고, 그 채널은 봇이 없을 수도 있어 "문제" 로 오인될
-              위험까지 생긴다. 접힌 목록의 라벨 하나에 치를 값이 아니다.
-              한 번의 클릭이면 어느 채널인지 알 수 있으면 충분하다.
-            */
-            href={
-              config.qaThreadChannelId
-                ? `https://slack.com/app_redirect?channel=${config.qaThreadChannelId}`
-                : undefined
-            }
-            reasons={[
-              'QA 팀이 정기배포 QA 스레드를 여는 채널입니다',
-              '스레드는 제목으로 알아서 찾습니다 (9/10(목) 정기배포 QA)',
-              '봇에 channels:history 가 없으면 무엇을 넣어도 안 읽힙니다',
-            ]}
-          />
-          <Fixed
             label="공동담당자 필드"
             value={config.coAssigneeField}
             reasons={[
@@ -975,14 +952,6 @@ export default function QaRouterSettingsPage() {
             reasons={[
               '늘리면 그만큼 장애를 늦게 압니다',
               '사람이 조정할 근거가 없습니다',
-            ]}
-          />
-          <Fixed
-            label="QA 스레드 제목"
-            value="[M/D(요일) 정기배포 QA]"
-            reasons={[
-              '제목을 정규식으로 찾습니다',
-              '설정으로 빼려면 패턴 언어가 하나 더 필요합니다',
             ]}
           />
         </dl>
@@ -1006,14 +975,13 @@ export default function QaRouterSettingsPage() {
  * ⑤ 가 지금 무엇을 만들어 내고 있나.
  *
  * 전에는 `이번 차수 release_… · 기획 7/7 완료 · 마지막 수집 1일 전` 한 줄이
- * 전부였다. 그 줄이 숨긴 것 셋을 실측으로 찾았다.
+ * 전부였다. 그 줄이 숨긴 것 둘을 실측으로 찾았다.
  *
  *   · **수집이 밀려 있었다.** 09시·17시에 걷기로 해 놓고 마지막이 어제
  *     13:26 이었다 — 오늘 09시 슬롯을 놓쳤는데 "1일 전" 이라고만 했다.
- *   · **QA 스레드를 못 읽고 있었다.** 7/7 은 마지막으로 읽은 옛 값이고,
- *     지금은 토큰이 없어 갱신되지 않는다. 그런데 지금 값처럼 보였다.
- *   · **Jira 기준으로는 0/7 이었다.** 두 축이 이렇게 벌어지면 그 자체가
- *     볼거리인데 한쪽만 보여줬다.
+ *   · **7/7 은 지금 값이 아니었다.** 그때 완료 수는 QA 스레드에서 읽었는데
+ *     프로덕션에 읽기 토큰이 없어 갱신이 멈춰 있었다. 지금은 Jira 상태로
+ *     세므로 이 경로 자체가 없다.
  */
 function CycleLive({
   cycles,
@@ -1048,8 +1016,6 @@ function CycleLive({
 
   const p = active.planProgress;
   const overdue = overdueSlot(hours, active.planCollectedAt, now);
-  // 못 읽은 이유가 있으면 그 숫자는 "지금" 이 아니라 "마지막으로 안" 값이다.
-  const stale = p?.threadUnavailable ?? null;
   /*
     fixVersion·차수 건수는 신원이지 문제가 아니다. 전에는 이 둘을 수집
     상태와 한 `<Live bad>` 안에 묶어서, 문제가 있을 때 신원까지 통째로
@@ -1058,8 +1024,14 @@ function CycleLive({
   */
   const hasProblem = !!sideEffect?.error || overdue !== null;
 
-  const done = p ? (stale ? p.ticketDone : p.threadDone) : null;
-  const doneLabel = p && stale ? 'Jira 기준' : 'QA 스레드 기준';
+  /*
+    기획티켓의 Jira 상태가 완료 기준이다.
+
+    전에는 QA 스레드 표에서 읽은 수를 먼저 쓰고, 못 읽었을 때만 Jira 로
+    내려갔다. 그래서 같은 화면이 회차마다 다른 기준으로 숫자를 보여줬다.
+    스레드 경로를 걷어내면서 기준이 하나가 됐다.
+  */
+  const done = p?.ticketDone ?? null;
 
   return (
     <>
@@ -1076,30 +1048,7 @@ function CycleLive({
               </span>
             </span>
             <span className="text-[12px]">기획건 완료</span>
-            <span className="text-[11px] text-muted-foreground">{doneLabel}</span>
-            {/*
-              두 기준이 벌어지는 것은 정상이다 (기획티켓은 QA 통과 뒤에야
-              완료로 넘어간다). 그래서 다른 쪽도 옆에 적는다 — 하나만 보이면
-              "왜 다르지" 를 물을 기회조차 없다.
-            */}
-            {!stale && p.ticketDone !== p.threadDone && (
-              <span className="text-[11px] text-muted-foreground">
-                Jira 기준 {p.ticketDone}
-              </span>
-            )}
           </p>
-          {/* 숫자 바로 아래에 둔다 — 무엇을 설명하는 문장인지 붙어 있어야 한다. */}
-          {stale && (
-            <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
-              {/*
-                `stale` 은 배치가 남긴 문구인데, 예외 경로에서는 가공 안 된
-                `Error.message` 가 그대로 온다(`tick.ts`). 길이를 잘라 화면이
-                통째로 밀리는 것만 막는다 — 원문을 버리지는 않는다. 그게
-                유일한 단서인 경우가 있다.
-              */}
-              QA 스레드를 못 읽어 Jira 기준으로만 셉니다 : {stale.slice(0, 160)}
-            </p>
-          )}
         </>
       )}
 
@@ -2464,12 +2413,7 @@ function CycleEditor({
     id: config.devIssueTypeId,
     name: config.devIssueTypeName,
   });
-  /*
-    QA 스레드 채널과 수집 시각은 여기서 뺐다.
-      채널   고정값이다. 스레드는 제목으로 알아서 찾고, 지금은 봇에
-             `channels:history` 가 없어 무엇을 넣어도 안 읽힌다
-      시각   "언제 도나" 의 이야기라 ③으로 옮겼다
-  */
+  // 수집 시각은 "언제 도나" 의 이야기라 ③으로 옮겼다.
   const [deployKinds, setDeployKinds] = useState<DeployKind[]>(
     config.deployKinds
   );
@@ -2588,8 +2532,7 @@ function CycleEditor({
         폼의 절반(810px 중 510px)을 쓰고 있었다.
 
           수집 시각    → ② "언제 도나" 로. 같은 질문의 답이 두 화면에 갈려 있었다
-          QA 채널      → "왜 이건 설정에 없나" 로. 채널은 고정이고
-                         스레드는 제목으로 찾는다
+          QA 채널      → 사라졌다. 스레드에서 완료를 읽는 경로 자체를 걷어냈다
 
         티켓 타입만 여기 남긴다 — **진행률의 정의**라 이 단계와 직결이다.
         다만 한 줄로 접는다. 표본이 정한 값과 어긋날 때만 펴면 된다.
@@ -2634,11 +2577,10 @@ function CycleEditor({
         />
       </div>
       {/*
-        `qaThreadChannelId` 와 `planCollectHours` 를 안 보낸다.
+        `planCollectHours` 를 안 보낸다.
 
         API 는 **보낸 것만 바꾼다** (config/route.ts 주석 참고). 안 보내면
-        지금 값이 그대로 남으므로, 여기서 빠졌다고 채널이 비워지지 않는다.
-        수집 시각은 이제 ②("언제 도나")가 보낸다.
+        지금 값이 그대로 남는다. 수집 시각은 이제 ②("언제 도나")가 보낸다.
       */}
       <StageActions
         saving={saving}

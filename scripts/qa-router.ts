@@ -13,8 +13,6 @@
  * 환경변수:
  *   NEXT_PUBLIC_DB_URL, DB_SERVICE_ROLE_KEY   필수
  *   SLACK_BOT_TOKEN                           필수 (xoxb · 발송용)
- *   SLACK_READ_TOKEN                          선택 (xoxp · QA 스레드 읽기용)
- *                                             없으면 스레드 기능만 꺼진다
  *   IGNITE_JIRA_EMAIL, IGNITE_JIRA_API_TOKEN  operator 미지정 시 폴백 (ignite 대상)
  *   HMG_JIRA_EMAIL,    HMG_JIRA_API_TOKEN     operator 미지정 시 폴백 (hmg 대상)
  *                                             폴백도 대상의 인스턴스를 따라간다
@@ -31,7 +29,6 @@ import {
   createConfluenceClient,
   createJiraClient,
   createSlackClient,
-  createSlackReader,
 } from '@/lib/services/qa-router/clients';
 import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
 
@@ -108,27 +105,6 @@ async function main() {
     log,
     dryRun,
   });
-
-  /*
-    ── [배포 전 전환] ────────────────────────────────────────────────
-    읽기는 토큰이 따로다. 발송용 봇 토큰(xoxb)에는 읽기 스코프가 없다 —
-    실측으로 붙어 있는 것이 incoming-webhook·chat:write·usergroups:read·
-    users:read 뿐이고, conversations.history 는 channels:history 를 요구한다.
-
-    지금: 개인 사용자 토큰(xoxp) 을 SLACK_READ_TOKEN 으로 받는다.
-    배포 직전: 봇을 #cpo-qa 에 초대 → channels:history 스코프 추가 →
-              SLACK_READ_TOKEN 값만 봇 토큰으로 교체. 코드는 그대로.
-
-    없으면 넘기지 않는다 — 스레드 기능만 꺼지고 판정·알림은 그대로 돈다.
-    ──────────────────────────────────────────────────────────────────
-  */
-  const readToken = process.env.SLACK_READ_TOKEN;
-  const slackReader = readToken
-    ? createSlackReader({ token: readToken, log })
-    : undefined;
-  if (!slackReader) {
-    log('SLACK_READ_TOKEN 없음 · QA 스레드 읽기를 건너뜁니다');
-  }
 
   log(
     `시작 · holder=${HOLDER} · 루프 ${iterations}회 × ${intervalMs / 1000}초${dryRun ? ' · DRY RUN' : ''}`
@@ -215,7 +191,6 @@ async function main() {
             jira,
             confluence,
             slack,
-            slackReader,
             jiraBaseUrl: jiraBase,
             log,
           },

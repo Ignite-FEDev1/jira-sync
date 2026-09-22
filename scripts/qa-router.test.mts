@@ -31,6 +31,10 @@ import {
   resolveQaEndYmd,
   staleFilterCycle,
 } from '../lib/services/qa-router/status';
+import {
+  extractJqlStrings,
+  pickLedgerFixVersion,
+} from '../lib/services/qa-router/ledger-jql';
 import { DEPLOY_KINDS } from '../lib/services/qa-router/types';
 import type { DeployCycle } from '../lib/services/qa-router/types';
 import {
@@ -58,20 +62,11 @@ import { resolvePersonFields } from '../lib/services/qa-router/derive';
 import { JUDGE_TIERS } from '../lib/services/qa-router/types';
 
 import {
-  parseThreadStatus,
-  parseThreadTable,
-  threadTableFrom,
-} from '../lib/services/qa-router/plan-tickets';
-import {
   findAssigned,
   findViaRefOwner,
   isQaBatchTicket,
   judge,
 } from '../lib/services/qa-router/judge';
-import {
-  parseThreadTitle,
-  shouldLookForThread,
-} from '../lib/services/qa-router/qa-thread';
 import { tokenize } from '../app/admin/qa-router/[id]/slack-preview';
 import { buildDiagram } from '../app/admin/qa-router/[id]/judge-flow';
 import {
@@ -465,6 +460,81 @@ test('parseSchedule — 배포대장 본문에서 QA 기간·운영 배포일을
 test('parseSchedule — 패턴이 없으면 null (예외 아님)', () => {
   const s = parseSchedule('<p>미정</p>', 2026);
   assert.deepEqual(s, { qaStartYmd: null, qaEndYmd: null, prodYmd: null });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 배포대장 본문의 JQL
+//
+// 차수 이름을 제목에서 조립하다가 GW 09-17 을 통째로 놓쳤다. 제목의
+// `(이그나이트)` 를 배포 종류로 읽어 `release_260917` 을 지었는데, 진짜
+// 이름은 `adhoc_260917` 이었다. 그 이름이 **대장 본문에 이미 적혀 있었다.**
+//
+// 아래 문자열은 실제 대장 storage 에서 그대로 떼어 왔다.
+// ─────────────────────────────────────────────────────────────
+
+/** GW · Confluence Jira 매크로. 값이 XML 엔티티로 인코딩돼 있다. */
+const GW_LEDGER = `
+<ac:structured-macro ac:name="jira"><ac:parameter ac:name="maximumIssues">1000</ac:parameter><ac:parameter ac:name="jqlQuery">project = AUTOWAY  and fixVersion IN (&quot;adhoc_2609xx&quot;) and type = &quot;story&quot;        </ac:parameter><ac:parameter ac:name="serverId">cc5ae16a</ac:parameter></ac:structured-macro>
+<ac:structured-macro ac:name="jira"><ac:parameter ac:name="jqlQuery">project = AUTOWAY  and fixVersion IN (&quot;adhoc_260917&quot;) and labels = &quot;FE&quot;    </ac:parameter></ac:structured-macro>
+<ac:structured-macro ac:name="jira"><ac:parameter ac:name="jqlQuery">project = AUTOWAY  and fixVersion IN (&quot;adhoc_260917&quot;) and labels = &quot;BE&quot;    </ac:parameter></ac:structured-macro>`;
+
+/** KQ · 이슈 검색 링크. 매크로가 아니라 URL 이고, 같은 주소가 두 번 들어간다. */
+const KQ_LEDGER = `
+<a href="https://ignitecorp.atlassian.net/issues/?jql=project%20%3D%20%22KQ%22%20AND%20component%20%3D%20FE%20AND%20fixversion%20in%20(release_20260914)%20ORDER%20BY%20created%20DESC">https://ignitecorp.atlassian.net/issues/?jql=project%20%3D%20%22KQ%22%20AND%20component%20%3D%20FE%20AND%20fixversion%20in%20(release_20260914)%20ORDER%20BY%20created%20DESC</a>
+<a href="https://ignitecorp.atlassian.net/issues/?jql=project%20%3D%20%22KQ%22%20and%20component%20%3D%20BE%20and%20fixversion%20in%20(release_20260914)">BE</a>`;
+
+test('extractJqlStrings — 매크로와 검색 링크 두 형태를 다 읽는다', () => {
+  const gw = extractJqlStrings(GW_LEDGER);
+  assert.equal(gw.length, 3);
+  // 엔티티가 풀려야 fixVersion 값을 꺼낼 수 있다
+  assert.ok(gw[1].includes('"adhoc_260917"'));
+  assert.ok(gw[1].includes('labels = "FE"'));
+
+  // href 와 화면 글자에 같은 주소가 들어가도 한 번만 센다
+  const kq = extractJqlStrings(KQ_LEDGER);
+  assert.equal(kq.length, 2);
+  assert.ok(kq[0].includes('component = FE'));
+  assert.ok(kq[0].includes('release_20260914'));
+});
+
+test('pickLedgerFixVersion — Jira 에 있는 이름만 채택한다', () => {
+  /*
+    GW 대장에는 아직 안 채운 자리(`adhoc_2609xx`)가 진짜 이름과 섞여 있다.
+    Jira 버전 목록과 대조하면 그 둘이 저절로 갈린다.
+  */
+  const r = pickLedgerFixVersion(extractJqlStrings(GW_LEDGER), new Set([
+    'adhoc_260917',
+    'release_260723',
+  ]));
+  assert.equal(r.name, 'adhoc_260917');
+  assert.deepEqual(r.dropped, ['adhoc_2609xx']);
+  assert.equal(r.why, null);
+});
+
+test('pickLedgerFixVersion — 버전 목록이 없으면 고르지 않는다', () => {
+  /*
+    검증 없이 첫 번째를 쓰면 빈 자리(`adhoc_2609xx`)를 차수 이름으로 삼는다.
+    그 이름으로는 티켓이 한 건도 안 걸리고, 화면은 조용히 0 이 된다.
+  */
+  const r = pickLedgerFixVersion(extractJqlStrings(GW_LEDGER), new Set());
+  assert.equal(r.name, null);
+  assert.ok(r.why?.includes('대조할 수 없습니다'));
+});
+
+test('pickLedgerFixVersion — 두 차수를 가리키면 고르지 않는다', () => {
+  // 하나를 찍으면 틀렸을 때 조용히 엉뚱한 차수를 집계한다.
+  const r = pickLedgerFixVersion(extractJqlStrings(GW_LEDGER), new Set([
+    'adhoc_260917',
+    'adhoc_2609xx',
+  ]));
+  assert.equal(r.name, null);
+  assert.ok(r.why?.includes('여러 차수'));
+});
+
+test('pickLedgerFixVersion — JQL 에 fixVersion 이 없으면 사유를 남긴다', () => {
+  const r = pickLedgerFixVersion(['project = AUTOWAY and labels = "FE"'], new Set(['x']));
+  assert.equal(r.name, null);
+  assert.ok(r.why?.includes('fixVersion 이 없습니다'));
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -1207,50 +1277,6 @@ test('상태 — 차수 사이에는 폴링이 늦어도 응답 없음이 아니
 });
 
 // ─────────────────────────────────────────────────────────────
-// QA 스레드 표 파싱
-//
-// 엔글 QA 가 스레드에 올리는 "요청 티켓 / 대응상태" 표에서 기획티켓의
-// 완료 여부를 읽는다. Jira 상태만으로는 "개발 전 완료"와 "QA 통과 완료"가
-// 갈리지 않아서 이 표가 두 번째 축이 된다.
-// ─────────────────────────────────────────────────────────────
-
-test('parseThreadStatus: 대응상태를 뜻으로 좁힌다', () => {
-  assert.equal(parseThreadStatus('완료'), 'done');
-  assert.equal(parseThreadStatus('대응중'), 'working');
-  assert.equal(parseThreadStatus('이슈'), 'issue');
-  assert.equal(parseThreadStatus('테스트 대기'), 'waiting');
-  // 모르는 값을 완료로 넘기면 화면이 거짓말을 한다
-  assert.equal(parseThreadStatus('보류'), 'unknown');
-});
-
-test('parseThreadTable: 실제 스레드 표를 읽는다', () => {
-  const table = parseThreadTable(
-    [
-      '요청 티켓\t대응상태',
-      'KQ-18432\t테스트 대기',
-      'KQ-18246\t이슈',
-      'KQ-17670\t완료',
-      'KQ-16870\t대응중',
-    ].join('\n')
-  );
-  // 헤더는 티켓 키가 없어 저절로 걸러진다
-  assert.equal(table.size, 4);
-  assert.equal(table.get('KQ-17670'), 'done');
-  assert.equal(table.get('KQ-18246'), 'issue');
-  assert.equal(table.get('KQ-18432'), 'waiting');
-  assert.equal(table.get('KQ-16870'), 'working');
-});
-
-test('parseThreadTable: 알아볼 수 없는 상태는 담지 않는다', () => {
-  const table = parseThreadTable('KQ-1\t완료\nKQ-2\t???\nKQ-3\t');
-  assert.equal(table.size, 1);
-  assert.equal(table.get('KQ-1'), 'done');
-  // 없는 것과 모르는 것을 같게 두지 않는다
-  assert.equal(table.has('KQ-2'), false);
-  assert.equal(table.has('KQ-3'), false);
-});
-
-// ─────────────────────────────────────────────────────────────
 // Tier 3 · 레이블 참조 담당자
 //
 // QA 팀이 김가빈에게 잘못 배정한 티켓도 레이블에 원 티켓 키를 달고 온다.
@@ -1491,82 +1517,6 @@ test('findAssigned: 팀원 담당자가 팀원 아닌 담당자보다 우선', (
 });
 
 // ─────────────────────────────────────────────────────────────
-// QA 스레드 찾기
-//
-// 엔글 QA 가 차수마다 #cpo-qa 에 "[9/14(월) 정기배포 QA]" 스레드를 판다.
-// 제목에 연도가 없어서 게시 시각으로 보완한다.
-// ─────────────────────────────────────────────────────────────
-
-test('parseThreadTitle: 제목에서 배포일을 읽는다', () => {
-  // 실측 — 2026-08-26 17:52 KST 게시
-  const r = parseThreadTitle(
-    '*[9/14(월) 정기배포 QA]*',
-    new Date('2026-08-26T08:52:59Z')
-  );
-  assert.equal(r?.deployYmd, '2026-09-14');
-});
-
-test('parseThreadTitle: 해를 넘기는 배포를 다음 해로 본다', () => {
-  // 12월에 판 1월 배포 스레드
-  const r = parseThreadTitle(
-    '[1/12(월) 정기배포 QA]',
-    new Date('2026-12-20T02:00:00Z')
-  );
-  assert.equal(r?.deployYmd, '2027-01-12');
-});
-
-test('parseThreadTitle: QA 스레드가 아니면 null', () => {
-  const at = new Date('2026-08-26T08:52:59Z');
-  assert.equal(
-    parseThreadTitle('[공지] 이번주 QA 주간회의 없습니다', at),
-    null
-  );
-  assert.equal(parseThreadTitle('[비정기배포 검토 요청]', at), null);
-  // 날짜가 없으면 어느 차수인지 못 고른다
-  assert.equal(parseThreadTitle('[정기배포 QA]', at), null);
-});
-
-test('shouldLookForThread: 이미 찾았으면 다시 찾지 않는다', () => {
-  assert.equal(
-    shouldLookForThread(
-      { deployYmd: '2026-09-14', qaThreadTs: '1787734379.373189' },
-      '2026-09-09'
-    ),
-    false
-  );
-});
-
-test('shouldLookForThread: 배포일이 한 달 안이면 찾는다', () => {
-  // 실측 — 9/14 스레드는 8/26 에 생겼다 (배포 19일 전)
-  assert.equal(
-    shouldLookForThread({ deployYmd: '2026-09-14' }, '2026-09-09'),
-    true
-  );
-  // 창 경계(+30일)까지는 본다
-  assert.equal(
-    shouldLookForThread({ deployYmd: '2026-10-09' }, '2026-09-09'),
-    true
-  );
-  /*
-    10-12 차수는 33일 뒤라 아직 창 밖이다. 실제로도 그 스레드는 없다 —
-    2주 주기에 배포 19일 전 생성이므로 9/12 쯤부터 창에 들어온다.
-  */
-  assert.equal(
-    shouldLookForThread({ deployYmd: '2026-10-12' }, '2026-09-09'),
-    false
-  );
-  assert.equal(
-    shouldLookForThread({ deployYmd: '2026-10-12' }, '2026-09-12'),
-    true
-  );
-  // 지난 차수는 이제 와서 찾을 이유가 없다
-  assert.equal(
-    shouldLookForThread({ deployYmd: '2026-08-31' }, '2026-09-09'),
-    false
-  );
-});
-
-// ─────────────────────────────────────────────────────────────
 // 일정 판정 — SQL 과 같은 답을 내야 한다
 //
 // 규칙이 SQL(qa_router_milestone·qa_router_latest_ymd·*_workday)과 TS
@@ -1588,48 +1538,39 @@ const CYCLE_0914: DeployCycle = {
   collectedAt: '2026-09-10T00:00:00Z',
 };
 
-test('배포일은 제목을 쓰고 본문은 불일치로 남긴다', () => {
+test('배포일은 제목과 본문 중 늦은 쪽 · 진 쪽은 불일치로 남긴다', () => {
   const r = resolveDeployYmd(CYCLE_0914);
   assert.equal(r.ymd, '2026-09-14');
   assert.equal(r.source, 'ledgerTitle');
-  // 스레드를 못 읽었으니 추정이다.
-  assert.equal(r.estimated, true);
-  // 무엇을 못 읽어서 추정인지도 들고 있어야 화면에 적을 수 있다.
-  assert.deepEqual(r.pending, ['thread']);
+  /*
+    배포대장이 유일한 출처다. 전에는 QA 스레드가 1순위였고 그걸 못 읽으면
+    `estimated: true` + `pending: ['thread']` 로 "추정" 딱지를 붙였다.
+    스레드 경로를 걷어냈으니 붙일 딱지도 없다 — 대장을 읽었으면 확정이다.
+  */
+  assert.equal(r.estimated, false);
+  assert.deepEqual(r.pending, []);
   assert.deepEqual(r.others, [{ source: 'ledgerBody', ymd: '2026-09-10' }]);
 });
 
-test('스레드가 더 늦으면 스레드가 이긴다 (배포는 밀리기만 한다)', () => {
-  const r = resolveDeployYmd({
-    ...CYCLE_0914,
-    threadDeployYmd: '2026-09-21',
-  });
+test('본문이 더 늦으면 본문이 이긴다 (배포는 밀리기만 한다)', () => {
+  const r = resolveDeployYmd({ ...CYCLE_0914, prodYmd: '2026-09-21' });
   assert.equal(r.ymd, '2026-09-21');
-  assert.equal(r.source, 'thread');
-  assert.equal(r.estimated, false);
-  assert.deepEqual(r.pending, []);
+  assert.equal(r.source, 'ledgerBody');
+  assert.deepEqual(r.others, [{ source: 'ledgerTitle', ymd: '2026-09-14' }]);
 });
 
-test('스레드가 더 이르면 제목이 이긴다 (당겨지지 않는다)', () => {
-  const r = resolveDeployYmd({
-    ...CYCLE_0914,
-    threadDeployYmd: '2026-09-07',
-  });
+test('본문이 비어도 제목만으로 확정한다', () => {
+  // 본문에 운영배포일을 안 적는 차수가 있다. 그때 제목이 유일한 출처다.
+  const r = resolveDeployYmd({ ...CYCLE_0914, prodYmd: null });
   assert.equal(r.ymd, '2026-09-14');
+  assert.equal(r.source, 'ledgerTitle');
+  assert.equal(r.estimated, false);
 });
 
-test('QA 종료는 대장과 스레드 중 늦은 쪽', () => {
-  assert.equal(resolveQaEndYmd(CYCLE_0914).ymd, '2026-09-09');
-  // 스레드를 못 읽었으면 미확인으로 남는다 (규칙상 둘 다 만족해야 종료다).
-  assert.deepEqual(resolveQaEndYmd(CYCLE_0914).pending, ['thread']);
-  assert.deepEqual(
-    resolveQaEndYmd({ ...CYCLE_0914, threadQaEndYmd: '2026-09-13' }).pending,
-    []
-  );
-  assert.equal(
-    resolveQaEndYmd({ ...CYCLE_0914, threadQaEndYmd: '2026-09-13' }).ymd,
-    '2026-09-13'
-  );
+test('QA 종료는 대장 값을 그대로 쓴다', () => {
+  const r = resolveQaEndYmd(CYCLE_0914);
+  assert.equal(r.ymd, '2026-09-09');
+  assert.deepEqual(r.pending, []);
 });
 
 test('근무일 보정: 배포 경고는 당기고 QA 종료는 미룬다', () => {
@@ -1656,40 +1597,6 @@ test('분기점 판정이 SQL 과 같다', () => {
   assert.equal(milestoneOn(s, '2026-09-13'), null);
   assert.equal(milestoneOn(s, '2026-09-14'), '오늘 운영 배포');
   assert.equal(milestoneOn(s, '2026-09-15'), null);
-});
-
-test('스레드를 못 읽어도 이미 읽어 둔 상태를 0 으로 덮지 않는다', () => {
-  /*
-    실제로 밟은 사고: 읽기 토큰 없이 "지금 갱신" 을 한 번 눌렀더니
-    threadDone 이 7 → 0 이 됐다. 화면은 그걸 "아무것도 안 끝났다" 로 그리고,
-    그 값이 18시 마감 요약까지 그대로 나간다.
-    "못 읽음" 과 "0 건" 은 다른 말이다.
-  */
-  const prev = {
-    total: 2,
-    threadDone: 2,
-    ticketDone: 0,
-    tickets: [
-      { key: 'KQ-1', threadStatus: 'done' },
-      { key: 'KQ-2', threadStatus: 'done' },
-    ],
-  } as unknown as Parameters<typeof threadTableFrom>[0];
-
-  const carried = threadTableFrom(prev);
-  assert.equal(carried?.get('KQ-1'), 'done');
-  assert.equal(carried?.get('KQ-2'), 'done');
-
-  // 이전 값이 없으면 되돌릴 것도 없다 (undefined 여야 새로 읽은 값이 그대로 쓰인다).
-  assert.equal(threadTableFrom(null), undefined);
-  assert.equal(
-    threadTableFrom({
-      total: 1,
-      threadDone: 0,
-      ticketDone: 0,
-      tickets: [{ key: 'KQ-1', threadStatus: null }],
-    } as unknown as Parameters<typeof threadTableFrom>[0]),
-    undefined
-  );
 });
 
 // ─────────────────────────────────────────────────────────────

@@ -224,7 +224,6 @@ export const TEMPLATE_VARS = [
   { name: 'QA종료일', desc: '09-09(수)' },
   { name: '운영배포일', desc: '09-14(월)' },
   { name: '상세링크', desc: 'QA 라우터 상세 페이지' },
-  { name: '스레드링크', desc: 'QA 팀 정기배포 스레드' },
   { name: '배포대장링크', desc: 'Confluence 배포대장' },
   { name: 'fixVersion', desc: 'release_20260914' },
   { name: '기획건수', desc: '7' },
@@ -238,7 +237,7 @@ export const TEMPLATE_VAR_NAMES: readonly string[] = TEMPLATE_VARS.map(
 /**
  * 템플릿 한 줄의 규칙: **값이 빈 변수가 있으면 줄째로 빠진다.**
  *
- * `• QA 스레드 : {스레드링크}` 에서 링크가 없으면 `• QA 스레드 : ` 만 남는데,
+ * `• 배포대장 : {배포대장링크}` 에서 링크가 없으면 `• 배포대장 : ` 만 남는데,
  * 그 꼴로 채널에 나가면 안 된다. SQL 의 qa_router_render() 가 같은 규칙으로
  * 돈다 — 화면이 미리 보여줄 때도 같아야 한다.
  */
@@ -295,7 +294,6 @@ export const DEFAULT_TEMPLATE = [
   '• 운영 배포일 : {운영배포일}',
   '*참고*',
   '• QA 라우터 상세 : {상세링크}',
-  '• QA 스레드 : {스레드링크}',
   '• 배포대장 : {배포대장링크}',
   '• fixVersion : `{fixVersion}`',
 ].join('\n');
@@ -427,22 +425,6 @@ export interface QaRouterConfig {
    */
   slackOpsChannelId: string | null;
 
-  /**
-   * QA 팀이 정기배포 QA 스레드를 여는 채널. **우리 알림 채널이 아니다.**
-   * 프로젝트가 바뀌면 반드시 같이 바뀌는 값이라 설정으로 뺐다.
-   */
-  qaThreadChannelId: string | null;
-  /**
-   * 스레드 제목 규칙. '%s' 자리에 'M/D(요일)' 이 들어간다.
-   *
-   * **아직 아무도 안 읽는다.** 제목을 찾는 쪽(qa-thread.ts 의 parseThreadTitle)은
-   * 정규식으로 파싱하는데, 그 정규식을 이 문자열에서 만들어 내려면 패턴 언어를
-   * 하나 더 들이는 셈이 된다. 컬럼은 SQL 쪽 문구가 쓰려고 만들어 뒀고,
-   * **설정 화면에는 올리지 않는다** — 눌러도 아무 일도 안 하는 손잡이는
-   * 손잡이가 없는 것보다 나쁘다.
-   */
-  qaThreadTitlePattern: string;
-
   quietHours: QuietHours;
   /**
    * 한 번 확인하고 다음까지 쉬는 초.
@@ -500,8 +482,6 @@ export type QaRouterConfigInput = Pick<
       | 'fixVersionPattern'
       | 'slackFallbackChannelId'
       | 'slackOpsChannelId'
-      | 'qaThreadChannelId'
-      | 'qaThreadTitlePattern'
       | 'quietHours'
       | 'tickIntervalSeconds'
       | 'judgeTiers'
@@ -640,8 +620,29 @@ export interface SideEffectResult {
 export interface DeployCycle {
   /** 배포대장 페이지 제목의 날짜. 차수를 식별한다. */
   deployYmd: string;
-  /** release_YYYYMMDD. Jira 에 아직 없어도 채운다. */
+  /** 이 차수의 Jira 버전 이름. Jira 에 아직 없어도 채운다. */
   fixVersion: string;
+  /**
+   * 그 이름을 어디서 얻었나.
+   *
+   *   ledgerJql  배포대장 본문의 JQL 에 적혀 있던 것. **확정값이다.**
+   *   title      대장 제목에서 조립한 것. **추측이다** — 제목이 배포 종류를
+   *              말하지 않으면 정기로 떨어진다. 실측 GW 09-17 이 그 경우다.
+   *
+   * 화면이 둘을 갈라 보여줘야 "왜 빈 차수인가" 를 사람이 알 수 있다.
+   * 컬럼이 아직 없는 DB 에 새 코드가 붙는 창이 있어 선택으로 둔다.
+   */
+  fixVersionSource?: 'ledgerJql' | 'title';
+  /**
+   * 이 차수의 **개발 프로젝트**. 배포대장 본문 JQL 에서 읽는다.
+   *
+   * QA 버그가 쌓이는 프로젝트와 다를 수 있다. 실측 GW 는 버그가
+   * ICTQMSCHE, 개발이 AUTOWAY 다. 진행률은 개발 쪽을 봐야 하는데
+   * 전에는 필터(=QA 큐)의 프로젝트를 써서 늘 0건이었다.
+   *
+   * null 이면 필터의 프로젝트로 떨어진다 — KQ 처럼 둘이 같으면 그게 맞다.
+   */
+  devProjectKey?: string | null;
   cycleLabel: string | null;
   qaStartYmd: string | null;
   qaEndYmd: string | null;
@@ -659,14 +660,6 @@ export interface DeployCycle {
    * 아직 수집하지 않았으면 null 이다 — 0건과 구분해야 한다.
    */
   planProgress?: PlanProgress | null;
-  /** QA 스레드 부모 ts. 채널의 "[M/D(요일) 정기배포 QA]" 스레드. */
-  qaThreadTs?: string | null;
-  /**
-   * QA 팀 Slack 스레드 제목에서 읽은 날짜들. 배포일 출처 중 1순위다.
-   * 스레드를 아직 못 읽어(channels:history 권한) 지금은 늘 null 이다.
-   */
-  threadDeployYmd?: string | null;
-  threadQaEndYmd?: string | null;
   /** 그 차수 QA 배치 티켓 키 (예: KQ-18292). */
   qaLabel?: string | null;
   planCollectedAt?: string | null;

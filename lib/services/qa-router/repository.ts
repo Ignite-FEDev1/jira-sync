@@ -60,10 +60,6 @@ function fromConfigInput(i: QaRouterConfigInput): Partial<ConfigRow> {
     row.slack_fallback_channel_id = i.slackFallbackChannelId;
   if (i.slackOpsChannelId !== undefined)
     row.slack_ops_channel_id = i.slackOpsChannelId;
-  if (i.qaThreadChannelId !== undefined)
-    row.qa_thread_channel_id = i.qaThreadChannelId;
-  if (i.qaThreadTitlePattern !== undefined)
-    row.qa_thread_title_pattern = i.qaThreadTitlePattern;
   if (i.planIssueTypeId !== undefined)
     row.plan_issue_type_id = i.planIssueTypeId;
   if (i.devIssueTypeId !== undefined) row.dev_issue_type_id = i.devIssueTypeId;
@@ -544,6 +540,8 @@ export async function upsertCycles(
       deploy_page_id: c.deployPageId,
       deploy_page_title: c.deployPageTitle,
       jira_version_exists: c.jiraVersionExists,
+      fix_version_source: c.fixVersionSource ?? null,
+      dev_project_key: c.devProjectKey ?? null,
       collected_at: new Date().toISOString(),
     })),
     { onConflict: 'config_id,deploy_ymd' }
@@ -567,6 +565,8 @@ export async function getCycle(
   return {
     deployYmd: data.deploy_ymd,
     fixVersion: data.fix_version,
+    fixVersionSource: data.fix_version_source ?? undefined,
+    devProjectKey: data.dev_project_key ?? null,
     cycleLabel: data.cycle_label ?? null,
     qaStartYmd: data.qa_start_ymd ?? null,
     qaEndYmd: data.qa_end_ymd ?? null,
@@ -576,9 +576,6 @@ export async function getCycle(
     jiraVersionExists: Boolean(data.jira_version_exists),
     collectedAt: data.collected_at,
     planProgress: data.plan_progress ?? null,
-    qaThreadTs: data.qa_thread_ts ?? null,
-    threadDeployYmd: data.thread_deploy_ymd ?? null,
-    threadQaEndYmd: data.thread_qa_end_ymd ?? null,
     qaLabel: data.qa_label ?? null,
     planCollectedAt: data.plan_collected_at ?? null,
     alertRulesOverride: data.alert_rules_override ?? null,
@@ -623,7 +620,7 @@ export async function currentCycleFromLedger(
  * 한 차수의 기획티켓 진행 현황을 저장한다.
  *
  * 차수 자체(upsertCycles)와 분리한 이유: 차수 목록은 배포대장에서 오고
- * 진행 현황은 Jira·Slack 에서 온다. 한 번에 쓰면 한쪽이 실패할 때
+ * 진행 현황은 Jira 에서 온다. 한 번에 쓰면 한쪽이 실패할 때
  * 멀쩡한 다른 쪽까지 날아간다.
  */
 export async function savePlanProgress(
@@ -631,10 +628,7 @@ export async function savePlanProgress(
   deployYmd: string,
   progress: PlanProgress,
   meta: {
-    qaThreadTs?: string | null;
     qaLabel?: string | null;
-    /** 스레드 제목에서 읽은 배포일. 배포일 출처 1순위다. */
-    threadDeployYmd?: string | null;
   } = {}
 ): Promise<void> {
   // 리허설: 쓰지 않는다 (setWritesDisabled).
@@ -644,9 +638,7 @@ export async function savePlanProgress(
     plan_collected_at: new Date().toISOString(),
   };
   // 못 찾은 값으로 이미 찾아 둔 값을 덮지 않는다.
-  if (meta.qaThreadTs) patch.qa_thread_ts = meta.qaThreadTs;
   if (meta.qaLabel) patch.qa_label = meta.qaLabel;
-  if (meta.threadDeployYmd) patch.thread_deploy_ymd = meta.threadDeployYmd;
 
   const { error } = await dbServer
     .from('qa_router_cycles')

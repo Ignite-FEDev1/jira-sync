@@ -24,16 +24,8 @@ import {
 import { judge, type JudgeResult } from './judge';
 import {
   collectPlanProgress,
-  threadTableFrom,
-  type ThreadStatus,
 } from './plan-tickets';
 import { resolveOutcomes } from './outcome';
-import {
-  findQaThread,
-  readThreadTable,
-  shouldLookForThread,
-  type SlackReader,
-} from './qa-thread';
 import {
   buildConfigChangedMessage,
   buildCycleHeader,
@@ -42,6 +34,11 @@ import {
   type ReassignOutcome,
 } from './message';
 import { readCyclePageTitle, tooSoon } from './status';
+import {
+  extractJqlStrings,
+  pickLedgerFixVersion,
+  pickLedgerProjectKey,
+} from './ledger-jql';
 import * as repo from './repository';
 import type {
   DeployCycle,
@@ -99,7 +96,6 @@ export interface TickDeps {
    * Slack 읽기. 발송용 슬랙과 토큰이 다르다 — 봇 토큰은 읽기 스코프가 없다.
    * 없으면 스레드 관련 기능만 건너뛴다 (알림은 계속 나간다).
    */
-  slackReader?: SlackReader;
   jiraBaseUrl: string;
   log?: Logger;
   now?: () => Date;
@@ -457,40 +453,71 @@ export async function collectCycles(
 ): Promise<DeployCycle[]> {
   if (!cfg.confluenceDeployRootId) return [];
 
-  // Jira 버전은 한 번만 받아서 대조한다 (418개 중 release_ 는 61개).
-  let versionNames = new Set<string>();
   /*
-    같은 목록으로 **이름 규칙**도 뽑는다. 차수 이름을 지을 때 쓴다.
-    없으면 `readCyclePageTitle` 이 폴백으로 내려간다.
+    ── 버전 목록은 **프로젝트마다** 따로 받는다 ──
+
+    차수 이름이 진짜인지 대조하려면 그 프로젝트의 버전 목록이 필요하다.
+    문제는 "그 프로젝트" 가 어디냐다.
+
+    전에는 필터의 프로젝트 하나만 봤다. KQ 는 QA 버그와 개발이 같은
+    프로젝트라 맞았는데, GW 는 갈려 있다.
+
+      필터(QA 큐)   ICTQMSCHE   ← 실측 **버전 0개**
+      대장 JQL      AUTOWAY     ← 차수 버전이 여기 있다 (adhoc_260917 …)
+
+    그래서 GW 는 늘 빈 목록으로 대조하다 실패하고, 제목 추측값을 그대로
+    썼다 — 없는 `release_20260917` 이 그렇게 나왔다.
+
+    이제 대장 본문이 가리키는 프로젝트를 우선한다. 페이지를 읽어야 알 수
+    있으므로 미리 한 번이 아니라 **필요할 때 받아 캐시**한다. 대장이
+    한 프로젝트를 가리키면 왕복은 여전히 한 번이다.
   */
-  let rule: FixVersionRule | null = null;
+  const versionsByProject = new Map<string, Set<string>>();
+  const ruleByProject = new Map<string, FixVersionRule | null>();
+  const loadVersions = async (projectKey: string): Promise<Set<string>> => {
+    const cached = versionsByProject.get(projectKey);
+    if (cached) return cached;
+    let names: string[] = [];
+    try {
+      const resolved = await deps.jira.resolveProjectKey(projectKey);
+      names = (await deps.jira.getProjectVersions(resolved)).map((v) => v.name);
+    } catch (e) {
+      // 버전 조회가 실패해도 차수 목록 자체는 만들 수 있다.
+      deps.log?.(
+        `${projectKey} 버전 목록 조회 실패: ${(e as Error).message}`
+      );
+    }
+    const set = new Set(names);
+    versionsByProject.set(projectKey, set);
+    // 같은 목록으로 **이름 규칙**도 뽑는다. 제목 폴백이 쓴다.
+    ruleByProject.set(projectKey, names.length ? inferFixVersionRule(names) : null);
+    return set;
+  };
+
+  /*
+    필터 쪽 프로젝트를 기본값으로 둔다. 대장에 JQL 이 없는 차수는 이걸로
+    대조한다 — KQ 처럼 둘이 같은 프로젝트면 이게 곧 정답이다.
+
+    프로젝트 키를 `deriveJql` 로 읽는다. 전에는 여기서 정규식
+    `project\s*=\s*"?([\w-]+)"?` 을 따로 돌렸는데, `project` 절이 없는
+    필터에서는 빈 문자열이 되어 조회가 통째로 실패했다.
+
+      Jira 버전 목록 조회 실패: 프로젝트 식별자 '' 를 확정할 수 없음
+                                (후보 5건: AIACOM, AUTOWAY, CCIPRJ, …)
+
+    실측 GW 필터(15127)는 `parent in (ICTQMSCHE-…)` 로만 범위를 잡는다.
+    `deriveJql` 은 그 경우 티켓 키의 앞머리에서 프로젝트를 읽는다 —
+    같은 규칙을 두 군데 두면 한쪽만 고쳐지고 이렇게 어긋난다.
+  */
+  let filterProject: string | null = null;
   try {
-    /*
-      프로젝트 키를 `deriveJql` 로 읽는다. 전에는 여기서 정규식
-      `project\s*=\s*"?([\w-]+)"?` 을 따로 돌렸는데, `project` 절이 없는
-      필터에서는 빈 문자열이 되어 조회가 통째로 실패했다.
-
-        Jira 버전 목록 조회 실패: 프로젝트 식별자 '' 를 확정할 수 없음
-                                  (후보 5건: AIACOM, AUTOWAY, CCIPRJ, …)
-
-      실측 GW 필터(15127)는 `parent in (ICTQMSCHE-…)` 로만 범위를 잡는다.
-      `deriveJql` 은 그 경우 티켓 키의 앞머리에서 프로젝트를 읽는다 —
-      같은 규칙을 두 군데 두면 한쪽만 고쳐지고 이렇게 어긋난다.
-    */
     const filter = await deps.jira.getFilter(cfg.jiraFilterId);
     const derived = await deriveJql(filter.jql, (q) => deps.jira.parseJql(q));
-    const projectKey = await deps.jira.resolveProjectKey(
-      derived.projectKey ?? ''
-    );
-    const names = (await deps.jira.getProjectVersions(projectKey)).map(
-      (v) => v.name
-    );
-    versionNames = new Set(names);
-    rule = inferFixVersionRule(names);
+    filterProject = derived.projectKey ?? null;
   } catch (e) {
-    // 버전 조회가 실패해도 차수 목록 자체는 만들 수 있다.
-    deps.log?.(`Jira 버전 목록 조회 실패: ${(e as Error).message}`);
+    deps.log?.(`필터에서 프로젝트를 읽지 못했습니다: ${(e as Error).message}`);
   }
+  if (filterProject) await loadVersions(filterProject);
 
   const out: DeployCycle[] = [];
   const months = await deps.confluence.getChildren(cfg.confluenceDeployRootId);
@@ -501,35 +528,113 @@ export async function collectCycles(
         규칙은 `status.ts` 에 있다. 설정 화면의 미리보기가 **같은 함수**를
         써야 "화면은 잡힌다는데 배치는 건너뛴다" 가 안 생긴다.
       */
+      const seen = (p: string | null) =>
+        (p && versionsByProject.get(p)) || new Set<string>();
+
+      /*
+        먼저 제목만 본다. 여기서 정하는 것은 **이 페이지가 차수인가**와
+        배포일이고, 둘 다 본문 없이 답할 수 있다.
+      */
       const read = readCyclePageTitle(kid.title, {
         deployKinds: cfg.deployKinds,
-        rule,
-        versions: versionNames,
+        rule: (filterProject && ruleByProject.get(filterProject)) || null,
+        versions: seen(filterProject),
       });
       if (read.kind !== 'cycle') continue;
-      const { deployYmd, fixVersion } = read;
+      const { deployYmd } = read;
       if (deployYmd < opts.sinceYmd) continue;
+
       let schedule: ReturnType<typeof parseSchedule> | null = null;
+      /*
+        차수 이름은 **본문에 적힌 것이 1순위**다.
+
+        제목에서 조립한 이름(`read.fixVersion`)은 추측이다. 제목이 배포
+        종류를 안 말하면 `정기` 로 떨어지는데, 실측 GW
+        `Dev) 배포 관리 - 2026-09-17(이그나이트)` 가 바로 그 경우였다 —
+        괄호 안이 배포 종류가 아니라 주관 조직명이라 `release_260917` 을
+        지었고, 진짜 차수인 `adhoc_260917` 을 통째로 놓쳤다.
+
+        본문에는 사람이 그 차수 티켓을 보려고 붙여 둔 JQL 이 있고 거기
+        이름이 그대로 적혀 있다. 추측보다 이쪽이 세다.
+      */
+      let fixVersion = read.fixVersion;
+      let fixVersionSource: DeployCycle['fixVersionSource'] = 'title';
+      let project = filterProject;
       try {
-        schedule = parseSchedule(
-          await deps.confluence.getPageBody(kid.id),
-          Number(deployYmd.slice(0, 4))
-        );
+        const body = await deps.confluence.getPageBody(kid.id);
+        schedule = parseSchedule(body, Number(deployYmd.slice(0, 4)));
+
+        const jqls = extractJqlStrings(body);
+        /*
+          대장이 가리키는 프로젝트를 우선한다. 필터의 프로젝트(QA 큐)와
+          다를 수 있고, 차수 버전은 **개발 프로젝트** 쪽에 있다.
+          실측 GW: 필터 ICTQMSCHE 는 버전 0개, 대장 AUTOWAY 에 30개.
+        */
+        const ledgerProject = pickLedgerProjectKey(jqls);
+        if (ledgerProject) {
+          project = ledgerProject;
+          await loadVersions(ledgerProject);
+        }
+
+        const fromLedger = pickLedgerFixVersion(jqls, seen(project));
+        if (fromLedger.name) {
+          if (fromLedger.name !== fixVersion) {
+            deps.log?.(
+              `${deployYmd} 차수 이름을 배포대장에서 읽었습니다: ` +
+                `${fixVersion}(제목 추측) → ${fromLedger.name}`
+            );
+          }
+          fixVersion = fromLedger.name;
+          fixVersionSource = 'ledgerJql';
+        } else {
+          /*
+            본문에서 못 골랐으면 제목 추측으로 돌아간다. 다만 **맞는
+            프로젝트의 버전·규칙으로 다시 짓는다** — 처음 판정은 필터
+            프로젝트를 봤고, 그쪽이 빈 목록이면 종류도 자릿수도 틀린다.
+          */
+          if (project && project !== filterProject) {
+            const again = readCyclePageTitle(kid.title, {
+              deployKinds: cfg.deployKinds,
+              rule: ruleByProject.get(project) ?? null,
+              versions: seen(project),
+            });
+            if (again.kind === 'cycle') fixVersion = again.fixVersion;
+          }
+          /*
+            왜 본문을 안 쓰고 제목으로 갔는지 남긴다. `fixVersionSource`
+            에는 `title` 하나로만 찍히는데, 그 뒤에 두 가지 다른 사정이
+            있다 — 본문에 JQL 이 없었던 것과, 있었지만 못 고른 것.
+
+            실측 GW 09-17 이 후자다. 본문이 `adhoc_260917` 과
+            `adhoc_2609xx` 를 같이 가리키고 **둘 다 Jira 에 실재한다**
+            (누가 자리표시용 버전을 진짜로 만들어 뒀다). 하나를 찍으면
+            틀렸을 때 조용히 엉뚱한 차수를 집계하므로 고르지 않는다.
+          */
+          const ok = seen(project).has(fixVersion);
+          deps.log?.(
+            ok
+              ? `${deployYmd} 본문에서 차수를 못 골라 제목으로 지었습니다` +
+                  ` (${fixVersion}) — ${fromLedger.why}`
+              : `${deployYmd} 차수 이름을 확정하지 못했습니다: ${fromLedger.why}`
+          );
+        }
       } catch (e) {
         // 페이지가 아직 비어 있으면 일정이 없다 — 차수는 그대로 담는다.
-        deps.log?.(`${deployYmd} 일정 파싱 실패: ${(e as Error).message}`);
+        deps.log?.(`${deployYmd} 본문 읽기 실패: ${(e as Error).message}`);
       }
 
       out.push({
         deployYmd,
         fixVersion,
+        fixVersionSource,
+        devProjectKey: project,
         cycleLabel: `정기배포 ${deployYmd.slice(2).replace(/-/g, '')}`,
         qaStartYmd: schedule?.qaStartYmd ?? null,
         qaEndYmd: schedule?.qaEndYmd ?? null,
         prodYmd: schedule?.prodYmd ?? deployYmd,
         deployPageId: kid.id,
         deployPageTitle: kid.title,
-        jiraVersionExists: versionNames.has(fixVersion),
+        jiraVersionExists: seen(project).has(fixVersion),
         collectedAt: new Date().toISOString(),
       });
     }
@@ -777,69 +882,31 @@ export async function runTick(
           cyc?.planCollectedAt && new Date(cyc.planCollectedAt) >= slotStart;
         if (cyc && !doneThisSlot) {
           /*
-            QA 스레드를 먼저 찾는다. 스레드 제목에 배포일이 들어 있어
-            (`[9/14(월) 정기배포 QA]`) 그게 배포일 출처 1순위가 된다.
-            읽기 토큰이 없으면 이 블록만 건너뛰고 Jira 집계는 그대로 한다.
-          */
-          let threadTs = cyc.qaThreadTs ?? null;
-          let threadDeployYmd: string | null = null;
-          let threadTable: Map<string, ThreadStatus> | undefined;
-          let threadUnavailable: string | undefined =
-            'QA 스레드를 읽을 권한이 없습니다 (channels:history 필요)';
+            기획티켓 진행을 Jira 만으로 낸다.
 
-          if (deps.slackReader) {
-            try {
-              if (
-                shouldLookForThread({ ...cyc, qaThreadTs: threadTs }, today)
-              ) {
-                const found = await findQaThread(
-                  deps.slackReader,
-                  cyc.deployYmd,
-                  { channelId: cfg.qaThreadChannelId }
-                );
-                if (found) {
-                  threadTs = found.ts;
-                  threadDeployYmd = found.deployYmd;
-                  log(`QA 스레드 발견 ${found.title} (ts ${found.ts})`);
-                }
-              }
-              if (threadTs) {
-                threadTable = await readThreadTable(
-                  deps.slackReader,
-                  threadTs,
-                  cfg.qaThreadChannelId
-                );
-                threadUnavailable = undefined;
-                log(`QA 스레드 대응상태 ${threadTable.size}건 읽음`);
-              }
-            } catch (e) {
-              // 스레드를 못 읽어도 Jira 집계는 낸다. 이유는 화면에 그대로 뜬다.
-              threadUnavailable = (e as Error).message;
-              log(
-                `QA 스레드 읽기 실패 (Jira 집계는 계속): ${threadUnavailable}`
-              );
-            }
-          }
-
-          /*
-            스레드를 못 읽었으면 마지막으로 안 값을 유지한다.
-            "못 읽음"을 0 건으로 저장하면 화면이 "아무것도 안 끝났다"로
-            그리고, 그 값이 18시 마감 요약까지 그대로 나간다.
+            전에는 QA 스레드(Slack)를 먼저 찾아 그 표에서 완료 여부를 읽었다.
+            그 경로를 걷어냈다 — 개인 토큰이 필요하고, QA 팀이 손으로 채우는
+            표에 묶여 있고, KQ 에만 있는 흐름이라 다른 프로젝트로 못 옮긴다.
+            실측으로 스레드와 Jira 상태가 같았고(7건 × 3축 전부 일치),
+            정작 프로덕션에서는 토큰이 없어 한 번도 안 돌고 있었다.
           */
           const progress = await collectPlanProgress(deps.jira, {
-            projectKey: derived.projectKey,
+            /*
+              **개발 프로젝트**를 본다. 필터의 프로젝트가 아니다.
+
+              전에는 `derived.projectKey` 를 넘겼는데 그건 QA 버그가 쌓이는
+              곳이다. 실측 GW 는 버그가 ICTQMSCHE, 개발이 AUTOWAY 라
+              늘 0건이었다. 배포대장 본문 JQL 이 어느 쪽인지 말해 주고,
+              차수를 걷을 때 그 값을 담아 둔다.
+            */
+            projectKey: cyc.devProjectKey || derived.projectKey,
             fixVersion: activeFv,
             memberIds: new Set(derived.members.map((m) => m.accountId)),
-            threadTable: threadTable ?? threadTableFrom(cyc.planProgress),
-            threadUnavailable,
             planIssueTypeId: cfg.planIssueTypeId,
             devIssueTypeId: cfg.devIssueTypeId,
           });
-          await repo.savePlanProgress(cfg.id, cyc.deployYmd, progress, {
-            qaThreadTs: threadTs,
-            threadDeployYmd,
-          });
-          log(`기획티켓 진행 ${progress.threadDone}/${progress.total} 갱신`);
+          await repo.savePlanProgress(cfg.id, cyc.deployYmd, progress);
+          log(`기획티켓 진행 ${progress.ticketDone}/${progress.total} 갱신`);
         }
       }
     });
