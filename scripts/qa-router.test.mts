@@ -32,6 +32,7 @@ import {
   staleFilterCycle,
 } from '../lib/services/qa-router/status';
 import {
+  extractIssueKeys,
   extractJqlStrings,
   pickLedgerFixVersion,
 } from '../lib/services/qa-router/ledger-jql';
@@ -1323,6 +1324,9 @@ function refJira(
   };
 }
 
+/** 트리아지 계정. 판정이 이 사람을 답으로 내면 안 된다 (메아리). */
+const REF_TRIAGE = 'acc-triage';
+
 const bug = (labels: string[]): JiraIssue => ({
   key: 'KQ-18696',
   fields: { summary: '[APP_입고검수] 노출 위치 상이', labels },
@@ -1348,7 +1352,8 @@ test('findViaRefOwner: 배치 티켓은 근거에서 뺀다', async () => {
   const r = await findViaRefOwner(
     bug(['KQ-18292', 'KQ-18432', '엔글QA']),
     REF_MEMBERS,
-    jira
+    jira,
+    { triageAccountId: REF_TRIAGE }
   );
   assert.ok(r);
   // 배치 티켓 담당자(김홍련)를 집으면 모든 티켓이 같은 사람을 가리킨다
@@ -1367,7 +1372,9 @@ test('findViaRefOwner: 우리 팀원이면 배정 대상으로 집는다', async
       },
     },
   });
-  const r = await findViaRefOwner(bug(['KQ-18432']), REF_MEMBERS, jira);
+  const r = await findViaRefOwner(bug(['KQ-18432']), REF_MEMBERS, jira, {
+    triageAccountId: REF_TRIAGE,
+  });
   assert.equal(r?.name, '조한빈');
   assert.equal(r?.isMember, true);
 });
@@ -1398,18 +1405,18 @@ test('findViaRefOwner: 기획자보다 개발티켓 담당자를 먼저 본다',
       ],
     }
   );
-  const r = await findViaRefOwner(bug(['KQ-17989']), REF_MEMBERS, jira);
+  const r = await findViaRefOwner(bug(['KQ-17989']), REF_MEMBERS, jira, {
+    triageAccountId: REF_TRIAGE,
+  });
   assert.equal(r?.name, '박종찬');
   assert.equal(r?.refKey, 'KQ-18240');
   assert.equal(r?.isMember, false);
 });
 
 test('findViaRefOwner: 레이블에 참조가 없으면 null', async () => {
-  const r = await findViaRefOwner(
-    bug(['FE1', '엔글QA']),
-    MEMBERS,
-    stubJira({})
-  );
+  const r = await findViaRefOwner(bug(['FE1', '엔글QA']), MEMBERS, stubJira({}), {
+    triageAccountId: REF_TRIAGE,
+  });
   assert.equal(r, null);
 });
 
@@ -3800,4 +3807,46 @@ test('findTriageHandoff — 트리아지를 거치지 않은 티켓은 표본이
     'triage'
   );
   assert.equal(h, null);
+});
+
+test('extractIssueKeys — 본문 어디에 있든 티켓 키를 긁는다', () => {
+  /*
+    실측: 대장은 키를 세 경로로 담는다. 표 안 텍스트, Jira 인라인 매크로,
+    그리고 브라우즈 링크. 어느 쪽을 쓸지는 문서를 만든 사람이 정한다.
+  */
+  const body = `
+    <td>3번: 프로덕션 console.log 개선 · 티켓: AUTOWAY-4394</td>
+    <ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">AUTOWAY-4398</ac:parameter></ac:structured-macro>
+    <a href="https://hmg.atlassian.net/browse/AUTOWAY-4400">보기</a>
+    <a href="https://ignitecorp.atlassian.net/browse/FEHG-4400">남의 프로젝트</a>
+    <td>AUTOWAY-4394 (중복)</td>`;
+  /*
+    본문에는 남의 프로젝트 키가 섞인다 — 실측 GW 대장에 FEHG-4400 이
+    있었다. 그걸 후보에 넣으면 없는 티켓을 조회하거나 남의 담당자를 본다.
+  */
+  assert.deepEqual(extractIssueKeys(body, 'AUTOWAY'), [
+    'AUTOWAY-4394',
+    'AUTOWAY-4398',
+    'AUTOWAY-4400',
+  ]);
+  assert.deepEqual(extractIssueKeys(body, 'FEHG'), ['FEHG-4400']);
+});
+
+test('extractIssueKeys — XML 엔티티로 인코딩된 키도 읽는다', () => {
+  // storage 형식은 &quot; 등으로 감싸는 자리가 있다
+  assert.deepEqual(
+    extractIssueKeys('<p>&quot;KQ-18234&quot; 참고</p>', 'KQ'),
+    ['KQ-18234']
+  );
+});
+
+test('extractIssueKeys — 키 모양을 흉내 낸 토막을 안 집는다', () => {
+  /*
+    `UTF-8` 은 `[A-Z][A-Z0-9_]+-\d+` 에 그대로 맞는다. `SHA-256`·`ISO-8601`
+    도 같다. 대장 본문은 사람이 쓴 산문이라 이런 토막이 섞이고, 프로젝트
+    키로 거르지 않으면 그대로 후보가 된다 — 그래서 인자를 필수로 뒀다.
+  */
+  const noise = 'release_20260914 · 2026-09-14 · UTF-8 · SHA-256 · ISO-8601';
+  assert.deepEqual(extractIssueKeys(noise, 'AUTOWAY'), []);
+  assert.deepEqual(extractIssueKeys(noise, 'KQ'), []);
 });

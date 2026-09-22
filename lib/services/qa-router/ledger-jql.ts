@@ -115,6 +115,53 @@ export function pickLedgerProjectKey(jqls: string[]): string | null {
   return keys.size === 1 ? [...keys][0] : null;
 }
 
+/**
+ * 배포대장 본문에 적힌 **티켓 키**를 전부 꺼낸다.
+ *
+ * ── 왜 JQL 말고 키를 따로 긁나 ──
+ *
+ * 배포대장이 "이 차수에 우리가 한 일"을 적는 방식이 프로젝트마다 다르다.
+ * 실측(2026-09-22):
+ *
+ *   GW   개발 안건 표에 `티켓: AUTOWAY-4394` 처럼 **키를 직접** 적는다 → 27개
+ *   KQ   키를 안 적고 JQL 링크로만 가리킨다                        → 0개
+ *
+ * 그리고 KQ 의 그 JQL(`component = FE AND fixVersion = …`)을 실행하면
+ * **우리 팀 일감이 아니라 그 차수 FE 이슈 전부**가 나온다 — 담당자가 엔글
+ * QA 인 QA 버그들이다. 게다가 개발티켓은 `component`·`fixVersion` 이 손으로
+ * 붙는 값이라 절반이 빠진다(KQ-18230·KQ-18229 는 둘 다 없음).
+ *
+ * 그래서 JQL 결과에 기대지 않고 **본문 텍스트에서 키를 직접** 긁는다.
+ * 키 모양(`ABC-123`)은 Jira 보편이라 프로젝트 관행에 안 묶인다.
+ *
+ * ── `projectKey` 는 **필수다** ──
+ *
+ * 키 모양(`ABC-123`)은 생각보다 흔하다. 테스트가 `UTF-8` 을 키로 집어내는
+ * 것을 잡았고, `SHA-256`·`ISO-8601`·`UTF-16` 도 같은 모양이다. 대장 본문은
+ * 사람이 쓴 산문이라 이런 토막이 섞인다.
+ *
+ * 선택으로 두면 안 넘긴 호출부가 조용히 쓰레기를 후보에 넣는다. 그리고
+ * 본문에는 **남의 프로젝트 키**도 있다(실측 GW 대장에 `FEHG-4400` 링크).
+ * 어느 프로젝트를 볼지 모르면 키를 긁을 이유 자체가 없다.
+ */
+export function extractIssueKeys(
+  storage: string,
+  projectKey: string
+): string[] {
+  const want = projectKey.toUpperCase();
+  const text = decodeEntities(storage);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const m of text.matchAll(/\b([A-Z][A-Z0-9_]+)-(\d+)\b/g)) {
+    if (m[1].toUpperCase() !== want) continue;
+    const key = `${m[1]}-${m[2]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
 export interface LedgerFixVersion {
   /** 채택한 이름. 못 고르면 null. */
   name: string | null;

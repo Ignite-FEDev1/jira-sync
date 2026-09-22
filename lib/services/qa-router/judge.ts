@@ -629,16 +629,41 @@ export async function findViaRefOwner(
   issue: JiraIssue,
   members: DerivedMember[],
   jira: JiraPort,
+  /**
+   * `triageAccountId` 는 **필수다.** 선택으로 두면 안 넘긴 호출부가
+   * 조용히 옛 동작(트리아지를 답으로 내는 버그)으로 돌아간다.
+   * 필수로 두면 컴파일러가 모든 호출부를 짚는다.
+   */
   opts: {
+    triageAccountId: string;
     projectKey?: string;
     devIssueTypes?: string[];
     /** 담당자 말고 한 칸 더. 안 넘기면 지금까지 쓰던 값으로 돈다. */
     coAssigneeField?: string;
     onWarn?: (msg: string) => void;
-  } = {}
+  }
 ): Promise<RefOwnerMatch | null> {
   const memberIds = new Set(members.map((m) => m.accountId));
   const refKeys = extractRefKeys(issue.fields?.labels, opts.projectKey);
+
+  /*
+    ── 트리아지 본인은 답이 아니다 ──
+
+    이 티켓은 이미 트리아지가 쥐고 있다. "트리아지 담당" 이라고 답하는 것은
+    판정이 아니라 메아리고, 그 답이 나오면 **진짜 담당자를 찾을 기회가
+    사라진다** (여기가 마지막 단계라 그대로 끝난다).
+
+    실측(2026-09-22 백테스트) KQ 최근 90일: 오지목 10건이 **전부** 이 경우
+    였다. 봇은 "김가빈 담당" 이라고 답했고 실제 담당은 10건 모두 차성숙
+    (APP_ 계열)이었다.
+
+    다른 세 단계는 이 가드가 이미 있다 — `findAssigned`, `findViaSiblings`,
+    `heldByMembers`. 여기만 빠져 있었다.
+
+    전후 측정(같은 표본 136건): 맞은 답 78건 그대로, 오지목 17 → 7.
+    잃는 것이 없다.
+  */
+  const isTriage = (accountId: string) => accountId === opts.triageAccountId;
 
   const devTypes = opts.devIssueTypes ?? DEFAULT_DEV_ISSUE_TYPES;
   const evidence: string[] = [];
@@ -674,7 +699,7 @@ export async function findViaRefOwner(
         for (const kid of kids) {
           if (!devTypes.includes(kid.fields?.issuetype?.name ?? '')) continue;
           const ka = kid.fields?.assignee;
-          if (!ka?.accountId) continue;
+          if (!ka?.accountId || isTriage(ka.accountId)) continue;
           candidates.push({
             accountId: ka.accountId,
             name: ka.displayName ?? ka.accountId,
@@ -687,7 +712,7 @@ export async function findViaRefOwner(
       }
 
       const a = ref.fields?.assignee;
-      if (!a?.accountId) continue;
+      if (!a?.accountId || isTriage(a.accountId)) continue;
       candidates.push({
         accountId: a.accountId,
         name: a.displayName ?? a.accountId,
@@ -1396,6 +1421,7 @@ async function refOwnerResult(
   let ref: RefOwnerMatch | null = null;
   try {
     ref = await findViaRefOwner(issue, ctx.members, jira, {
+      triageAccountId: ctx.triageAccountId,
       devIssueTypes: ctx.devIssueTypes,
       coAssigneeField: ctx.coAssigneeField,
       onWarn: ctx.onWarn,
