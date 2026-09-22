@@ -232,12 +232,10 @@ export const HMG_CUSTOM_FIELDS = {
   GANTT_END_DATE: 'customfield_10996', // Gantt End Date
 } as const;
 
-// 보드 ID (스프린트 조회용)
-export const BOARD_IDS = {
+// 보드 ID 폴백 (DB projects.board_id 조회 실패 시에만 사용)
+export const BOARD_ID_FALLBACK = {
   FEHG: 251,
   KQ: 20,
-  AUTOWAY: 521,
-  MEMBERSHIP: 5447,
 } as const;
 
 // FEHG 스프린트 마감용 transition ID

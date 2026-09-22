@@ -4,8 +4,11 @@
 //       원본 KQ 기준으로 상위항목 / 컴포넌트 / 수정버전 / 스프린트를 패치
 
 import { JiraClient } from '@/lib/services/jira/client';
-import { KQ_CUSTOM_FIELDS, BOARD_IDS } from '@/lib/constants/jira';
-import { buildNextSprintDates } from '@/lib/services/sync/sprint-mapper';
+import { KQ_CUSTOM_FIELDS } from '@/lib/constants/jira';
+import {
+  buildNextSprintDates,
+  resolveBoardId,
+} from '@/lib/services/sync/sprint-mapper';
 
 /**
  * FEHG issuelink 타입 (Blocks → KQ-* 필터링에 사용)
@@ -84,7 +87,7 @@ async function waitForAutomationKq(
  * KQ 해당 월 스프린트 조회 — 없으면 생성
  *
  * FEHG "FEHG 2605" → KQ 스프린트 이름 "KQ 202605"
- * KQ 보드는 BOARD_IDS.KQ 상수를 직접 사용 (DB projects 테이블 미보장)
+ * KQ 보드는 DB projects.board_id 우선, 없으면 상수 폴백
  */
 async function findOrCreateKqSprint(
   client: JiraClient,
@@ -95,7 +98,7 @@ async function findOrCreateKqSprint(
   if (!period) return null;
 
   const kqSprintName = `KQ 20${period}`; // "KQ 202605"
-  const boardId = BOARD_IDS.KQ;
+  const boardId = await resolveBoardId('KQ');
 
   const listResult = await client.get<{
     values: Array<{ id: number; name: string; state: string }>;

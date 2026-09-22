@@ -140,7 +140,7 @@ flowchart TD
     SelectType --> ClickBtn[동기화 버튼]
     
     ClickBtn --> Execute[orchestrator.execute]
-    Execute --> PreloadSprint[스프린트 캐싱<br/>BOARD_IDS KQ 보드 조회]
+    Execute --> PreloadSprint[스프린트 캐싱<br/>DB board_id로 대상 보드 조회]
     
     PreloadSprint --> SprintCache[캐시 저장<br/>Map boardId to SprintInfo]
     SprintCache --> FetchFEHG[FEHG 티켓 조회]

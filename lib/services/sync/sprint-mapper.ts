@@ -2,7 +2,7 @@
 
 import { SprintInfo } from './types';
 import { JiraClient } from '@/lib/services/jira/client';
-import { BOARD_IDS } from '@/lib/constants/jira';
+import { BOARD_ID_FALLBACK } from '@/lib/constants/jira';
 import { dbServer } from '@/lib/db';
 
 type JiraInstance = 'ignite' | 'hmg';
@@ -100,6 +100,16 @@ async function getBoardInfo(
   return null;
 }
 
+
+/**
+ * 보드 ID 조회 — DB projects.board_id 우선, 없으면 상수 폴백
+ */
+export async function resolveBoardId(
+  projectKey: keyof typeof BOARD_ID_FALLBACK
+): Promise<number> {
+  const info = await getBoardInfo(projectKey);
+  return info?.boardId ?? BOARD_ID_FALLBACK[projectKey];
+}
 
 /**
  * 소스 프로젝트 스프린트 이름에서 기간 추출
@@ -209,6 +219,7 @@ export async function preloadSprintCache(
  */
 export async function getFehgActiveSprintInfo(): Promise<SprintInfo> {
   const client = new JiraClient('ignite');
+  const boardId = await resolveBoardId('FEHG');
   const result = await client.get<{
     values: Array<{
       id: number;
@@ -217,7 +228,7 @@ export async function getFehgActiveSprintInfo(): Promise<SprintInfo> {
       startDate?: string;
       endDate?: string;
     }>;
-  }>(`agile/1.0/board/${BOARD_IDS.FEHG}/sprint`, { state: 'active' });
+  }>(`agile/1.0/board/${boardId}/sprint`, { state: 'active' });
 
   if (!result.success || !result.data?.values?.length) {
     throw new Error(`FEHG 액티브 스프린트 조회 실패: ${result.error ?? '없음'}`);
@@ -228,7 +239,7 @@ export async function getFehgActiveSprintInfo(): Promise<SprintInfo> {
     id: sprint.id,
     name: sprint.name,
     state: 'active',
-    boardId: BOARD_IDS.FEHG,
+    boardId,
     endDate: sprint.endDate,
   };
 }
@@ -255,9 +266,10 @@ export function buildNextFehgSprintName(currentSprintName: string): string {
  */
 export async function findFehgSprintByName(sprintName: string): Promise<SprintInfo | null> {
   const client = new JiraClient('ignite');
+  const boardId = await resolveBoardId('FEHG');
   const result = await client.get<{
     values: Array<{ id: number; name: string; state: string; endDate?: string }>;
-  }>(`agile/1.0/board/${BOARD_IDS.FEHG}/sprint`, {
+  }>(`agile/1.0/board/${boardId}/sprint`, {
     state: 'active,future',
     maxResults: 50,
   });
@@ -271,7 +283,7 @@ export async function findFehgSprintByName(sprintName: string): Promise<SprintIn
     id: sprint.id,
     name: sprint.name,
     state: sprint.state as 'active' | 'future' | 'closed',
-    boardId: BOARD_IDS.FEHG,
+    boardId,
     endDate: sprint.endDate,
   };
 }
@@ -286,9 +298,10 @@ export async function createFehgSprint(
   endDate: string
 ): Promise<SprintInfo> {
   const client = new JiraClient('ignite');
+  const boardId = await resolveBoardId('FEHG');
   const result = await client.post<{ id: number; name: string; state: string }>(
     'agile/1.0/sprint',
-    { name, originBoardId: BOARD_IDS.FEHG, startDate, endDate }
+    { name, originBoardId: boardId, startDate, endDate }
   );
 
   if (!result.success || !result.data) {
@@ -299,7 +312,7 @@ export async function createFehgSprint(
     id: result.data.id,
     name: result.data.name,
     state: 'future',
-    boardId: BOARD_IDS.FEHG,
+    boardId,
     endDate,
   };
 }
