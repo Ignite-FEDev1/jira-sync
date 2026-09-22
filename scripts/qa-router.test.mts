@@ -2514,17 +2514,32 @@ test('판정 회귀 — 표본이 네 단계를 충분히 덮나', (t) => {
   }
   /*
     덮지 못하는 단계가 있으면 **그 사실을 알고 있어야 한다.**
-    지금 siblings 는 0건이다 — 이 프로젝트에서 거의 안 쓰인다는 뜻이고,
-    바꿔 말하면 회귀 테스트가 그 단계를 못 지킨다.
+
+    `ref_owner` 는 더 이상 세지 않는다. 기본 순서에서 뺐기 때문이다
+    (`JUDGE_TIERS`, 백테스트 3/29 = 10%). 녹화는 기본 순서로 돌므로 그
+    단계는 구조적으로 표본에 안 나온다 — 없다고 실패시키면 **이미 끈 것을
+    켜라고 조르는 테스트**가 된다.
+
+    `siblings` 도 단언하지 않는다. 지금 표본에 1건뿐이라 다음 녹화에서
+    0 이 될 수 있다. 억지로 단언하면 판정과 무관한 이유로 빨개진다.
+    아래 로그가 그 얇음을 눈에 보이게 남긴다.
   */
   const seen = new Set(FIXTURE.cases.map((c) => c.expect.via));
   const covered = [...seen].sort().join(', ');
   assert.ok(seen.has('assigned'), `assigned 가 표본에 없음 (지금: ${covered})`);
   assert.ok(seen.has('epic'), `epic 이 표본에 없음 (지금: ${covered})`);
-  assert.ok(
-    seen.has('ref_owner'),
-    `ref_owner 가 표본에 없음 (지금: ${covered})`
+
+  const count = (v: string) =>
+    FIXTURE!.cases.filter((c) => c.expect.via === v).length;
+  const thin = (['assigned', 'epic', 'siblings'] as const).filter(
+    (v) => count(v) < 3
   );
+  if (thin.length) {
+    t.diagnostic(
+      `표본이 얇은 단계: ${thin.map((v) => `${v} ${count(v)}건`).join(' · ')}` +
+        ' — 이 단계는 회귀가 덜 지켜집니다'
+    );
+  }
 });
 
 /*
