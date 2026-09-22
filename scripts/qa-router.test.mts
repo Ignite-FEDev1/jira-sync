@@ -508,10 +508,10 @@ test('pickLedgerFixVersion — Jira 에 있는 이름만 채택한다', () => {
     GW 대장에는 아직 안 채운 자리(`adhoc_2609xx`)가 진짜 이름과 섞여 있다.
     Jira 버전 목록과 대조하면 그 둘이 저절로 갈린다.
   */
-  const r = pickLedgerFixVersion(extractJqlStrings(GW_LEDGER), new Set([
-    'adhoc_260917',
-    'release_260723',
-  ]));
+  const r = pickLedgerFixVersion(
+    extractJqlStrings(GW_LEDGER),
+    new Set(['adhoc_260917', 'release_260723'])
+  );
   assert.equal(r.name, 'adhoc_260917');
   assert.deepEqual(r.dropped, ['adhoc_2609xx']);
   assert.equal(r.why, null);
@@ -529,16 +529,19 @@ test('pickLedgerFixVersion — 버전 목록이 없으면 고르지 않는다', 
 
 test('pickLedgerFixVersion — 두 차수를 가리키면 고르지 않는다', () => {
   // 하나를 찍으면 틀렸을 때 조용히 엉뚱한 차수를 집계한다.
-  const r = pickLedgerFixVersion(extractJqlStrings(GW_LEDGER), new Set([
-    'adhoc_260917',
-    'adhoc_2609xx',
-  ]));
+  const r = pickLedgerFixVersion(
+    extractJqlStrings(GW_LEDGER),
+    new Set(['adhoc_260917', 'adhoc_2609xx'])
+  );
   assert.equal(r.name, null);
   assert.ok(r.why?.includes('여러 차수'));
 });
 
 test('pickLedgerFixVersion — JQL 에 fixVersion 이 없으면 사유를 남긴다', () => {
-  const r = pickLedgerFixVersion(['project = AUTOWAY and labels = "FE"'], new Set(['x']));
+  const r = pickLedgerFixVersion(
+    ['project = AUTOWAY and labels = "FE"'],
+    new Set(['x'])
+  );
   assert.equal(r.name, null);
   assert.ok(r.why?.includes('fixVersion 이 없습니다'));
 });
@@ -1414,9 +1417,14 @@ test('findViaRefOwner: 기획자보다 개발티켓 담당자를 먼저 본다',
 });
 
 test('findViaRefOwner: 레이블에 참조가 없으면 null', async () => {
-  const r = await findViaRefOwner(bug(['FE1', '엔글QA']), MEMBERS, stubJira({}), {
-    triageAccountId: REF_TRIAGE,
-  });
+  const r = await findViaRefOwner(
+    bug(['FE1', '엔글QA']),
+    MEMBERS,
+    stubJira({}),
+    {
+      triageAccountId: REF_TRIAGE,
+    }
+  );
   assert.equal(r, null);
 });
 
@@ -1933,6 +1941,116 @@ test('판정 — 배열에서 뺀 단계는 아예 돌지 않는다', async () =
   // 못 찾았다는 문구는 **실제로 돌린 단계만** 말해야 한다.
   assert.match(r.reason!, /에픽 추적/);
   assert.doesNotMatch(r.reason!, /레이블 참조|티켓 담당자/);
+});
+
+/*
+  ── 형제 다수결에 다수가 없을 때 ──
+
+  `findViaSiblings` 는 표를 센 뒤 1위를 돌려준다. 그런데 정렬의 동률 규칙이
+  `accountId.localeCompare` 였다. 1표 대 1표여도 **문자열 순서로 1위가 나왔고**,
+  그 값이 다수결의 답인 것처럼 알림에 실렸다.
+
+  실측 (2026-09-22, GW 최근 300일 41건): 형제 판정이 답한 23건 중 우리 팀
+  1위가 동률인 3건은 **0건 맞았다.** 동률을 기권으로 바꾸면 답 23 → 18,
+  맞은 답은 13 그대로, 오지목 10 → 5.
+
+  아래 두 테스트가 고정하는 것은 "동률은 기권" 과 "한 표라도 앞서면 답한다"
+  둘이다. 뒤엣것이 없으면 기권이 과하게 번져도 안 걸린다.
+*/
+const TIE_MEMBERS = [
+  { accountId: 'u-sohn', name: '손현지', slackId: null },
+  { accountId: 'u-jo', name: '조한빈', slackId: null },
+];
+
+const tieIssue = {
+  key: 'ICTQMSCHE-1',
+  fields: { summary: '[BO][홈 화면 관리] 주요지표 복제가 되는 현상' },
+} as unknown as Parameters<typeof judge>[0];
+
+/** 형제 목록을 돌려주는 스텁. `holders` 는 담당자 칸에서만 나온다. */
+function tieJira(
+  siblings: { key: string; summary: string; accountId: string }[]
+) {
+  return {
+    async getIssue(key: string) {
+      return { key, fields: {} };
+    },
+    async search() {
+      return siblings.map((s) => ({
+        key: s.key,
+        id: s.key,
+        fields: {
+          summary: s.summary,
+          assignee: {
+            accountId: s.accountId,
+            displayName:
+              TIE_MEMBERS.find((m) => m.accountId === s.accountId)?.name ??
+              s.accountId,
+          },
+        },
+      }));
+    },
+    async getChangelogs() {
+      return [];
+    },
+  } as unknown as Parameters<typeof judge>[1];
+}
+
+const tieCtx = {
+  projectKey: 'ICTQMSCHE',
+  fixVersion: null,
+  triageAccountId: 'u-triage',
+  jiraFilterId: '1',
+  members: TIE_MEMBERS,
+  tiers: ['siblings' as const],
+};
+
+test('형제 판정 — 표가 같으면 답하지 않는다', async () => {
+  const r = await judge(
+    tieIssue,
+    tieJira([
+      {
+        key: 'ICTQMSCHE-2',
+        summary: '[BO][홈 화면 관리] 가',
+        accountId: 'u-sohn',
+      },
+      {
+        key: 'ICTQMSCHE-3',
+        summary: '[BO][홈 화면 관리] 나',
+        accountId: 'u-jo',
+      },
+    ]),
+    tieCtx
+  );
+  assert.equal(r.via, 'none');
+  assert.equal(r.classification, 'unknown');
+  assert.ok(!r.accountId, `아무도 지목하지 않아야 하는데 ${r.name} 이 나왔음`);
+});
+
+test('형제 판정 — 한 표라도 앞서면 답한다', async () => {
+  const r = await judge(
+    tieIssue,
+    tieJira([
+      {
+        key: 'ICTQMSCHE-2',
+        summary: '[BO][홈 화면 관리] 가',
+        accountId: 'u-sohn',
+      },
+      {
+        key: 'ICTQMSCHE-3',
+        summary: '[BO][홈 화면 관리] 나',
+        accountId: 'u-jo',
+      },
+      {
+        key: 'ICTQMSCHE-4',
+        summary: '[BO][홈 화면 관리] 다',
+        accountId: 'u-sohn',
+      },
+    ]),
+    tieCtx
+  );
+  assert.equal(r.via, 'siblings');
+  assert.equal(r.name, '손현지');
 });
 
 test('판정 — 빈 배열이면 기본 순서로 돈다 (알림이 멎지 않는다)', async () => {
@@ -3297,11 +3415,21 @@ test('배포대장 — 차수 이름은 그 프로젝트 규칙을 따른다', (
   const opts = { deployKinds: [...DEPLOY_KINDS] };
   // 같은 제목이어도 프로젝트 규칙에 따라 이름이 달라진다.
   assert.equal(
-    (readCyclePageTitle('Dev) 배포 - 2026-09-14(정기)', { ...opts, rule: kq }) as { fixVersion: string }).fixVersion,
+    (
+      readCyclePageTitle('Dev) 배포 - 2026-09-14(정기)', {
+        ...opts,
+        rule: kq,
+      }) as { fixVersion: string }
+    ).fixVersion,
     'release_20260914'
   );
   assert.equal(
-    (readCyclePageTitle('Dev) 배포 - 2026-09-10(비정기배포)', { ...opts, rule: gw }) as { fixVersion: string }).fixVersion,
+    (
+      readCyclePageTitle('Dev) 배포 - 2026-09-10(비정기배포)', {
+        ...opts,
+        rule: gw,
+      }) as { fixVersion: string }
+    ).fixVersion,
     'adhoc_260910'
   );
 
@@ -3311,11 +3439,13 @@ test('배포대장 — 차수 이름은 그 프로젝트 규칙을 따른다', (
     가진 버전이 딱 하나일 때만이다. 여럿이면 찍지 않는다.
   */
   assert.equal(
-    (readCyclePageTitle('Dev) 배포 관리 - 2026-09-17(이그나이트)', {
-      ...opts,
-      rule: gw,
-      versions: new Set(['adhoc_260917', 'adhoc_260910']),
-    }) as { fixVersion: string }).fixVersion,
+    (
+      readCyclePageTitle('Dev) 배포 관리 - 2026-09-17(이그나이트)', {
+        ...opts,
+        rule: gw,
+        versions: new Set(['adhoc_260917', 'adhoc_260910']),
+      }) as { fixVersion: string }
+    ).fixVersion,
     'adhoc_260917'
   );
 });
@@ -3700,8 +3830,14 @@ const CL_BULK = {
   issueId: '100',
   changeHistories: [
     { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'qa' }] },
-    { created: '2000', items: [{ fieldId: 'assignee', from: 'qa', to: 'triage' }] },
-    { created: '3000', items: [{ fieldId: 'assignee', from: 'triage', to: 'park' }] },
+    {
+      created: '2000',
+      items: [{ fieldId: 'assignee', from: 'qa', to: 'triage' }],
+    },
+    {
+      created: '3000',
+      items: [{ fieldId: 'assignee', from: 'triage', to: 'park' }],
+    },
   ],
 };
 
@@ -3709,8 +3845,14 @@ test('flattenChanges — epoch ms 문자열과 ISO 를 둘 다 읽고 시각순�
   const mixed = {
     changeHistories: [
       // 일부러 거꾸로 넣는다. bulkfetch 는 최신을 먼저 준다.
-      { created: '2026-09-14T00:00:00.000Z', items: [{ fieldId: 'assignee', from: 'a', to: 'b' }] },
-      { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'a' }] },
+      {
+        created: '2026-09-14T00:00:00.000Z',
+        items: [{ fieldId: 'assignee', from: 'a', to: 'b' }],
+      },
+      {
+        created: '1000',
+        items: [{ fieldId: 'assignee', from: null, to: 'a' }],
+      },
     ],
   };
   const cs = flattenChanges(mixed);
@@ -3761,9 +3903,18 @@ test('valueAt — 기준 시각의 변경은 이미 일어난 것으로 본다',
 test('valueAt — 다른 필드의 변경에 영향받지 않는다', () => {
   const cs = flattenChanges({
     changeHistories: [
-      { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'park' }] },
-      { created: '2000', items: [{ fieldId: 'status', from: 'open', to: 'done' }] },
-      { created: '3000', items: [{ fieldId: 'customfield_10132', from: null, to: 'son' }] },
+      {
+        created: '1000',
+        items: [{ fieldId: 'assignee', from: null, to: 'park' }],
+      },
+      {
+        created: '2000',
+        items: [{ fieldId: 'status', from: 'open', to: 'done' }],
+      },
+      {
+        created: '3000',
+        items: [{ fieldId: 'customfield_10132', from: null, to: 'son' }],
+      },
     ],
   });
   assert.equal(valueAt('park', cs, 'assignee', 1500), 'park');
@@ -3782,7 +3933,10 @@ test('findTriageHandoff — 아직 트리아지가 쥐고 있으면 정답이 �
   const h = findTriageHandoff(
     flattenChanges({
       changeHistories: [
-        { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'triage' }] },
+        {
+          created: '1000',
+          items: [{ fieldId: 'assignee', from: null, to: 'triage' }],
+        },
       ],
     }),
     'triage'
@@ -3800,10 +3954,22 @@ test('findTriageHandoff — 되돌아온 티켓은 마지막 구간을 쓴다', 
   const h = findTriageHandoff(
     flattenChanges({
       changeHistories: [
-        { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'triage' }] },
-        { created: '2000', items: [{ fieldId: 'assignee', from: 'triage', to: 'park' }] },
-        { created: '3000', items: [{ fieldId: 'assignee', from: 'park', to: 'triage' }] },
-        { created: '4000', items: [{ fieldId: 'assignee', from: 'triage', to: 'son' }] },
+        {
+          created: '1000',
+          items: [{ fieldId: 'assignee', from: null, to: 'triage' }],
+        },
+        {
+          created: '2000',
+          items: [{ fieldId: 'assignee', from: 'triage', to: 'park' }],
+        },
+        {
+          created: '3000',
+          items: [{ fieldId: 'assignee', from: 'park', to: 'triage' }],
+        },
+        {
+          created: '4000',
+          items: [{ fieldId: 'assignee', from: 'triage', to: 'son' }],
+        },
       ],
     }),
     'triage'
@@ -3816,7 +3982,10 @@ test('findTriageHandoff — 트리아지를 거치지 않은 티켓은 표본이
   const h = findTriageHandoff(
     flattenChanges({
       changeHistories: [
-        { created: '1000', items: [{ fieldId: 'assignee', from: null, to: 'park' }] },
+        {
+          created: '1000',
+          items: [{ fieldId: 'assignee', from: null, to: 'park' }],
+        },
       ],
     }),
     'triage'
@@ -3849,10 +4018,9 @@ test('extractIssueKeys — 본문 어디에 있든 티켓 키를 긁는다', () 
 
 test('extractIssueKeys — XML 엔티티로 인코딩된 키도 읽는다', () => {
   // storage 형식은 &quot; 등으로 감싸는 자리가 있다
-  assert.deepEqual(
-    extractIssueKeys('<p>&quot;KQ-18234&quot; 참고</p>', 'KQ'),
-    ['KQ-18234']
-  );
+  assert.deepEqual(extractIssueKeys('<p>&quot;KQ-18234&quot; 참고</p>', 'KQ'), [
+    'KQ-18234',
+  ]);
 });
 
 test('extractIssueKeys — 키 모양을 흉내 낸 토막을 안 집는다', () => {

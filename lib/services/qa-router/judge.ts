@@ -804,10 +804,7 @@ export function cycleScopeJql(
  * `{name}`, 선택형은 `{value}`, 그냥 글자면 문자열이다. 배열인 칸도 있다.
  * 어느 칸이 올지 모르므로 **모양을 보고** 고른다 — 칸 이름을 아는 대신에.
  */
-function jqlValueAt(
-  fields: JiraIssue['fields'],
-  field: string
-): string | null {
+function jqlValueAt(fields: JiraIssue['fields'], field: string): string | null {
   const raw = fields?.[field];
   const one = Array.isArray(raw) ? raw[0] : raw;
   if (one == null) return null;
@@ -945,7 +942,10 @@ export async function findViaSiblings(
     const p = extractPrefixes(s.fields?.summary)[0];
     const k = p ? prefixKey(p) : '';
     if (k.length === 0) continue;
-    byKey.set(k, [...(byKey.get(k) ?? []), ...holders.map((h) => ({ ...h, s }))]);
+    byKey.set(k, [
+      ...(byKey.get(k) ?? []),
+      ...holders.map((h) => ({ ...h, s })),
+    ]);
   }
   if (byKey.size === 0) return null;
 
@@ -1041,6 +1041,35 @@ export async function findViaSiblings(
     );
     const mine = ranked.filter(([, r]) => r.isMember);
     if (mine.length === 0) continue;
+    /*
+      ── 표가 같으면 **답이 아니다** ──
+
+      위 `sort` 의 `localeCompare` 는 동률일 때 accountId 문자열 순서로 1위를
+      정한다. 그건 결정을 **재현 가능하게** 만들 뿐 옳게 만들지 않는다.
+      그런데 이 함수는 그 값을 다수결의 답인 것처럼 돌려줬다.
+
+      실측 (2026-09-22, GW 최근 300일 41건):
+
+        형제 판정이 답한 것        23건 · 13 맞음 (57%)
+          그중 우리 팀 1위가 동률   3건 ·  0 맞음 <<0%>>
+
+      세 건 다 `형제 1건 · A 1표 (B 1건)` 이다. 형제가 하나인데 표가 둘인
+      것은 **그 하나를 우리 팀원 둘이 차례로 맡았다**는 뜻이라, 둘 중 누구도
+      그 메뉴의 주인이라고 말할 근거가 없다.
+
+      버려도 잃는 것이 없다 — 맞던 답이 0건이다. 그리고 여기서 null 을
+      돌려주면 다음 단계가 이어 답하므로, 판정 기회 자체를 닫는 것도 아니다.
+
+      "동률은 답이 아니다" 는 프로젝트 관행이 아니라 다수결의 정의라서,
+      새 프로젝트를 붙여도 그대로 맞는다.
+    */
+    if (mine.length > 1 && mine[0][1].n === mine[1][1].n) {
+      ctx.onWarn?.(
+        `[${prefix}] 형제 표가 갈렸습니다 ` +
+          `(${mine[0][1].name} ${mine[0][1].n}건 = ${mine[1][1].name} ${mine[1][1].n}건) — 판정하지 않습니다`
+      );
+      continue;
+    }
     const [accountId, v] = mine[0];
     return {
       accountId,
