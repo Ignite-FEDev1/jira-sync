@@ -10,6 +10,13 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Plus, Pencil, Trash2, Check, Loader2, Search, CircleCheck, CircleX } from 'lucide-react';
 import { toast } from 'sonner';
 import { db } from '@/lib/db';
@@ -26,6 +33,12 @@ interface Project {
   jiraInstance: 'ignite' | 'hmg';
   boardId: number | null;
   teamIds: string[];
+}
+
+interface JiraBoard {
+  id: number;
+  name: string;
+  type: string;
 }
 
 interface VerifyResult {
@@ -60,6 +73,9 @@ export default function ProjectsPage() {
   const [verifying, setVerifying] = useState(false);
   const [verified, setVerified] = useState<VerifyResult | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
+  const [boards, setBoards] = useState<JiraBoard[]>([]);
+  const [boardsFallback, setBoardsFallback] = useState(false);
+  const [loadingBoards, setLoadingBoards] = useState(false);
 
   const fetchData = useCallback(async () => {
     const [teamsRes, projectsRes, ptRes] = await Promise.all([
@@ -96,11 +112,44 @@ export default function ProjectsPage() {
     fetchData();
   }, [fetchData]);
 
+  const loadBoards = useCallback(
+    async (
+      instance: 'ignite' | 'hmg',
+      projectKey: string
+    ): Promise<JiraBoard[]> => {
+      setLoadingBoards(true);
+      try {
+        const res = await jiraFetch(
+          `/api/jira/${instance}/agile/1.0/board?projectKeyOrId=${projectKey}&maxResults=100`
+        );
+        const result = await res.json();
+        const raw: JiraBoard[] = result.success
+          ? (result.data?.values ?? [])
+          : [];
+        const all = raw.map((board) => ({ ...board, id: Number(board.id) }));
+        const scrumBoards = all.filter((board) => board.type === 'scrum');
+        const options = scrumBoards.length > 0 ? scrumBoards : all;
+        setBoardsFallback(scrumBoards.length === 0 && all.length > 0);
+        setBoards(options);
+        return options;
+      } catch {
+        setBoards([]);
+        setBoardsFallback(false);
+        return [];
+      } finally {
+        setLoadingBoards(false);
+      }
+    },
+    []
+  );
+
   const updateForm = (field: keyof FormState, value: string | string[]) => {
     setForm((prev) => ({ ...prev, [field]: value }));
     if (field === 'jiraProjectKey' || field === 'jiraInstance') {
       setVerified(null);
       setVerifyError(null);
+      setBoards([]);
+      setBoardsFallback(false);
     }
   };
 
@@ -122,19 +171,10 @@ export default function ProjectsPage() {
       const result = await res.json();
 
       if (result.success && result.data) {
-        // Board ID 조회 (Agile API)
-        let boardId: number | null = null;
-        try {
-          const boardRes = await jiraFetch(
-            `/api/jira/${form.jiraInstance}/agile/1.0/board?projectKeyOrId=${projectKey}`
-          );
-          const boardResult = await boardRes.json();
-          if (boardResult.success && boardResult.data?.values?.length > 0) {
-            boardId = boardResult.data.values[0].id;
-          }
-        } catch {
-          // Board ID 조회 실패는 무시 (필수가 아님)
-        }
+        // 보드 목록 조회 (스크럼 보드만, 없으면 전체)
+        const options = await loadBoards(form.jiraInstance, projectKey);
+        // 보드가 하나뿐이면 자동 선택, 여러 개면 사용자가 직접 고른다
+        const boardId = options.length === 1 ? options[0].id : null;
 
         const v: VerifyResult = {
           key: result.data.key,
@@ -144,7 +184,11 @@ export default function ProjectsPage() {
         };
         setVerified(v);
         setForm((prev) => ({ ...prev, name: v.key }));
-        const boardInfo = boardId ? `, Board: ${boardId}` : '';
+        const boardInfo = boardId
+          ? `, Board: ${boardId}`
+          : options.length > 1
+            ? `, 보드 ${options.length}개 - 선택 필요`
+            : '';
         toast.success(`프로젝트 확인: ${v.key} (ID: ${v.id}${boardInfo}) - ${v.name}`);
       } else {
         setVerifyError(
@@ -177,6 +221,8 @@ export default function ProjectsPage() {
     setEditingId(null);
     setVerified(null);
     setVerifyError(null);
+    setBoards([]);
+    setBoardsFallback(false);
   };
 
   const handleAdd = async () => {
@@ -190,6 +236,10 @@ export default function ProjectsPage() {
     }
     if (form.teamIds.length === 0) {
       toast.error('팀을 최소 하나 선택해주세요.');
+      return;
+    }
+    if (boards.length > 0 && !verified.boardId) {
+      toast.error('보드를 선택해주세요.');
       return;
     }
 
@@ -237,6 +287,7 @@ export default function ProjectsPage() {
     setVerified({ key: project.name, id: project.jiraProjectId, name: project.name, boardId: project.boardId });
     setVerifyError(null);
     setIsAdding(false);
+    void loadBoards(project.jiraInstance, project.name);
   };
 
   const handleEditSave = async () => {
@@ -246,6 +297,10 @@ export default function ProjectsPage() {
     }
     if (!form.name.trim() || form.teamIds.length === 0) {
       toast.error('필수 항목을 입력해주세요.');
+      return;
+    }
+    if (boards.length > 0 && !verified.boardId) {
+      toast.error('보드를 선택해주세요.');
       return;
     }
 
@@ -304,42 +359,91 @@ export default function ProjectsPage() {
   const handleResetVerify = () => {
     setVerified(null);
     setVerifyError(null);
+    setBoards([]);
+    setBoardsFallback(false);
     setForm((prev) => ({ ...prev, name: '', jiraProjectKey: '' }));
   };
 
   const formUI = (
     <div className="border rounded-lg p-4 space-y-3 bg-muted/30">
       {verified ? (
-        /* 검증 완료 상태: 읽기 전용 요약 + 다시 검증 버튼 */
-        <div className="space-y-1">
-          <label className="text-xs font-medium">Jira 프로젝트</label>
-          <div className="flex items-center gap-2">
-            <div className="flex-1 flex items-center gap-2 rounded-md border bg-muted/50 px-3 py-2">
-              <CircleCheck className="h-4 w-4 text-emerald-500 shrink-0" />
-              <span
-                className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-                  form.jiraInstance === 'hmg'
-                    ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                    : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
-                }`}
+        /* 검증 완료 상태: 읽기 전용 요약 + 보드 선택 + 다시 검증 버튼 */
+        <>
+          <div className="space-y-1">
+            <label className="text-xs font-medium">Jira 프로젝트</label>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 flex items-center gap-2 rounded-md border bg-muted/50 px-3 py-2">
+                <CircleCheck className="h-4 w-4 text-emerald-500 shrink-0" />
+                <span
+                  className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                    form.jiraInstance === 'hmg'
+                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                      : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+                  }`}
+                >
+                  {form.jiraInstance === 'hmg' ? 'HMG' : 'Ignite'}
+                </span>
+                <span className="font-mono font-medium text-sm">{verified.key}</span>
+                <span className="text-xs text-muted-foreground">
+                  (ID: {verified.id}) — {verified.name}
+                </span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={handleResetVerify}
               >
-                {form.jiraInstance === 'hmg' ? 'HMG' : 'Ignite'}
-              </span>
-              <span className="font-mono font-medium text-sm">{verified.key}</span>
-              <span className="text-xs text-muted-foreground">
-                (ID: {verified.id}{verified.boardId ? `, Board: ${verified.boardId}` : ''}) — {verified.name}
-              </span>
+                변경
+              </Button>
             </div>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={handleResetVerify}
-            >
-              변경
-            </Button>
           </div>
-        </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-medium">
+              보드 <span className="text-destructive">*</span>
+            </label>
+            {loadingBoards ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                보드 목록을 불러오는 중…
+              </div>
+            ) : boards.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                이 프로젝트에는 보드가 없습니다. 스프린트 동기화는 동작하지
+                않습니다.
+              </p>
+            ) : (
+              <>
+                <Select
+                  value={verified.boardId ? String(verified.boardId) : ''}
+                  onValueChange={(value) =>
+                    setVerified((prev) =>
+                      prev ? { ...prev, boardId: Number(value) } : prev
+                    )
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="보드를 선택하세요" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {boards.map((board) => (
+                      <SelectItem key={board.id} value={String(board.id)}>
+                        {board.name} (#{board.id}) · {board.type}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {boardsFallback && (
+                  <p className="text-xs text-amber-600">
+                    스크럼 보드가 없어 전체 보드를 표시합니다. 스프린트가 없는
+                    보드를 고르면 스프린트 동기화가 동작하지 않습니다.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        </>
       ) : (
         /* 검증 전: 인스턴스 선택 + Key 입력 */
         <>
