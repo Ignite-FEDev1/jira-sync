@@ -40,15 +40,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 
-import {
-  createConfluenceClient,
-  createJiraClient,
-} from '@/lib/services/qa-router/clients';
-import {
-  extractIssueKeys,
-  extractJqlStrings,
-  pickLedgerProjectKey,
-} from '@/lib/services/qa-router/ledger-jql';
+import { createJiraClient } from '@/lib/services/qa-router/clients';
 import { resolveJiraAccess } from '@/lib/services/qa-router/api-creds';
 import {
   judge,
@@ -322,26 +314,6 @@ interface Variant {
    * 답을 더 찾을 수 있으므로, 이 측정은 **보수적**이다(실제가 같거나 낫다).
    */
   rejectTriage?: boolean;
-  /**
-   * 판정 결과가 **그 차수 배포대장에 적힌 담당자** 가 아니면 버린다.
-   *
-   * 1명을 고르는 데 쓰는 게 아니라 **거름망**으로 쓰는 것이다. 실측
-   * (2026-09-22): 대장 담당자 명단이 팀 7명을 평균 3.2명으로 좁히고 정답을
-   * 73% 담는다(무작위 45%). 반대로 그 명단으로 **1명을 고르는** 것은
-   * 무작위보다 나빴다(18% vs 31%) — 텍스트가 닮았다는 건 "그건 이미 다른
-   * 사람이 처리한 건" 이라 역방향 신호가 되기 때문이다.
-   *
-   * 그래서 "누구인가" 는 기존 판정에 맡기고, 그 답이 **그 차수에 일한 적
-   * 없는 사람** 이면 거른다. GW Tier 3 가 서성주에게 9건 쏠렸는데 그 차수
-   * 대장에 서성주가 없으면 그게 걸린다.
-   *
-   * 후처리라 **보수적**이다. 진짜 구현은 후보 단계에서 걸러 2등이 올라올
-   * 수 있으므로, 실제 결과는 이 측정과 같거나 낫다.
-   *
-   * 대장에 티켓 키가 없는 차수(실측 KQ)는 거르지 않는다 — 명단이 없는데
-   * 거르면 전부 버리게 된다.
-   */
-  poolFilter?: boolean;
 }
 
 const VARIANTS: Variant[] = [
@@ -350,8 +322,6 @@ const VARIANTS: Variant[] = [
   { name: 'no-type', dropTypeFilter: true },
   { name: 'no-t4+no-type', dropTier4: true, dropTypeFilter: true },
   { name: 'no-triage', rejectTriage: true },
-  { name: 'pool-filter', poolFilter: true },
-  { name: 'no-t4+pool', dropTier4: true, poolFilter: true },
 ];
 
 interface ScoreDeps {
@@ -366,9 +336,6 @@ interface ScoreDeps {
   tiers: JudgeTier[];
   devIssueTypes: string[] | undefined;
   rejectTriage: boolean;
-  poolFilter: boolean;
-  /** 차수 배포일(YYYY-MM-DD) → 그 대장에 적힌 티켓의 담당자 accountId */
-  pools: Map<string, Set<string>>;
 }
 
 async function scoreAll(samples: Sample[], d: ScoreDeps): Promise<Scored[]> {
@@ -405,17 +372,7 @@ async function scoreAll(samples: Sample[], d: ScoreDeps): Promise<Scored[]> {
     });
     const expectedIsMember = d.memberIds.has(s.expected);
     // 트리아지를 가리킨 답은 버린다 (변형). 위 `rejectTriage` 주석 참고.
-    let rejected = d.rejectTriage && r.accountId === d.cfg.triageAccountId;
-    if (!rejected && d.poolFilter && r.accountId) {
-      /*
-        그 시점 **이후** 첫 배포 차수를 이 버그가 속한 차수로 본다.
-        대장이 비어 있으면(키 0개) 거르지 않는다 — 명단 없이 거르면 전부 버린다.
-      */
-      const day = new Date(s.at).toISOString().slice(0, 10);
-      const ymd = [...d.pools.keys()].sort().find((y) => y >= day);
-      const pool = ymd ? d.pools.get(ymd) : undefined;
-      if (pool && pool.size > 0 && !pool.has(r.accountId)) rejected = true;
-    }
+    const rejected = d.rejectTriage && r.accountId === d.cfg.triageAccountId;
     const acct = rejected ? null : (r.accountId ?? null);
     out.push({
       ...s,
@@ -552,58 +509,6 @@ async function main() {
     if (samples.length === 0) continue;
 
     /*
-      ── 차수별 담당자 풀 (거름망 변형이 쓴다) ──
-
-      배포대장 본문에서 티켓 키를 긁고 담당자를 붙인다. 루트 → 월 → 차수로
-      직접 걸어 내려간다 — `qa_router_cycles` 는 배치가 최근에 걷은 것만
-      들고 있어서(실측 GW 1건) 과거 차수를 못 준다.
-
-      `--variants` 일 때만 모은다. 대장이 많으면 왕복이 크고, 기본 실행은
-      이 값을 안 쓴다.
-    */
-    const pools = new Map<string, Set<string>>();
-    if (arg('variants') !== null && cfg.confluenceDeployRootId) {
-      const confluence = createConfluenceClient(access);
-      for (const mo of await confluence.getChildren(cfg.confluenceDeployRootId)) {
-        for (const kid of await confluence.getChildren(mo.id)) {
-          const m = kid.title.match(/(\d{4})-(\d{2})-(\d{2})/);
-          if (!m) continue;
-          const ymd = `${m[1]}-${m[2]}-${m[3]}`;
-          try {
-            const body = await confluence.getPageBody(kid.id);
-            const proj =
-              pickLedgerProjectKey(extractJqlStrings(body)) ?? projectKey;
-            const keys = extractIssueKeys(body, proj);
-            if (keys.length === 0) { pools.set(ymd, new Set()); continue; }
-            const issues = await jira.searchAll(
-              `key IN (${keys.join(', ')})`,
-              ['assignee'],
-              500
-            );
-            pools.set(
-              ymd,
-              new Set(
-                issues
-                  .map((i) => i.fields?.assignee?.accountId)
-                  .filter((a): a is string => !!a)
-              )
-            );
-          } catch {
-            pools.set(ymd, new Set());
-          }
-        }
-      }
-      const withKeys = [...pools.entries()]
-        .filter(([, p]) => p.size > 0)
-        .map(([y]) => y)
-        .sort();
-      console.log(
-        `  (대장 ${pools.size}개 중 ${withKeys.length}개에서 담당자 명단 확보)`
-      );
-      if (withKeys.length) console.log(`   확보된 차수: ${withKeys.join(' ')}`);
-    }
-
-    /*
       Jira 읽기를 **변형 전체가 공유한다.** 같은 데이터로 채점해야 차이가
       변형 때문이라고 말할 수 있다.
     */
@@ -627,8 +532,6 @@ async function main() {
             ? [cfg.devIssueTypeName]
             : undefined,
         rejectTriage: !!v.rejectTriage,
-        poolFilter: !!v.poolFilter,
-        pools,
       });
 
     if (arg('variants') !== null) {

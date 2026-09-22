@@ -973,6 +973,7 @@ export async function runTick(
     if (!parsedFv) {
       log('차수를 모릅니다 · 판정 알림만 돕니다 (차수 현황은 쉽니다)');
       if (state.activeCycle) {
+        state.activeCycle = null;
         await repo.saveState(cfg.id, { activeCycle: null });
       }
     }
@@ -1012,6 +1013,7 @@ export async function runTick(
         바뀔 때까지 매 tick 지나간다.
       */
         if (state.activeCycle) {
+          state.activeCycle = null;
           await repo.saveState(cfg.id, { activeCycle: null });
         }
         await finishOk(cfg, state, log, deps, opsChannel);
@@ -1038,6 +1040,18 @@ export async function runTick(
           threadTs: sameCycle ? (cycle?.threadTs ?? null) : null,
           cachedAt: now().toISOString(),
         };
+        /*
+          로컬 `state` 도 같이 맞춘다.
+
+          `state` 는 이 함수 맨 위에서 한 번 읽고 **재할당되지 않는다.**
+          `saveState` 는 DB 에만 쓰므로, 여기서 안 맞추면 이 아래에서
+          `state.activeCycle` 을 읽는 코드가 **직전 틱의 값**을 본다.
+
+          지금은 그 값을 읽는 곳이 `finishOk` 정도라 증상이 안 보이지만,
+          차수 정보를 쓰는 코드가 하나 더 붙는 순간 조용히 틀린다 —
+          실제로 그런 코드를 붙이다가 발견했다.
+        */
+        state.activeCycle = cycle;
         await repo.saveState(cfg.id, { activeCycle: cycle });
       }
 
@@ -1090,6 +1104,8 @@ export async function runTick(
             threadTs: res.ts,
             startedAt: now().toISOString(),
           };
+          // 위와 같은 이유 — 로컬 `state` 를 안 맞추면 아래가 옛 값을 본다.
+          state.activeCycle = cycle;
           await repo.saveState(cfg.id, {
             activeCycle: cycle,
             ...(freshCycle ? { seen: {} } : {}),
