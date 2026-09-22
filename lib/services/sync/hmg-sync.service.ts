@@ -231,7 +231,7 @@ export class HMGSyncService {
 
       // 1. 필드 매핑 (DB 기반 또는 하드코딩)
       const mappedFields = syncProfileId
-        ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey, teamUsers)
+        ? (await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey, teamUsers, 'create')).fields
         : await mapFieldsForAutoway(
             fehgTicket,
             assigneeAccountId,
@@ -331,7 +331,7 @@ export class HMGSyncService {
     assigneeAccountId: string,
     teamUsers?: SyncOptions['teamUsers'],
     syncProfileId?: string,
-    profileInfo?: { targetProjectKey: string; sourceLinkField?: string | null } | null
+    profileInfo?: { targetProjectKey: string; linkField?: string | null; sourceLinkField?: string | null } | null
   ): Promise<SyncResult> {
     const targetProjectKey = profileInfo?.targetProjectKey || 'AUTOWAY';
 
@@ -339,14 +339,18 @@ export class HMGSyncService {
       this.logger.info(`${targetKey}: 업데이트 시작...${syncProfileId ? ' (DB 매핑)' : ''}`);
 
       // 1. 필드 매핑 (DB 기반 또는 하드코딩)
-      const mappedFields = syncProfileId
-        ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey, teamUsers)
-        : await mapFieldsForAutoway(
+      const clearCtx = {
+        linkField: profileInfo?.linkField,
+        sourceLinkField: profileInfo?.sourceLinkField,
+      };
+      const { fields: mappedFields, cleared } = syncProfileId
+        ? await mapFieldsFromDb(fehgTicket, syncProfileId, targetProjectKey, teamUsers, 'update', clearCtx)
+        : { fields: await mapFieldsForAutoway(
             fehgTicket,
             assigneeAccountId,
             teamUsers,
             targetProjectKey as 'AUTOWAY' | 'MEMBERSHIP'
-          );
+          ), cleared: [] };
 
       // 1-1. 부모 에픽 주입 (FEHG 부모 에픽이 있으면 대상 측 에픽 매칭/생성/상태동기화)
       await this.injectEpicLink(
@@ -361,8 +365,9 @@ export class HMGSyncService {
       const allFields = { ...mappedFields, ...sourceLinkFields };
 
       // 3. 필드 매핑 로그
+      const clearedLog = cleared.length > 0 ? ` / 비워질 필드: ${cleared.join(', ')}` : '';
       this.logger.info(
-        `${targetKey}: 업데이트 필드 → ${JSON.stringify(Object.keys(allFields))}`
+        `${targetKey}: 업데이트 필드 → ${JSON.stringify(Object.keys(allFields))}${clearedLog}`
       );
 
       // 4. 필드 업데이트
@@ -394,6 +399,7 @@ export class HMGSyncService {
         success: true,
         message: '동기화 완료',
         isNewlyCreated: false,
+        clearedFields: cleared.length > 0 ? cleared : undefined,
       };
     } catch (error) {
       const errorMessage =

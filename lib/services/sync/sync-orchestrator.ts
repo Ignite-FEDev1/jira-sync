@@ -214,8 +214,11 @@ export class SyncOrchestrator {
     // 일반 모드: 담당자의 모든 티켓 (완료 포함, 페이지네이션 자동 처리)
     this.logger.info('담당자의 모든 티켓 조회 중...');
     const cutoffDate = SyncOrchestrator.getCutoffDate();
-    const jql = `project = ${sourceProjectKey} AND assignee = "${options.assigneeAccountId}" AND due >= "${cutoffDate}" ORDER BY updated DESC`;
-    this.logger.info(`마감일 기준: ${cutoffDate} 이후`);
+    const jql =
+      `project = ${sourceProjectKey} AND assignee = "${options.assigneeAccountId}" ` +
+      `AND (due >= "${cutoffDate}" OR (due IS EMPTY AND updated >= "${cutoffDate}")) ` +
+      `ORDER BY updated DESC`;
+    this.logger.info(`마감일 기준: ${cutoffDate} 이후 (마감일 없는 티켓은 수정일 기준 포함)`);
 
     this.logger.info(`담당자: ${options.assigneeName || '알 수 없음'}`);
 
