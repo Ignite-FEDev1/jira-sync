@@ -237,6 +237,14 @@ interface Sample {
 
 interface Scored extends Sample {
   got: string | null;
+  /**
+   * 사람이 읽을 이름. **계정 ID 를 잘라 적으면 아무 소용이 없다.**
+   *
+   * `712020:f43…` 만 보고 "이게 누구 일을 누가 받게 되나" 를 판단할 수
+   * 없다. 오지목은 결국 **사람에게 잘못 가는 멘션**이라 이름으로 읽혀야 한다.
+   */
+  expectedName: string;
+  gotName: string | null;
   via: string;
   classification: string;
   reason: string;
@@ -288,6 +296,24 @@ interface Variant {
   name: string;
   dropTier4?: boolean;
   dropTypeFilter?: boolean;
+  /**
+   * 판정이 **트리아지 본인**을 가리키면 답 없음으로 본다.
+   *
+   * 실측으로 찾은 것: KQ 최근 90일의 오지목 10건이 전부 "김가빈 담당" 이고
+   * 김가빈이 트리아지다. 이미 김가빈이 쥔 티켓에 "김가빈 담당" 이라고
+   * 답하는 것은 판정이 아니라 메아리다.
+   *
+   * 다른 세 티어는 이 가드가 다 있다 (`findAssigned:132`,
+   * `siblings:557,573`, `heldByMembers:905`). **Tier 4 만 없다** — rank 가
+   * `isMember`·`kind` 만 보고 트리아지를 검사하지 않는다. 설계 판단이
+   * 아니라 누락으로 보인다.
+   *
+   * 여기서는 후처리로 흉내 낸다. `ref_owner` 가 **마지막 티어**라서 그
+   * 답을 버리면 곧 "답 없음" 이고, 실제 코드 수정과 결과가 같다.
+   * 앞 티어에서 트리아지가 나온 경우라면 실제 수정은 뒤 티어로 흘러가
+   * 답을 더 찾을 수 있으므로, 이 측정은 **보수적**이다(실제가 같거나 낫다).
+   */
+  rejectTriage?: boolean;
 }
 
 const VARIANTS: Variant[] = [
@@ -295,6 +321,7 @@ const VARIANTS: Variant[] = [
   { name: 'no-t4', dropTier4: true },
   { name: 'no-type', dropTypeFilter: true },
   { name: 'no-t4+no-type', dropTier4: true, dropTypeFilter: true },
+  { name: 'no-triage', rejectTriage: true },
 ];
 
 interface ScoreDeps {
@@ -304,8 +331,11 @@ interface ScoreDeps {
   projectKey: string;
   derived: NonNullable<QaRouterState['derived']>;
   memberIds: Set<string>;
+  /** accountId → 이름. 팀 밖 계정은 판정 결과의 이름을 쓰거나 ID 로 떨어진다. */
+  nameOf: (accountId: string) => string;
   tiers: JudgeTier[];
   devIssueTypes: string[] | undefined;
+  rejectTriage: boolean;
 }
 
 async function scoreAll(samples: Sample[], d: ScoreDeps): Promise<Scored[]> {
@@ -341,18 +371,24 @@ async function scoreAll(samples: Sample[], d: ScoreDeps): Promise<Scored[]> {
       tiers: d.tiers,
     });
     const expectedIsMember = d.memberIds.has(s.expected);
+    // 트리아지를 가리킨 답은 버린다 (변형). 위 `rejectTriage` 주석 참고.
+    const rejected =
+      d.rejectTriage && r.accountId === d.cfg.triageAccountId;
+    const acct = rejected ? null : (r.accountId ?? null);
     out.push({
       ...s,
-      got: r.accountId ?? null,
-      via: r.via,
-      classification: r.classification,
-      reason: r.reason,
+      got: acct,
+      expectedName: d.nameOf(s.expected),
+      gotName: acct ? (r.name ?? d.nameOf(acct)) : null,
+      via: rejected ? 'none' : r.via,
+      classification: rejected ? 'unknown' : r.classification,
+      reason: rejected ? `(트리아지 지목을 버림) ${r.reason}` : r.reason,
       expectedIsMember,
       ok: isCorrect(
         s.expected,
         expectedIsMember,
-        r.accountId ?? null,
-        r.classification
+        acct,
+        rejected ? 'unknown' : r.classification
       ),
     });
   }
@@ -417,6 +453,8 @@ async function main() {
     }
     const jira = createJiraClient(access);
     const memberIds = new Set(derived.members.map((m) => m.accountId));
+    const names = new Map(derived.members.map((m) => [m.accountId, m.name]));
+    const nameOf = (id: string) => names.get(id) ?? `외부(${id.slice(-6)})`;
 
     /*
       ── 표본을 어떻게 고르나 ──
@@ -485,6 +523,7 @@ async function main() {
         projectKey,
         derived,
         memberIds,
+        nameOf,
         tiers: v.dropTier4
           ? baseTiers.filter((t) => t !== 'ref_owner')
           : baseTiers,
@@ -493,6 +532,7 @@ async function main() {
           : cfg.devIssueTypeName
             ? [cfg.devIssueTypeName]
             : undefined,
+        rejectTriage: !!v.rejectTriage,
       });
 
     if (arg('variants') !== null) {
@@ -671,6 +711,42 @@ function variantTable(rows: { name: string; scored: Scored[] }[]) {
       ).padStart(12);
     });
     console.log(`${r.name.padEnd(15)} ${cells.join('')}`);
+  }
+
+  /*
+    ── 오지목을 **전부** 이름으로 적는다 ──
+
+    개수만 보면 "10건" 인데, 그 10건이 한 사람에게 몰려 있는지 흩어져
+    있는지에 따라 이야기가 완전히 다르다. 한 사람이 열 번 잘못 불리면
+    그 사람은 봇을 끄고 싶어진다. 그리고 "누구 일을 누가 받게 되나" 는
+    개수로 답할 수 없는 질문이다.
+
+    최대 10건으로 자르지 않는다 — 자르면 쏠림이 안 보인다.
+  */
+  for (const r of rows) {
+    const bad = r.scored.filter(
+      (s) => s.expectedIsMember && s.got && !s.ok && s.classification !== 'ask_other'
+    );
+    if (bad.length === 0) continue;
+    console.log(`\n[${r.name}] 오지목 ${bad.length}건 — 누가 누구 일에 불리나`);
+
+    // 받는 쪽으로 묶는다. 쏠림이 여기서 드러난다.
+    const byGot = new Map<string, Scored[]>();
+    for (const b of bad) {
+      const k = b.gotName ?? '?';
+      byGot.set(k, [...(byGot.get(k) ?? []), b]);
+    }
+    for (const [who, list] of [...byGot.entries()].sort(
+      (a, b) => b[1].length - a[1].length
+    )) {
+      console.log(`  ${who} 이 ${list.length}건 잘못 불림`);
+      for (const b of list) {
+        console.log(
+          `    ${b.key.padEnd(18)} 실제 담당 ${b.expectedName.padEnd(8)} [${b.via}]`
+        );
+        console.log(`      ${b.summary.slice(0, 70)}`);
+      }
+    }
   }
 }
 
