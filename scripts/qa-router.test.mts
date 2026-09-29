@@ -31,6 +31,7 @@ import {
   resolveQaEndYmd,
   staleFilterCycle,
 } from '../lib/services/qa-router/status';
+import { shiftBusinessDays } from '@/lib/services/qa-router/qa-window';
 import {
   extractIssueKeys,
   extractJqlStrings,
@@ -4032,4 +4033,30 @@ test('extractIssueKeys — 키 모양을 흉내 낸 토막을 안 집는다', ()
   const noise = 'release_20260914 · 2026-09-14 · UTF-8 · SHA-256 · ISO-8601';
   assert.deepEqual(extractIssueKeys(noise, 'AUTOWAY'), []);
   assert.deepEqual(extractIssueKeys(noise, 'KQ'), []);
+});
+
+/*
+  ── 영업일 세기 ──
+
+  "배포 2주 전 QA 시작" 이 프로젝트마다 같은 뜻이 되려면 주말을 안 세야 한다.
+  달력 날짜로 세면 배포가 화요일이냐 월요일이냐에 따라 뜻이 달라진다.
+*/
+test('영업일 — 주말을 건너뛰고 뒤로 센다', () => {
+  // 2026-09-30(수)에서 1영업일 전 = 09-29(화)
+  assert.equal(shiftBusinessDays('2026-09-30', -1), '2026-09-29');
+  // 2026-09-28(월)에서 1영업일 전 = 09-25(금). 주말 둘을 건너뛴다
+  assert.equal(shiftBusinessDays('2026-09-28', -1), '2026-09-25');
+  // 6영업일 전 = 09-22(화). 9/26·27 주말은 안 센다
+  assert.equal(shiftBusinessDays('2026-09-30', -6), '2026-09-22');
+});
+
+test('영업일 — 0 이면 그날 그대로다', () => {
+  assert.equal(shiftBusinessDays('2026-09-30', 0), '2026-09-30');
+  // 기준일이 토요일이어도 0 은 안 움직인다. 옮기는 것은 오프셋의 일이다.
+  assert.equal(shiftBusinessDays('2026-09-26', 0), '2026-09-26');
+});
+
+test('영업일 — 앞으로도 센다', () => {
+  // 2026-09-25(금)에서 1영업일 뒤 = 09-28(월)
+  assert.equal(shiftBusinessDays('2026-09-25', 1), '2026-09-28');
 });
