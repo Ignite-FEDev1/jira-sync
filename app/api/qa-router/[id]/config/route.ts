@@ -65,6 +65,11 @@ interface Body {
   planCollectHours?: unknown;
   /** 차수로 잡을 배포 종류(정기·adhoc·hotfix). 기본 ['regular']. */
   deployKinds?: unknown;
+  /**
+   * 대장에 QA 기간이 없을 때 쓸 기본 규칙. null 이면 규칙을 지운다.
+   * `{ startOffset, endOffset, businessDays }` — 운영 배포일 기준 영업일.
+   */
+  qaScheduleRule?: unknown;
   alerts?: unknown;
   alertRules?: unknown;
   tickIntervalSeconds?: unknown;
@@ -134,6 +139,7 @@ export type ConfigField =
   | 'confluenceDeployRootId'
   | 'planCollectHours'
   | 'deployKinds'
+  | 'qaScheduleRule'
   | 'alerts'
   | 'alertRules'
   | 'tickIntervalSeconds'
@@ -336,6 +342,56 @@ function checkPipeline(
       };
     }
     row.deploy_kinds = kinds;
+  }
+
+  /*
+    대장에 QA 기간이 없을 때 쓰는 기본 규칙. null 은 "규칙을 지운다" 다 —
+    화면이 두 칸을 다 비우면 이 값을 보낸다.
+
+    `resolveQaWindow`(qa-window.ts) 와 같은 조건으로 막는다 - 둘 다 0 이하,
+    시작이 종료보다 앞서야 한다. 여기서 안 막으면 저장은 되는데 그 규칙은
+    `usableRule` 이 조용히 버려서 "저장했는데 안 먹힌다" 가 된다.
+  */
+  if (b.qaScheduleRule !== undefined) {
+    const v = b.qaScheduleRule;
+    if (v === null) {
+      row.qa_schedule_rule = null;
+    } else if (
+      typeof v === 'object' &&
+      !Array.isArray(v) &&
+      v !== null &&
+      'startOffset' in v &&
+      'endOffset' in v
+    ) {
+      const startOffset = Number((v as Record<string, unknown>).startOffset);
+      const endOffset = Number((v as Record<string, unknown>).endOffset);
+      const businessDaysRaw = (v as Record<string, unknown>).businessDays;
+      if (
+        !Number.isInteger(startOffset) ||
+        !Number.isInteger(endOffset) ||
+        startOffset > 0 ||
+        endOffset > 0 ||
+        startOffset >= endOffset
+      ) {
+        return {
+          ok: false,
+          error:
+            'QA 기본 규칙이 올바르지 않습니다. 두 값 모두 0 이하여야 하고, 시작이 종료보다 앞서야 합니다.',
+          field: 'qaScheduleRule',
+        };
+      }
+      row.qa_schedule_rule = {
+        startOffset,
+        endOffset,
+        businessDays: businessDaysRaw !== false,
+      };
+    } else {
+      return {
+        ok: false,
+        error: 'QA 기본 규칙 형식이 잘못됐습니다.',
+        field: 'qaScheduleRule',
+      };
+    }
   }
 
   // ── 운영 채널. 비우면 폴백(알림 채널)을 쓰라는 뜻이라 null 로 저장한다. ──

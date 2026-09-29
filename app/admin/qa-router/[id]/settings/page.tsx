@@ -29,6 +29,7 @@ import {
   overdueSlot,
   staleFilterCycle,
 } from '@/lib/services/qa-router/status';
+import { resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import {
   ALERT_DESC,
   ALERT_KINDS,
@@ -48,6 +49,7 @@ import {
   type FilterGap,
   type JudgeTier,
   type QaRouterConfig,
+  type QaScheduleRule,
   type SideEffectResult,
 } from '@/lib/services/qa-router/types';
 
@@ -784,6 +786,7 @@ export default function QaRouterSettingsPage() {
             <CycleEditor
               id={id}
               config={config}
+              cycles={t.cycles}
               suggest={savedCheck.data?.infer}
               saving={saving}
               onCancel={close}
@@ -2387,6 +2390,7 @@ function DeployRootResult({
 function CycleEditor({
   id,
   config,
+  cycles,
   suggest,
   saving,
   onCancel,
@@ -2394,6 +2398,8 @@ function CycleEditor({
 }: EditorBase & {
   id: string;
   config: QaRouterConfig;
+  /** 오프셋 미리보기에 쓴다 — "최근 차수 3개엔 실제로 며칠로 떨어지나". */
+  cycles: DeployCycle[];
   /** 필터 표본이 찾아낸 기획·개발 티켓 타입 후보 */
   suggest?: {
     planTypes: { id: string; name: string; count: number }[];
@@ -2435,6 +2441,48 @@ function CycleEditor({
   const kindsChanged =
     [...deployKinds].sort().join(',') !==
     [...config.deployKinds].sort().join(',');
+
+  /*
+    대장에 QA 기간이 없을 때 쓸 기본 규칙. 문자열로 들고 있는다 — 지우는
+    중간 상태("-")를 숫자로 담을 수 없어서다. 둘 다 비우면 규칙이 없다.
+  */
+  const [startOffset, setStartOffset] = useState(
+    config.qaScheduleRule ? String(config.qaScheduleRule.startOffset) : ''
+  );
+  const [endOffset, setEndOffset] = useState(
+    config.qaScheduleRule ? String(config.qaScheduleRule.endOffset) : ''
+  );
+  const draftRule: QaScheduleRule | null =
+    startOffset.trim() === '' || endOffset.trim() === ''
+      ? null
+      : {
+          startOffset: Number(startOffset),
+          endOffset: Number(endOffset),
+          businessDays: true,
+        };
+  /*
+    QA 는 배포 전에 끝난다. 양수를 허용할까 했던 근거(CPO 10-07 이 배포
+    다음날 종료)가 배포대장의 오류였다 — 배포일만 10/12 → 10/7 로 당기고
+    QA 줄을 안 고쳤다. `resolveQaWindow` 가 같은 조건으로 이 규칙을
+    조용히 버리므로, 여기서 먼저 사람이 읽을 말로 막는다.
+  */
+  const ruleProblem =
+    draftRule === null
+      ? null
+      : draftRule.startOffset > 0 || draftRule.endOffset > 0
+        ? 'QA 는 배포 전에 끝납니다. 0 이하로 넣어 주세요.'
+        : draftRule.startOffset >= draftRule.endOffset
+          ? 'QA 시작이 종료보다 앞서야 합니다.'
+          : null;
+  /*
+    오프셋 두 개는 머릿속에서 날짜로 바꾸기 어렵다. 최근 차수 3개에 지금
+    고치는 중인 규칙을 적용한 결과를 옆에 적는다. "대장이 이김" 을 같이
+    적는 이유는, 규칙을 고쳤는데 어떤 차수는 안 바뀌는 것이 버그로
+    보이기 때문이다 — 대장이 직접 입력보다는 아래, 규칙보다는 위 순위다.
+  */
+  const recentCycles = [...cycles]
+    .sort((a, b) => b.deployYmd.localeCompare(a.deployYmd))
+    .slice(0, 3);
 
   return (
     <div className="flex flex-col gap-3">
@@ -2576,6 +2624,84 @@ function CycleEditor({
           reloading={loading}
         />
       </div>
+
+      <div className="rounded-md border bg-muted/20 px-3 py-2.5">
+        <p className="text-[11px] font-medium text-muted-foreground">
+          대장에 QA 기간이 없을 때
+        </p>
+        <p className="mt-0.5 text-[11.5px] leading-snug text-muted-foreground">
+          운영 배포일에서 영업일을 세어 만듭니다. 비워 두면 규칙이 없고,
+          대장에서 못 읽은 차수는 미정으로 둡니다.
+        </p>
+
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[12.5px]">
+          <span className="text-muted-foreground">QA 시작 = 운영 배포일</span>
+          <input
+            type="number"
+            max={0}
+            value={startOffset}
+            onChange={(e) => setStartOffset(e.target.value)}
+            aria-label="QA 시작 오프셋"
+            className="h-7 w-16 rounded-md border bg-background px-2 text-right text-[12.5px]"
+          />
+          <span className="text-muted-foreground">영업일</span>
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[12.5px]">
+          <span className="text-muted-foreground">QA 종료 = 운영 배포일</span>
+          <input
+            type="number"
+            max={0}
+            value={endOffset}
+            onChange={(e) => setEndOffset(e.target.value)}
+            aria-label="QA 종료 오프셋"
+            className="h-7 w-16 rounded-md border bg-background px-2 text-right text-[12.5px]"
+          />
+          <span className="text-muted-foreground">영업일</span>
+        </div>
+        {ruleProblem && (
+          <p className="mt-1.5 text-[11.5px] text-red-600 dark:text-red-400">
+            {ruleProblem}
+          </p>
+        )}
+
+        {/*
+          오프셋 두 개는 머릿속에서 날짜로 바꾸기 어렵다. 최근 차수 3개에
+          적용한 결과를 옆에 적는다. "대장이 이김" 을 같이 적는 이유는,
+          규칙을 고쳤는데 어떤 차수는 안 바뀌는 것이 버그로 보이기
+          때문이다.
+        */}
+        {recentCycles.length > 0 && (
+          <ul className="mt-2 space-y-0.5 border-t pt-1.5 text-[11px] text-muted-foreground">
+            {recentCycles.map((c) => {
+              const w = resolveQaWindow({
+                manualStartYmd: c.qaStartYmdManual ?? null,
+                manualEndYmd: c.qaEndYmdManual ?? null,
+                ledgerStartYmd: c.qaStartYmd,
+                ledgerEndYmd: c.qaEndYmd,
+                prodYmd: c.prodYmd,
+                deployYmd: c.deployYmd,
+                rule: draftRule,
+              });
+              const tag =
+                w.source === 'rule'
+                  ? '규칙'
+                  : w.source === 'ledger'
+                    ? '대장이 이김'
+                    : w.source === 'manual'
+                      ? '직접 입력이 이김'
+                      : w.source === 'invalid'
+                        ? '값이 이상함'
+                        : '미정';
+              return (
+                <li key={c.deployYmd}>
+                  {c.deployYmd} 배포 → {w.qaStartYmd ?? '?'} ~{' '}
+                  {w.qaEndYmd ?? '?'} · {tag}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
       {/*
         `planCollectHours` 를 안 보낸다.
 
@@ -2584,11 +2710,13 @@ function CycleEditor({
       */}
       <StageActions
         saving={saving}
+        disabled={!!ruleProblem}
         onCancel={onCancel}
         note={
-          rootChanged || kindsChanged
+          ruleProblem ||
+          (rootChanged || kindsChanged
             ? '배포대장을 바꾸면 이후 차수를 다시 읽어옵니다'
-            : undefined
+            : undefined)
         }
         onSave={() =>
           void onSave({
@@ -2598,6 +2726,7 @@ function CycleEditor({
             devIssueTypeId: dev.id,
             devIssueTypeName: dev.name,
             deployKinds,
+            qaScheduleRule: draftRule,
           })
         }
       />
@@ -3112,6 +3241,17 @@ function RuleDetail({
           options={SHIFT_OPTIONS}
           label="주말 처리"
         />
+        {/*
+          운영 배포일 기준 + 양수 오프셋은 배포일 이후를 가리킨다. 그런데
+          차수는 배포일을 지나면 마감선(cycleStage 의 'past')에 걸려 더는
+          알림을 울리지 않는다 — 만들 때는 날짜가 맞는 것처럼 보이지만
+          **영영 안 울리는 규칙**이라, 만드는 자리에서 바로 말해 준다.
+        */}
+        {r.anchor === 'prod' && r.offset > 0 && (
+          <span className="text-amber-700 dark:text-amber-400">
+            운영 배포일 이후라 울리지 않습니다
+          </span>
+        )}
       </div>
 
       <div

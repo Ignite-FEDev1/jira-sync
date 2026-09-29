@@ -41,11 +41,15 @@ import {
   settlementBucket,
   type EventProblem,
 } from '@/lib/services/qa-router/outcome';
+import { resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   AlertAnchor,
   AlertRule,
   AlertShift,
+  DeployCycle,
+  QaScheduleRule,
   QaRouterEvent,
+  QaWindowSource,
 } from '@/lib/services/qa-router/types';
 import {
   effectiveAlertRules,
@@ -384,6 +388,20 @@ export default function CycleDetailPage() {
         )}
       </Descriptions>
 
+      {/*
+        QA 기간을 정하는 사다리(직접 입력 → 배포대장 → 라우터 기본 규칙)의
+        결과를 여기서 보여준다. 위 Descriptions 의 "QA 기간" 행은 대장 값만
+        보므로, 대장이 비었거나 앞뒤가 안 맞을 때(직접 입력·규칙까지 본
+        진짜 판정)는 이 섹션이 답한다 — 차수 정보와 같은 층이라 선으로
+        가르지 않는다.
+      */}
+      <QaScheduleSection
+        configId={demo ? null : id}
+        cycle={cycle}
+        rule={config.qaScheduleRule}
+        jiraBase={jiraBase}
+        onSaved={t.reload}
+      />
 
       {/*
         여기부터 "지금 어떻게 되고 있나" 다. 위의 차수 정보와 층이 다르므로
@@ -452,6 +470,170 @@ export default function CycleDetailPage() {
         onSaved={t.reload}
       />
     </div>
+  );
+}
+
+/** `QaWindow.source` 를 사람 말로. `none` 은 채울 값, `invalid` 는 고칠 값이다. */
+const QA_WINDOW_SOURCE_LABEL: Record<QaWindowSource, string> = {
+  manual: '직접 입력한 값',
+  ledger: '배포대장 본문',
+  rule: '라우터 기본 규칙',
+  none: '정하지 못함',
+  invalid: '값이 앞뒤가 안 맞음',
+};
+
+/**
+ * QA 기간 — 어디서 왔고, 미정이거나 이상하면 무엇을 해야 하나.
+ *
+ * `resolveQaWindow` 가 직접 입력 → 배포대장 → 라우터 기본 규칙 순서로
+ * 값을 찾는다. **`none` 과 `invalid` 를 같은 문구로 묶지 않는다** — 전자는
+ * 아무도 값을 안 넣은 것이고("채워야 한다"), 후자는 값이 있는데 앞뒤가
+ * 안 맞는 것이다("고쳐야 한다", 보통 배포대장을). 둘을 한 문장으로
+ * 뭉치면 배포대장이 틀렸는데 사람이 직접 입력으로 덮어쓰고 끝내서,
+ * 다음 차수도 같은 자리에서 또 틀린다.
+ */
+function QaScheduleSection({
+  configId,
+  cycle,
+  rule,
+  jiraBase,
+  onSaved,
+}: {
+  /** 저장 대상. 데모에서는 null 이고 입력칸을 열지 않는다. */
+  configId: string | null;
+  cycle: DeployCycle;
+  rule: QaScheduleRule | null;
+  jiraBase: string;
+  onSaved: () => void;
+}) {
+  const win = resolveQaWindow({
+    manualStartYmd: cycle.qaStartYmdManual ?? null,
+    manualEndYmd: cycle.qaEndYmdManual ?? null,
+    ledgerStartYmd: cycle.qaStartYmd,
+    ledgerEndYmd: cycle.qaEndYmd,
+    prodYmd: cycle.prodYmd,
+    deployYmd: cycle.deployYmd,
+    rule,
+  });
+
+  const [manualStart, setManualStart] = useState(cycle.qaStartYmdManual ?? '');
+  const [manualEnd, setManualEnd] = useState(cycle.qaEndYmdManual ?? '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async (clear: boolean) => {
+    if (!configId) return;
+    setSaving(true);
+    try {
+      const res = await fetch(
+        `/api/qa-router/${configId}/cycles/${cycle.deployYmd}/schedule`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            qaStartYmd: clear ? null : manualStart || null,
+            qaEndYmd: clear ? null : manualEnd || null,
+          }),
+        }
+      );
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        toast.error(body.error ?? '저장하지 못했습니다.');
+        return;
+      }
+      if (clear) {
+        setManualStart('');
+        setManualEnd('');
+      }
+      toast.success(
+        clear ? '지우고 배포대장 값을 다시 씁니다' : '저장했습니다'
+      );
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section>
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-2">
+        <h3 className="text-base font-semibold">QA 기간</h3>
+        <span className="text-xs text-muted-foreground">
+          직접 입력 → 배포대장 → 라우터 기본 규칙 순서로 정합니다
+        </span>
+      </div>
+
+      {win.source === 'none' && (
+        <p className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
+          QA 기간이 미정입니다. QA 시작·종료 알림이 이 차수엔 나가지 않습니다.
+        </p>
+      )}
+      {win.source === 'invalid' && (
+        <div className="rounded-md border border-red-200 bg-red-50/60 px-2.5 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          <p>
+            {win.why} 배포일이 당겨질 때 QA 줄이 같이 안 고쳐진 경우가 많습니다.
+          </p>
+          <p className="mt-1 flex flex-wrap items-baseline gap-x-2">
+            <span>배포대장을 고치거나 아래에 직접 넣어 주세요.</span>
+            {cycle.deployPageId && (
+              <a
+                className="inline-flex items-baseline gap-1 underline decoration-current/40 underline-offset-2"
+                href={`${jiraBase}/wiki/spaces/CPO/pages/${cycle.deployPageId}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                배포대장 열기 <ExternalLinkIcon />
+              </a>
+            )}
+          </p>
+        </div>
+      )}
+      {win.source !== 'none' && win.source !== 'invalid' && (
+        <p className="text-sm text-muted-foreground">
+          <span className="font-mono tabular-nums text-foreground">
+            {win.qaStartYmd} ~ {win.qaEndYmd}
+          </span>{' '}
+          · {QA_WINDOW_SOURCE_LABEL[win.source]}
+        </p>
+      )}
+
+      {configId && (
+        <div className="mt-3 flex flex-wrap items-end gap-2">
+          <label className="text-xs text-muted-foreground">
+            QA 시작
+            <Input
+              type="date"
+              value={manualStart}
+              onChange={(e) => setManualStart(e.target.value)}
+              className="mt-1 h-8 w-[150px] text-xs"
+              aria-label="QA 시작"
+            />
+          </label>
+          <label className="text-xs text-muted-foreground">
+            QA 종료
+            <Input
+              type="date"
+              value={manualEnd}
+              onChange={(e) => setManualEnd(e.target.value)}
+              className="mt-1 h-8 w-[150px] text-xs"
+              aria-label="QA 종료"
+            />
+          </label>
+          <Button size="sm" disabled={saving} onClick={() => void save(false)}>
+            {saving ? '저장 중…' : '저장'}
+          </Button>
+          {(cycle.qaStartYmdManual || cycle.qaEndYmdManual) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={saving}
+              onClick={() => void save(true)}
+            >
+              지우고 대장 값 쓰기
+            </Button>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 

@@ -15,6 +15,7 @@ import {
   kstYmdOf,
   type Health,
 } from '@/lib/services/qa-router/status';
+import { resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   QaRouterConfig,
   QaRouterState,
@@ -28,6 +29,8 @@ interface Row {
   health: Health;
   todayCount: number;
   idleDays: number | null;
+  /** 앞으로 배포할 차수 중 QA 기간이 미정이거나 이상한 것의 수. */
+  unsetCount: number;
 }
 
 const TONE_ORDER = { bad: 0, warn: 1, ok: 2, off: 3 } as const;
@@ -52,7 +55,7 @@ export default function QaRouterListPage() {
     setLoading(true);
     const now = new Date();
     const todayYmd = kstYmdOf(now);
-    const [cfgRes, stRes, evRes, cycRes] = await Promise.all([
+    const [cfgRes, stRes, evRes, cycRes, scheduleCycRes] = await Promise.all([
       db.from('qa_router_configs').select('*').order('name'),
       db.from('qa_router_state').select('*'),
       // 오늘 판정 건수 + 마지막 판정 시각을 함께 쓰려고 최근 것만 읽는다.
@@ -71,6 +74,17 @@ export default function QaRouterListPage() {
         .select('config_id, qa_start_ymd')
         .gte('qa_start_ymd', todayYmd)
         .order('qa_start_ymd', { ascending: true }),
+      /*
+        "일정 미정" 배지용. 위 쿼리(`.gte('qa_start_ymd', todayYmd)`)는
+        재사용할 수 없다 — 그 필터가 **`qa_start_ymd` 가 null 인 행을
+        통째로 뺀다**, 그게 바로 이 배지가 세려는 차수다. 그래서 날짜
+        필터 없이 새로 읽고, `resolveQaWindow` 로 직접 판정한다.
+      */
+      db
+        .from('qa_router_cycles')
+        .select(
+          'config_id, deploy_ymd, prod_ymd, qa_start_ymd, qa_end_ymd, qa_start_ymd_manual, qa_end_ymd_manual'
+        ),
     ]);
 
     if (cfgRes.error) toast.error(`설정 조회 실패: ${cfgRes.error.message}`);
@@ -82,6 +96,12 @@ export default function QaRouterListPage() {
         nextQaStart.set(c.config_id as string, c.qa_start_ymd as string);
       }
     }
+
+    // 배지용 차수. 지난 차수까지 세면 배지가 영영 안 꺼지므로, 운영
+    // 배포일이 오늘보다 이른 것은 여기서 먼저 뺀다.
+    const scheduleCycles = (scheduleCycRes.data ?? []).filter(
+      (r) => (r.prod_ymd ?? r.deploy_ymd) >= todayYmd
+    );
 
     const stateByConfig = new Map(
       (stRes.data ?? []).map((s) => [s.config_id as string, toState(s)])
@@ -110,6 +130,22 @@ export default function QaRouterListPage() {
           )
         : null;
 
+      // 이 대상의 차수 중 QA 기간이 미정(none)이거나 앞뒤가 안 맞는(invalid) 것.
+      const unsetCount = scheduleCycles
+        .filter((r) => r.config_id === config.id)
+        .filter((r) => {
+          const w = resolveQaWindow({
+            manualStartYmd: r.qa_start_ymd_manual ?? null,
+            manualEndYmd: r.qa_end_ymd_manual ?? null,
+            ledgerStartYmd: r.qa_start_ymd ?? null,
+            ledgerEndYmd: r.qa_end_ymd ?? null,
+            prodYmd: r.prod_ymd ?? null,
+            deployYmd: r.deploy_ymd,
+            rule: config.qaScheduleRule,
+          });
+          return w.source === 'none' || w.source === 'invalid';
+        }).length;
+
       return {
         config,
         state,
@@ -122,6 +158,7 @@ export default function QaRouterListPage() {
         }),
         todayCount,
         idleDays,
+        unsetCount,
       };
     });
 
@@ -309,6 +346,16 @@ function ConfigRow({ row }: { row: Row }) {
           <span className="block text-xs text-muted-foreground">
             {health.detail}
           </span>
+        )}
+        {/*
+          "일정 미정" 은 health 와 다른 축이다 — health 는 봇이 살아서
+          도는지를 보고, 이건 **앞으로 올 차수의 QA 기간을 아직 아무도
+          안 넣었거나 앞뒤가 안 맞는지**를 본다. 판정이 멎는 건 아니라서
+          빨강이 아니라 노랑이다. 0개면 줄에서 아예 사라진다 — 배지가
+          영원히 켜져 있으면 곧 무시된다.
+        */}
+        {row.unsetCount > 0 && (
+          <Badge variant="warn">일정 미정 {row.unsetCount}개</Badge>
         )}
       </td>
       {/*
