@@ -33,6 +33,7 @@ import {
 } from '../lib/services/qa-router/status';
 import {
   checkManualSchedule,
+  isYmdShape,
   resolveQaWindow,
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
@@ -4493,4 +4494,14 @@ test('수동 일정 — 날짜 모양이 아니면 막는다', () => {
 
 test('수동 일정 — 맞으면 통과한다', () => {
   assert.equal(checkManualSchedule('2026-09-22', '2026-09-29'), null);
+});
+
+test('ymd 모양 — YYYY-MM-DD 면 통과한다', () => {
+  assert.equal(isYmdShape('2026-09-14'), true);
+});
+
+test('ymd 모양 — 슬래시나 자릿수가 다르면 막는다', () => {
+  assert.equal(isYmdShape('2026/09/14'), false);
+  assert.equal(isYmdShape('26-09-14'), false);
+  assert.equal(isYmdShape(''), false);
 });

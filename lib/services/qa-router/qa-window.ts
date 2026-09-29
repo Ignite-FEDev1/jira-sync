@@ -172,3 +172,15 @@ export function checkManualSchedule(
   if (start > end) return `QA 시작(${start})이 종료(${end})보다 뒤입니다.`;
   return null;
 }
+
+/**
+ * 문자열이 `YYYY-MM-DD` 모양인가.
+ *
+ * 라우트의 `ymd` 경로 파라미터 검증에 쓴다 - 값 자체가 맞는지는 안 본다
+ * (예: 2월 30일도 통과), 모양만 본다. 형제인 `alert-rules` 라우트가 쓰는
+ * `YMD_RE` 와 같은 검사라, 한 군데(`qa-window.ts`)에 두고 순수 함수로
+ * 테스트한다.
+ */
+export function isYmdShape(s: string): boolean {
+  return YMD.test(s);
+}

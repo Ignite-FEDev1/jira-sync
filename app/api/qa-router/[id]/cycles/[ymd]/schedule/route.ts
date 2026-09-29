@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 
-import { checkManualSchedule } from '@/lib/services/qa-router/qa-window';
+import { dbServer } from '@/lib/db';
+import {
+  checkManualSchedule,
+  isYmdShape,
+} from '@/lib/services/qa-router/qa-window';
 import * as repo from '@/lib/services/qa-router/repository';
 
 /**
@@ -17,6 +21,13 @@ export async function PUT(
   ctx: { params: Promise<{ id: string; ymd: string }> }
 ) {
   const { id, ymd } = await ctx.params;
+
+  if (!isYmdShape(ymd)) {
+    return NextResponse.json(
+      { error: '차수 날짜 형식이 잘못됐습니다. 예: 2026-09-14' },
+      { status: 400 }
+    );
+  }
 
   let body: { qaStartYmd?: unknown; qaEndYmd?: unknown };
   try {
@@ -36,6 +47,28 @@ export async function PUT(
   const problem = checkManualSchedule(start, end);
   if (problem) {
     return NextResponse.json({ error: problem }, { status: 400 });
+  }
+
+  /*
+    있는 차수인지 먼저 본다. update 는 대상이 없어도 오류가 아니라 0행이라,
+    바로 쓰면 오타 난 날짜에 "저장했습니다" 가 뜬다. 이 기능이 생긴 이유 자체가
+    "실패해도 조용하다" 는 문제였다 - 저장 경로에서 같은 실수를 반복하지 않는다.
+  */
+  const found = await dbServer
+    .from('qa_router_cycles')
+    .select('deploy_ymd')
+    .eq('config_id', id)
+    .eq('deploy_ymd', ymd)
+    .maybeSingle();
+
+  if (found.error) {
+    return NextResponse.json({ error: found.error.message }, { status: 500 });
+  }
+  if (!found.data) {
+    return NextResponse.json(
+      { error: `${ymd} 차수를 찾을 수 없습니다.` },
+      { status: 404 }
+    );
   }
 
   try {
