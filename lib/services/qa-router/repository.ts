@@ -521,6 +521,37 @@ export async function listEvents(
  * 알림 덮어쓰기는 하루 한 번 도는 이 수집에 지워지지 않는다 (실측으로 확인).
  * 새 컬럼을 payload 에 더할 때 이 칸을 같이 넣지 않도록 주의한다.
  */
+
+/**
+ * 배치가 쓸 한 행. **수동 입력 칸을 담지 않는다.**
+ *
+ * `upsert` 는 payload 에 있는 칸을 전부 덮어쓴다. 여기에 `qa_start_ymd_manual`
+ * 을 넣으면 사람이 넣은 값이 다음 수집에서 null 로 지워진다. 담지 않으면
+ * DB 의 값이 그대로 남는다.
+ *
+ * 테스트가 이 함수를 직접 부른다 - DB 없이 "무엇을 덮어쓰나" 를 고정한다.
+ */
+export function cycleUpsertRow(
+  configId: string,
+  c: DeployCycle
+): Record<string, unknown> {
+  return {
+    config_id: configId,
+    deploy_ymd: c.deployYmd,
+    fix_version: c.fixVersion,
+    cycle_label: c.cycleLabel,
+    qa_start_ymd: c.qaStartYmd,
+    qa_end_ymd: c.qaEndYmd,
+    prod_ymd: c.prodYmd,
+    deploy_page_id: c.deployPageId,
+    deploy_page_title: c.deployPageTitle,
+    jira_version_exists: c.jiraVersionExists,
+    fix_version_source: c.fixVersionSource ?? null,
+    dev_project_key: c.devProjectKey ?? null,
+    collected_at: new Date().toISOString(),
+  };
+}
+
 export async function upsertCycles(
   configId: string,
   cycles: DeployCycle[]
@@ -529,21 +560,7 @@ export async function upsertCycles(
   if (writesDisabled) return;
   if (cycles.length === 0) return;
   const { error } = await dbServer.from('qa_router_cycles').upsert(
-    cycles.map((c) => ({
-      config_id: configId,
-      deploy_ymd: c.deployYmd,
-      fix_version: c.fixVersion,
-      cycle_label: c.cycleLabel,
-      qa_start_ymd: c.qaStartYmd,
-      qa_end_ymd: c.qaEndYmd,
-      prod_ymd: c.prodYmd,
-      deploy_page_id: c.deployPageId,
-      deploy_page_title: c.deployPageTitle,
-      jira_version_exists: c.jiraVersionExists,
-      fix_version_source: c.fixVersionSource ?? null,
-      dev_project_key: c.devProjectKey ?? null,
-      collected_at: new Date().toISOString(),
-    })),
+    cycles.map((c) => cycleUpsertRow(configId, c)),
     { onConflict: 'config_id,deploy_ymd' }
   );
   if (error) throw new Error(`upsertCycles: ${error.message}`);
@@ -570,6 +587,9 @@ export async function getCycle(
     cycleLabel: data.cycle_label ?? null,
     qaStartYmd: data.qa_start_ymd ?? null,
     qaEndYmd: data.qa_end_ymd ?? null,
+    qaStartYmdManual: data.qa_start_ymd_manual ?? null,
+    qaEndYmdManual: data.qa_end_ymd_manual ?? null,
+    scheduleWarnedOn: data.schedule_warned_on ?? null,
     prodYmd: data.prod_ymd ?? null,
     deployPageId: data.deploy_page_id ?? null,
     deployPageTitle: data.deploy_page_title ?? null,

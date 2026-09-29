@@ -433,6 +433,14 @@ export interface QaRouterConfig {
   confluenceDeployRootId: string | null;
   /** null 이면 버전 목록에서 자동 감지 */
   fixVersionPattern: string | null;
+  /**
+   * 대장에 QA 기간이 없을 때 쓸 기본 규칙. null 이면 규칙이 없다.
+   *
+   * 이 라우터의 모든 차수에 적용되고, 차수별로는 `qaStartYmdManual` 로
+   * 덮어쓴다. 알림 규칙이 `alertRules` + `alertRulesOverride` 로 이미
+   * 그렇게 돈다 - 같은 모양으로 맞춘 것이다.
+   */
+  qaScheduleRule: QaScheduleRule | null;
 
   slackChannelId: string;
   slackFallbackChannelId: string | null;
@@ -665,6 +673,23 @@ export interface DeployCycle {
   cycleLabel: string | null;
   qaStartYmd: string | null;
   qaEndYmd: string | null;
+  /**
+   * 사람이 이 차수에 직접 넣은 QA 기간. **대장 파싱값과 다른 칸이다.**
+   *
+   * 같은 칸에 넣으면 다음 배치가 지운다 - `collectCycles` 는 매번 대장을
+   * 다시 읽어 `qaStartYmd` 를 덮어쓴다. 사람이 넣은 값이 하루 만에
+   * 사라지면 그 기능은 없는 것과 같다. `threadQaEndYmd` 가 같은 이유로
+   * 이미 따로 있다.
+   */
+  qaStartYmdManual?: string | null;
+  qaEndYmdManual?: string | null;
+  /**
+   * 이 차수에 대해 "일정 미정" 경고를 마지막으로 보낸 날.
+   *
+   * `collectedAt` 은 못 쓴다. 수집할 때마다 덮어써서 "마지막으로 본 날" 이지
+   * "처음 본 날" 이 아니다.
+   */
+  scheduleWarnedOn?: string | null;
   /** 배포대장이 말하는 운영 배포일. 제목 날짜와 다를 수 있다. */
   prodYmd: string | null;
   deployPageId: string | null;

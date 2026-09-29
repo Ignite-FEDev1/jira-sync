@@ -668,6 +668,7 @@ export function demoConfig(
     jiraOperatorAccountId: null,
     confluenceDeployRootId: 'demo',
     fixVersionPattern: 'release_{ymd}',
+    qaScheduleRule: null,
     slackChannelId: 'C0BVDJEJ19C',
     slackFallbackChannelId: 'C0BVDJEJ19C',
     slackOpsChannelId: null,

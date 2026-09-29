@@ -29,6 +29,7 @@ import type {
   QaRouterConfig,
   QaRouterEvent,
   QaRouterState,
+  QaScheduleRule,
   QuietHours,
   SeenEntry,
   SideEffectResult,
@@ -45,6 +46,7 @@ export type ConfigRow = {
   jira_operator_account_id: string | null;
   confluence_deploy_root_id: string | null;
   fix_version_pattern: string | null;
+  qa_schedule_rule?: unknown;
   slack_channel_id: string;
   slack_fallback_channel_id: string | null;
   slack_ops_channel_id: string | null;
@@ -114,6 +116,7 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
     jiraOperatorAccountId: r.jira_operator_account_id,
     confluenceDeployRootId: r.confluence_deploy_root_id,
     fixVersionPattern: r.fix_version_pattern,
+    qaScheduleRule: (r.qa_schedule_rule as QaScheduleRule | null) ?? null,
     slackChannelId: r.slack_channel_id,
     slackFallbackChannelId: r.slack_fallback_channel_id,
     slackOpsChannelId: r.slack_ops_channel_id,

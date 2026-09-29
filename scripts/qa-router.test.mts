@@ -35,6 +35,7 @@ import {
   resolveQaWindow,
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
+import { cycleUpsertRow } from '@/lib/services/qa-router/repository';
 import {
   extractIssueKeys,
   extractJqlStrings,
@@ -4381,4 +4382,38 @@ test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이�
     ),
     null
   );
+});
+
+/*
+  배치가 대장을 다시 읽어도 사람이 넣은 값은 건드리면 안 된다. upsert 가
+  그 칸을 payload 에 담으면 null 로 덮어쓴다 - 실제로 그렇게 지워진다.
+*/
+test('차수 저장 — 수동 일정 칸은 upsert payload 에 없다', () => {
+  const row = cycleUpsertRow('cfg-1', {
+    deployYmd: '2026-09-30',
+    fixVersion: 'release_20260930',
+    cycleLabel: null,
+    qaStartYmd: null,
+    qaEndYmd: null,
+    prodYmd: null,
+    deployPageId: null,
+    deployPageTitle: null,
+    jiraVersionExists: false,
+    collectedAt: new Date().toISOString(),
+  });
+  assert.ok(
+    !('qa_start_ymd_manual' in row),
+    'upsert 가 수동 시작을 덮으면 안 된다'
+  );
+  assert.ok(
+    !('qa_end_ymd_manual' in row),
+    'upsert 가 수동 종료를 덮으면 안 된다'
+  );
+  assert.ok(
+    !('schedule_warned_on' in row),
+    'upsert 가 경고 기록을 덮으면 안 된다'
+  );
+  // 대장에서 읽은 칸은 그대로 들어간다
+  assert.equal(row.deploy_ymd, '2026-09-30');
+  assert.equal(row.fix_version, 'release_20260930');
 });
