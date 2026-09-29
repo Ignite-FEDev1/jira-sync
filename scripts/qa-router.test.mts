@@ -4417,3 +4417,54 @@ test('차수 저장 — 수동 일정 칸은 upsert payload 에 없다', () => {
   assert.equal(row.deploy_ymd, '2026-09-30');
   assert.equal(row.fix_version, 'release_20260930');
 });
+
+test('일정 사다리 — 크론 함수도 사다리를 거친다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260929_qa_router_schedule_gap.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 칸은 nullable 이고 기본값이 없다 — 기존 차수가 전부 null 이어야 한다
+  assert.match(sql, /add column if not exists qa_start_ymd_manual date/);
+  assert.doesNotMatch(sql, /qa_start_ymd_manual date[^,;]*default/);
+
+  const brief = sql.slice(
+    sql.indexOf('function public.qa_router_morning_brief')
+  );
+  // 브리핑이 파싱값을 직접 읽지 않고 사다리를 거친다
+  assert.match(brief, /qa_router_qa_window\(/);
+  assert.match(brief, /win\.qa_start, win\.qa_end/);
+  // 운영배포일은 제목과 본문 중 늦은 쪽이다 (TS prodDayOf 와 같다)
+  assert.match(
+    brief,
+    /greatest\(cyc\.deploy_ymd, coalesce\(cyc\.prod_ymd, cyc\.deploy_ymd\)\)/
+  );
+  // 세 갈래가 있다
+  assert.match(brief, /elsif win\.source in \('none', 'invalid'\)/);
+  assert.match(brief, /qa_router_wants_qa_alerts\(rules\)/);
+  assert.match(
+    brief,
+    /qa_router_should_warn\(cyc\.schedule_warned_on, today_kst\)/
+  );
+  // 경고는 운영 채널로 간다
+  assert.match(brief, /target := r\.ops_channel;/);
+  // 경고를 보내면 기록을 남긴다 (차수당 횟수를 묶는 근거)
+  assert.match(brief, /set schedule_warned_on = today_kst/);
+});
+
+test('마감선 — SQL 에도 같은 가드가 있다', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260929_qa_router_schedule_gap.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const hit = sql.slice(sql.indexOf('function public.qa_router_hit_rule'));
+  assert.match(hit, /차수 마감선/);
+  assert.match(hit, /p_prod is null or p_today <= coalesce\(\(/);
+  // prod 앵커 규칙이 선을 정한다 (막히는 쪽이 아니다)
+  assert.match(hit, /pr\.value->>'anchor' = 'prod'/);
+});
