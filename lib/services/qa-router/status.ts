@@ -675,10 +675,40 @@ export function milestoneFrom(
   const anchorOf = (a: AlertRule['anchor']) =>
     a === 'qa_start' ? s.qaStartYmd : a === 'qa_end' ? s.qaEndYmd : s.prodYmd;
 
+  /*
+    ── 차수 마감선 ──
+
+    운영 배포일이 지나면 그 차수는 끝이다. 규칙이 무엇이든 울리지 않는다.
+
+    **`s.prodYmd` 를 그대로 쓰면 안 된다.** `prod` 앵커 규칙에 양수 오프셋을
+    넣어 배포일을 보정하는 패턴이 이미 있다 - 차수 덮어쓰기로
+    `{anchor:'prod', offset:4}` 를 넣으면 "브랜치를 자른 날보다 4일 뒤에
+    배포했다" 는 뜻이다. 그 규칙은 마감선에 **막히는 쪽이 아니라 정하는 쪽**이라,
+    선을 그 규칙이 울리는 날에 맞춘다.
+
+    그래도 "배포 다음날부터는 뭐든 안 울린다" 는 그대로 지켜진다. 보정된
+    배포일이 새 선이 될 뿐이다.
+  */
+  const prodRule = rules.find(
+    (r) => r.enabled !== false && r.anchor === 'prod'
+  );
+  const cutoff = s.prodYmd
+    ? prodRule
+      ? ruleDay(s.prodYmd, prodRule.offset, prodRule.shift)
+      : s.prodYmd
+    : null;
+
   for (const r of rules) {
     if (r.enabled === false) continue;
     const anchor = anchorOf(r.anchor);
-    if (ruleDay(anchor, r.offset, r.shift) !== todayYmd) continue;
+    const day = ruleDay(anchor, r.offset, r.shift);
+    if (day !== todayYmd) continue;
+    /*
+      당일은 막지 않는다 - `오늘 운영 배포` 가 그날 울려야 한다.
+      배포일을 모르면 막지 않는다 - 모르는 것을 근거로 알림을 죽이면
+      대장 본문에 운영일이 없는 대상에서 QA 알림이 통째로 사라진다.
+    */
+    if (cutoff && day > cutoff) continue;
     const days = Math.round(
       (Date.parse(`${anchor}T00:00:00Z`) -
         Date.parse(`${todayYmd}T00:00:00Z`)) /

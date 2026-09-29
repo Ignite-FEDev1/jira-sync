@@ -4210,3 +4210,97 @@ test('QA 기간 — 운영배포일은 제목과 본문 중 늦은 쪽이다', (
   });
   assert.equal(w.source, 'ledger');
 });
+
+/*
+  ── 차수 마감선 ──
+
+  검사(Task 2)는 **값이 이상한 것**을 잡는다. 마감선은 **값이 멀쩡해도 시점이
+  지난 것**을 잡는다. 아무도 대장을 안 고치고 무시해도 10/8 에 "QA 종료" 가
+  울리면 안 된다. 10/7 에 운영배포가 된 순간 그 차수는 끝이다.
+*/
+test('마감선 — 운영 배포일 다음날부터는 아무것도 안 울린다', () => {
+  const s = {
+    qaStartYmd: '2026-09-29',
+    qaEndYmd: '2026-10-08', // 배포보다 뒤 (실측 CPO 10-07 대장의 오류)
+    prodYmd: '2026-10-07',
+  };
+  // 10-08 은 qaEnd 당일이지만 배포가 지났으므로 안 울린다
+  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'), null);
+});
+
+test('마감선 — 운영 배포일 당일은 막지 않는다', () => {
+  const s = {
+    qaStartYmd: '2026-09-29',
+    qaEndYmd: '2026-10-07',
+    prodYmd: '2026-10-07',
+  };
+  // '오늘 운영 배포' 가 살아 있어야 한다
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-07'),
+    '오늘 운영 배포'
+  );
+});
+
+test('마감선 — 정상 데이터에서는 아무것도 안 바뀐다', () => {
+  const s = {
+    qaStartYmd: '2026-09-22',
+    qaEndYmd: '2026-09-29',
+    prodYmd: '2026-09-30',
+  };
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
+    '오늘 QA 시작'
+  );
+  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'), 'QA 종료');
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-30'),
+    '오늘 운영 배포'
+  );
+});
+
+test('마감선 — 운영 배포일을 모르면 막지 않는다', () => {
+  // prodYmd 가 null 인 대상(대장 본문에 운영일이 없는 경우)에서
+  // 마감선 때문에 QA 알림이 통째로 죽으면 안 된다.
+  const s = { qaStartYmd: '2026-09-22', qaEndYmd: '2026-09-29', prodYmd: null };
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
+    '오늘 QA 시작'
+  );
+});
+
+/*
+  `prod` 앵커 규칙은 마감선에 **막히는 쪽이 아니라 정하는 쪽**이다.
+  차수 덮어쓰기로 배포일을 보정하는 기존 패턴을 죽이면 안 된다.
+*/
+test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따라간다', () => {
+  const s = {
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    prodYmd: '2026-09-10',
+  };
+  const override = [
+    {
+      id: 'prodToday',
+      anchor: 'prod' as const,
+      offset: 4, // 브랜치를 자른 날(09-10)보다 4일 뒤에 배포했다
+      shift: 'none' as const,
+      label: '오늘 운영 배포',
+      enabled: true,
+    },
+  ];
+  // 보정된 배포일(09-14) 당일이므로 울린다
+  assert.equal(milestoneFrom(override, s, '2026-09-14'), '오늘 운영 배포');
+  // 그리고 그 다음날부터는 무엇도 안 울린다
+  const withQa = [
+    ...override,
+    {
+      id: 'qaLate',
+      anchor: 'qa_end' as const,
+      offset: 6, // 09-09 + 6 = 09-15. 보정 배포일 다음날
+      shift: 'none' as const,
+      label: '늦은 QA 알림',
+      enabled: true,
+    },
+  ];
+  assert.equal(milestoneFrom(withQa, s, '2026-09-15'), null);
+});
