@@ -81,6 +81,7 @@ export type StateRow = {
   locked_until: string | null;
   locked_by: string | null;
   stale_alerted_at: string | null;
+  fail_alert_ts: string | null;
   side_effects: Record<string, SideEffectResult> | null;
   updated_at: string;
 };
@@ -163,6 +164,8 @@ export function toState(r: StateRow): QaRouterState {
     lockedUntil: r.locked_until,
     lockedBy: r.locked_by,
     staleAlertedAt: r.stale_alerted_at,
+    // 컬럼이 없던 시절에 쓰인 행도, 리허설이 만드는 빈 행도 null 이 답이다.
+    failAlertTs: r.fail_alert_ts ?? null,
     sideEffects: r.side_effects ?? {},
     updatedAt: r.updated_at,
   };

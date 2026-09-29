@@ -360,6 +360,7 @@ export interface StatePatch {
   lastPollAt?: string | null;
   consecutiveFails?: number;
   staleAlertedAt?: string | null;
+  failAlertTs?: string | null;
 }
 
 export async function saveState(
@@ -378,6 +379,7 @@ export async function saveState(
     row.consecutive_fails = patch.consecutiveFails;
   if (patch.staleAlertedAt !== undefined)
     row.stale_alerted_at = patch.staleAlertedAt;
+  if (patch.failAlertTs !== undefined) row.fail_alert_ts = patch.failAlertTs;
   if (Object.keys(row).length === 0) return;
 
   const { error } = await dbServer

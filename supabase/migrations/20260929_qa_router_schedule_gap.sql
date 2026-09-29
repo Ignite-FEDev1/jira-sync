@@ -471,3 +471,249 @@ select
   (select count(*) from pg_proc p
      join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public' and p.proname = 'qa_router_vars') as vars_overloads;
+
+-- ── 18시 마감 요약 · 사다리 · 지문 · 스레드 ──────────────────────────────
+/*
+  운영 채널 실측(C0BVDJEJ19C)이 세 가지를 한꺼번에 보여 줬다.
+
+    9/24 18:00  🌙 CPO BO QA (개발) 오늘 마감
+                FE1 담당 기획건 2건 중 0건 QA 완료 · 2건 남음
+                오늘 알림 0건 · 마지막 확인 17:59
+                일정  • QA 종료일 : 10-08(목)   • 운영 배포일 : 10-07(수)
+                참고  • QA 라우터 상세 …  • 배포대장 …  • fixVersion : …
+    9/25 18:00  (위와 글자 단위로 같음)
+    9/28 18:00  (위와 글자 단위로 같음)
+
+  ① `QA 종료일 10-08` 이 `운영 배포일 10-07` 보다 뒤다. 사다리(`qa_router_qa_window`)
+     는 이것을 `invalid` 로 잡는데, 18시 요약만 사다리를 안 거치고 대장 칸
+     (`cyc.qa_end_ymd`·`cyc.deploy_ymd`)을 raw 로 읽고 있었다. 아침 브리핑은
+     이 브랜치에서 고쳤다 - 같은 병의 절반만 고친 상태였다.
+  ② 사흘이 글자 단위로 같다. 차수 상수만 남은 글이 매 평일 반복된다.
+  ③ `일정`·`참고` 는 차수가 바뀌기 전엔 안 변하고, 같은 내용이 09:00 차수
+     루트 메시지에 이미 있다.
+
+  ── 지문에 시각을 넣지 않는 이유 ──
+
+  `마지막 확인 17:59` 는 매일 다르다. 그대로 넣으면 지문이 늘 바뀌어
+  "달라진 게 없으면 건너뛴다" 가 한 번도 발동하지 않는다. 시각은 빼고
+  "확인이 멈췄나" 라는 **판정**만 넣는다 - 사람이 읽고 반응하는 것도
+  분침이 아니라 그 판정이다.
+
+  ── 경고는 지문을 건너뛴다 ──
+
+  머리말이 경고인 날(`확인이 멈춰 있습니다`·`실패 N건`·`연속 실패 N회`)은
+  지문이 같아도 보낸다. 이틀째 같은 장애가 이어지는 것은 "달라진 게 없다"
+  가 아니라 "아직 안 고쳐졌다" 이고, 조용한 실패가 이 시스템이 없애려는
+  병이다.
+
+  ── detail_lines 의 서명은 그대로 둔다 ──
+
+  넘기는 값만 사다리 것으로 바꾼다. `invalid` 일 때 할 말은 `detail_lines`
+  **밖**에 한 줄로 싣는다 - 스레드 안에서는 `detail_lines` 가 통째로 빠지는데
+  (③), 문제가 있다는 말은 그때도 나가야 하기 때문이다. 서명을 건드리면
+  옛 판과 둘 다 후보가 되어 `function ... is not unique` 로 죽는 길
+  (`20260915_qa_router_drop_orphan_overloads.sql`)이 열리는데, 그 값어치가 없다.
+*/
+alter table public.qa_router_state
+  add column if not exists daily_summary_digest text,
+  add column if not exists fail_alert_ts text;
+
+comment on column public.qa_router_state.daily_summary_digest is
+  '마지막으로 보낸 18시 요약의 지문(md5). 같으면 건너뛴다. 시각은 안 들어간다 - 매일 달라 지문이 늘 바뀐다.';
+comment on column public.qa_router_state.fail_alert_ts is
+  '연속 실패 알림의 Slack ts. 복구 알림을 그 스레드로 보내고 지운다. null 이면 최상위로.';
+
+/*
+  18시 마감 요약. 직전 정의: 20260921_qa_router_drop_qa_thread.sql
+*/
+create or replace function public.qa_router_daily_summary()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+  r record; token text;
+  today_kst date := (now() at time zone 'Asia/Seoul')::date;
+  cyc record;
+  win record;
+  prod_day date;
+  judged int; failed int; reassigned int;
+  stalled boolean;
+  head_kind text; head text; body_text text;
+  progress_line text; detail_lines text; schedule_note text;
+  digest text;
+  payload jsonb;
+begin
+  select decrypted_secret into token from vault.decrypted_secrets
+   where name = 'qa_router_slack_bot_token';
+  if token is null then
+    select decrypted_secret into token from vault.decrypted_secrets
+     where name = 'slack_bot_token';
+  end if;
+  if token is null then return; end if;
+
+  for r in
+    select c.id, c.name, c.slack_channel_id,
+           coalesce(c.slack_ops_channel_id, c.slack_channel_id) as ops_channel,
+           c.alerts, c.qa_schedule_rule,
+           s.last_poll_at, s.consecutive_fails, s.daily_summary_digest,
+           s.active_cycle->>'fixVersion' as active_fv,
+           s.active_cycle->>'threadTs' as thread_ts
+      from public.qa_router_configs c
+      left join public.qa_router_state s on s.config_id = c.id
+     where c.enabled
+  loop
+    -- 화면의 `18시 마감 요약` 스위치.
+    continue when not public.qa_router_alert_on(r.alerts, 'dailySummary');
+
+    -- 보고 있는 차수가 없거나, 그 차수가 이미 끝났으면 보내지 않는다.
+    continue when r.active_fv is null;
+    select * into cyc from public.qa_router_cycles
+     where config_id = r.id and fix_version = r.active_fv;
+    continue when not found;
+    continue when cyc.deploy_ymd < today_kst;
+
+    -- 아침 브리핑과 같은 사다리. 대장 칸을 다시 읽지 않는다.
+    select * into win from public.qa_router_qa_window(
+      cyc.qa_start_ymd_manual, cyc.qa_end_ymd_manual,
+      cyc.qa_start_ymd,        cyc.qa_end_ymd,
+      cyc.prod_ymd,            cyc.deploy_ymd,
+      r.qa_schedule_rule);
+
+    -- 운영 배포일은 제목과 본문 중 늦은 쪽 (TS prodDayOf 와 같다).
+    prod_day := greatest(cyc.deploy_ymd, coalesce(cyc.prod_ymd, cyc.deploy_ymd));
+
+    select
+      count(*) filter (where e.classification <> 'system'),
+      count(*) filter (where e.error is not null),
+      count(*) filter (where e.reassigned)
+      into judged, failed, reassigned
+    from public.qa_router_events e
+    where e.config_id = r.id
+      and (e.created_at at time zone 'Asia/Seoul')::date = today_kst;
+
+    stalled := r.last_poll_at is null
+               or r.last_poll_at < now() - interval '1 hour';
+
+    /*
+      머리말의 **종류**를 따로 들고 있는다. 지문에도 이것이 들어가고
+      (글자가 아니라 종류라 실패 건수가 3→5 로 바뀌어도 같은 칸이다),
+      "경고면 무조건 보낸다" 판정도 이것으로 한다.
+    */
+    if stalled then
+      head_kind := 'stalled';
+      head := format(':warning: *%s* 오늘 마감 · 확인이 멈춰 있습니다', r.name);
+    elsif coalesce(failed, 0) > 0 then
+      head_kind := 'failed';
+      head := format(':warning: *%s* 오늘 마감 · 실패 %s건', r.name, failed);
+    elsif coalesce(r.consecutive_fails, 0) > 0 then
+      head_kind := 'streak';
+      head := format(':warning: *%s* 오늘 마감 · 연속 실패 %s회',
+                     r.name, r.consecutive_fails);
+    else
+      head_kind := 'ok';
+      head := format(':crescent_moon: *%s* 오늘 마감', r.name);
+    end if;
+
+    body_text := format('오늘 알림 %s건%s · 마지막 확인 %s',
+      coalesce(judged, 0),
+      case when coalesce(reassigned, 0) > 0
+           then format(' (Jira 변경 %s건)', reassigned) else '' end,
+      coalesce(to_char(r.last_poll_at at time zone 'Asia/Seoul', 'HH24:MI'),
+               '기록 없음'));
+
+    progress_line := public.qa_router_progress_line(
+      cyc.plan_progress, cyc.plan_collected_at, today_kst);
+
+    /*
+      일정·참고는 **스레드 밖일 때만** 싣는다. 스레드 안이면 같은 내용이
+      루트 메시지에 이미 있어 한 번 올려다보면 된다. 밖으로 나갈 때는
+      맥락이 이 글 하나뿐이라 지금처럼 싣는다.
+
+      넘기는 날짜는 사다리가 정한 것이다. 대장 칸을 그대로 넘기던 것이
+      `QA 종료일 10-08 / 운영 배포일 10-07` 을 사흘 내리 찍은 원인이다.
+    */
+    if r.thread_ts is null then
+      detail_lines := public.qa_router_detail_lines(
+        r.id, r.name, r.active_fv, cyc.deploy_ymd, cyc.deploy_page_title,
+        win.qa_end, prod_day, cyc.deploy_page_id);
+    else
+      detail_lines := null;
+    end if;
+
+    /*
+      사다리가 모순을 잡았으면 그 말을 싣는다. 모순된 날짜를 아무 말 없이
+      찍는 것이 지금 문제다. `win.why` 가 날짜를 문장 안에 들고 있어
+      일정 줄이 빠진 스레드 안에서도 혼자 말이 된다.
+    */
+    schedule_note := case when win.source = 'invalid' then
+      format(':warning: QA 일정을 확인해 주세요 · %s', win.why) end;
+
+    /*
+      보낼 내용의 지문. 시각은 넣지 않는다 - `마지막 확인 17:59` 가 매일
+      달라서 지문이 늘 바뀐다. 대신 `확인이 멈췄나` 판정을 넣는다.
+      활성 차수가 들어 있으므로 차수가 바뀌면 지문도 바뀌고, 새 차수의
+      첫 요약은 반드시 나간다.
+    */
+    digest := md5(concat_ws('|',
+      r.active_fv,
+      head_kind,
+      case when stalled then 'stale' else 'live' end,
+      coalesce(progress_line, ''),
+      coalesce(judged, 0)::text,
+      coalesce(reassigned, 0)::text,
+      coalesce(schedule_note, ''),
+      coalesce(detail_lines, '')));
+
+    -- 경고인 날은 지문과 무관하게 보낸다. 조용한 실패가 이 시스템이
+    -- 없애려는 병이다. 평온한 날만 같은 글을 두 번 안 보낸다.
+    continue when head_kind = 'ok'
+              and r.daily_summary_digest is not distinct from digest;
+
+    payload := jsonb_build_object(
+      'channel', case when r.thread_ts is not null
+                      then r.slack_channel_id else r.ops_channel end,
+      'text', concat_ws(E'\n', head, progress_line, body_text,
+                        schedule_note, detail_lines));
+    if r.thread_ts is not null then
+      payload := payload || jsonb_build_object('thread_ts', r.thread_ts);
+    end if;
+
+    perform net.http_post(
+      url := 'https://slack.com/api/chat.postMessage',
+      headers := jsonb_build_object('Authorization', 'Bearer ' || token,
+                                    'Content-Type', 'application/json'),
+      body := payload);
+
+    /*
+      보낸 것을 남긴다. state 행은 없을 수 있다 (위 조인이 left join 이다) -
+      update 로 쓰면 그 대상은 지문이 영영 null 이라 매일 또 나간다.
+    */
+    insert into public.qa_router_state (config_id, daily_summary_digest)
+    values (r.id, digest)
+    on conflict (config_id) do update
+      set daily_summary_digest = excluded.daily_summary_digest;
+  end loop;
+end;
+$$;
+
+revoke execute on function public.qa_router_daily_summary()
+  from public, anon, authenticated;
+
+-- ── 확인 · 18시 요약 ─────────────────────────────────────────────────────
+/*
+  ① 새 컬럼 둘이 생겼나
+  ② detail_lines 판이 **하나뿐인가**. 서명을 안 건드렸으니 1 이어야 한다
+  ③ 실측 케이스(QA 종료 10-08 · 운영 배포 10-07)를 사다리가 이상함으로 잡나
+*/
+select
+  (select count(*) from information_schema.columns
+    where table_schema = 'public' and table_name = 'qa_router_state'
+      and column_name in ('daily_summary_digest', 'fail_alert_ts')) as new_state_cols,
+  (select count(*) from pg_proc p
+     join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'qa_router_detail_lines') as detail_overloads,
+  (select why from public.qa_router_qa_window(
+     null, null, '2026-09-29'::date, '2026-10-08'::date,
+     '2026-10-07'::date, '2026-10-07'::date, null)) as summary_why;

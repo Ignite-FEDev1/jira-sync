@@ -642,6 +642,7 @@ export function demoState(activeFixVersion: string): QaRouterState {
     lockedUntil: null,
     lockedBy: null,
     staleAlertedAt: null,
+    failAlertTs: null,
     // 데모는 늘 정상이다. 실패 화면은 실데이터에서만 본다.
     sideEffects: {},
     updatedAt: new Date().toISOString(),

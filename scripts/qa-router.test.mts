@@ -37,7 +37,8 @@ import {
   resolveQaWindow,
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
-import { cycleUpsertRow } from '@/lib/services/qa-router/rows';
+import { cycleUpsertRow, toState } from '@/lib/services/qa-router/rows';
+import type { StateRow } from '@/lib/services/qa-router/rows';
 import {
   extractIssueKeys,
   extractJqlStrings,
@@ -4591,4 +4592,210 @@ test('ymd 모양 — 슬래시나 자릿수가 다르면 막는다', () => {
   assert.equal(isYmdShape('2026/09/14'), false);
   assert.equal(isYmdShape('26-09-14'), false);
   assert.equal(isYmdShape(''), false);
+});
+
+/*
+  ── 18시 마감 요약 ──
+
+  운영 채널 실측(C0BVDJEJ19C). 사흘이 글자 단위로 같았고, 그 안의
+  `QA 종료일 10-08` 은 `운영 배포일 10-07` 보다 뒤였다.
+
+    9/24 18:00  🌙 CPO BO QA (개발) 오늘 마감 … QA 종료일 10-08 · 운영 배포일 10-07
+    9/25 18:00  (같음)
+    9/28 18:00  (같음)
+
+  아침 브리핑은 이 브랜치에서 사다리를 거치게 고쳤는데 18시는 안 고쳤다 -
+  같은 병의 절반만 고친 상태였다.
+*/
+test('18시 요약 — 일정을 사다리에서 받는다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260929_qa_router_schedule_gap.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const sum = sql.slice(sql.indexOf('function public.qa_router_daily_summary'));
+
+  // 대장 칸을 직접 읽지 않고 사다리를 거친다
+  assert.match(sum, /select \* into win from public\.qa_router_qa_window\(/);
+  assert.match(
+    sum,
+    /cyc\.qa_start_ymd_manual, cyc\.qa_end_ymd_manual,\s+cyc\.qa_start_ymd,\s+cyc\.qa_end_ymd,/
+  );
+  // 운영배포일은 제목과 본문 중 늦은 쪽 (아침 브리핑과 같은 모양)
+  assert.match(
+    sum,
+    /prod_day := greatest\(cyc\.deploy_ymd, coalesce\(cyc\.prod_ymd, cyc\.deploy_ymd\)\);/
+  );
+  // detail_lines 에 넘기는 것도 사다리 값이다 (예전엔 cyc.qa_end_ymd, cyc.deploy_ymd)
+  assert.match(sum, /win\.qa_end, prod_day, cyc\.deploy_page_id\);/);
+  assert.doesNotMatch(
+    sum,
+    /cyc\.qa_end_ymd, cyc\.deploy_ymd, cyc\.deploy_page_id/
+  );
+
+  // 모순이면 그렇다고 말한다. 아무 말 없이 찍는 것이 지금 문제다.
+  assert.match(sum, /schedule_note := case when win\.source = 'invalid' then/);
+  assert.match(sum, /QA 일정을 확인해 주세요/);
+  // 그 말은 본문에 실린다
+  assert.match(
+    sum,
+    /concat_ws\(E'\\n', head, progress_line, body_text,\s+schedule_note, detail_lines\)/
+  );
+});
+
+/*
+  `detail_lines` 의 서명은 건드리지 않았다. 인자를 붙이면 옛 판과 둘 다
+  후보가 되어 `function ... is not unique` 로 죽는 길이 열린다
+  (20260915_qa_router_drop_orphan_overloads.sql 이 그 사고의 뒷정리다).
+  `invalid` 일 때 할 말은 스레드 안에서 detail_lines 가 통째로 빠지므로
+  어차피 그 밖에 있어야 한다.
+*/
+test('18시 요약 — detail_lines 서명은 그대로 둔다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260929_qa_router_schedule_gap.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  assert.doesNotMatch(sql, /function public\.qa_router_detail_lines\(/);
+  assert.doesNotMatch(
+    sql,
+    /drop function if exists public\.qa_router_detail_lines/
+  );
+});
+
+test('18시 요약 — 달라진 게 없으면 건너뛴다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260929_qa_router_schedule_gap.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 지문 칸. 기본값이 없어야 기존 대상의 첫 요약이 나간다.
+  assert.match(sql, /add column if not exists daily_summary_digest text,/);
+  assert.doesNotMatch(sql, /daily_summary_digest text[^,;]*default/);
+
+  const sum = sql.slice(sql.indexOf('function public.qa_router_daily_summary'));
+  assert.match(sum, /digest := md5\(concat_ws\('\|',/);
+
+  const fingerprint = sum.slice(
+    sum.indexOf('digest := md5('),
+    sum.indexOf('-- 경고인 날은')
+  );
+  // 차수가 들어 있어야 새 차수의 첫 요약이 반드시 나간다
+  assert.match(fingerprint, /r\.active_fv,/);
+  assert.match(fingerprint, /head_kind,/);
+  assert.match(fingerprint, /coalesce\(progress_line, ''\)/);
+  // 마지막 확인 시각은 안 들어간다 - 매일 달라서 지문이 늘 바뀐다.
+  // 대신 "확인이 멈췄나" 판정만 넣는다.
+  assert.doesNotMatch(fingerprint, /last_poll_at/);
+  assert.doesNotMatch(fingerprint, /HH24:MI/);
+  assert.doesNotMatch(fingerprint, /body_text/);
+  assert.match(fingerprint, /case when stalled then 'stale' else 'live' end/);
+
+  // 평온한 날만 건너뛴다. 경고 머리말은 지문과 무관하게 나간다.
+  assert.match(
+    sum,
+    /continue when head_kind = 'ok'\s+and r\.daily_summary_digest is not distinct from digest;/
+  );
+  // 보낸 뒤 남긴다. state 행이 없을 수 있어 update 로는 안 된다.
+  assert.match(
+    sum,
+    /insert into public\.qa_router_state \(config_id, daily_summary_digest\)/
+  );
+  assert.match(sum, /on conflict \(config_id\) do update/);
+});
+
+test('18시 요약 — 스레드 안에서는 일정·참고를 뺀다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260929_qa_router_schedule_gap.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const sum = sql.slice(sql.indexOf('function public.qa_router_daily_summary'));
+  assert.match(
+    sum,
+    /if r\.thread_ts is null then\s+detail_lines := public\.qa_router_detail_lines\(/
+  );
+  assert.match(sum, /else\s+detail_lines := null;\s+end if;/);
+});
+
+/*
+  ── 복구 알림은 실패 알림의 댓글로 ──
+
+  실측. 7분짜리 일시 장애에 최상위 글이 둘 생겼다.
+
+    10:06  ❌ QA Router · CPO BO QA (개발) · 3회 연속 실패: Jira 503
+    10:13  ✅ QA Router · CPO BO QA (개발) 복구됨 (직전 7회 연속 실패)
+
+  `slack.post` 는 이미 4번째 인자로 `threadTs` 를 받고 `SlackPostResult.ts`
+  를 돌려준다 - 시그니처를 넓힐 필요가 없었다. 없던 것은 그 ts 를 둘 곳뿐이다.
+*/
+test('복구 알림 — 실패 글의 ts 를 들고 있다가 그 스레드로 보낸다', () => {
+  const src = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf8'
+  );
+
+  // 실패 알림: 보낸 글의 ts 를 남긴다. 발송이 실패했으면 아무것도 안 남긴다 -
+  // 없는 스레드로 보내면 Slack 이 통째로 거절한다.
+  assert.match(
+    src,
+    /if \(res\.ok && res\.ts\) \{\s+await repo\.saveState\(cfg\.id, \{ failAlertTs: res\.ts \}\);/
+  );
+
+  const finish = src.slice(src.indexOf('async function finishOk'));
+  // 복구 알림: 저장된 ts 를 threadTs 자리에 넘긴다 (blocks 는 안 쓴다)
+  assert.match(
+    finish,
+    /복구됨 \(직전 \$\{state\.consecutiveFails\}회 연속 실패\)`,\s+undefined,\s+state\.failAlertTs\s+\);/
+  );
+  // 보낸 뒤에만 지운다
+  assert.match(
+    finish,
+    /if \(res\.ok && state\.failAlertTs\) \{\s+await repo\.saveState\(cfg\.id, \{ failAlertTs: null \}\);/
+  );
+});
+
+test('상태 행 — 실패 알림 ts 를 도메인 값으로 옮긴다', () => {
+  const row = {
+    config_id: 'cfg-1',
+    seen: null,
+    active_cycle: null,
+    filter_cache: null,
+    derived: null,
+    last_poll_at: null,
+    consecutive_fails: 3,
+    locked_until: null,
+    locked_by: null,
+    stale_alerted_at: null,
+    fail_alert_ts: '1727500000.123456',
+    side_effects: null,
+    updated_at: '2026-09-29T09:00:00Z',
+  } satisfies StateRow;
+  assert.equal(toState(row).failAlertTs, '1727500000.123456');
+
+  // 컬럼이 없던 시절의 행도, 리허설이 만드는 빈 행도 null 이 답이다.
+  assert.equal(
+    toState({ config_id: 'cfg-2' } as unknown as StateRow).failAlertTs,
+    null
+  );
+});
+
+test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {
+  const src = readFileSync(
+    new URL('../lib/services/qa-router/repository.ts', import.meta.url),
+    'utf8'
+  );
+  // undefined 와 null 을 가른다 - null 은 "지워라" 이고 undefined 는 "건드리지 마라" 다.
+  assert.match(
+    src,
+    /if \(patch\.failAlertTs !== undefined\) row\.fail_alert_ts = patch\.failAlertTs;/
+  );
 });

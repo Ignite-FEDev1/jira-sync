@@ -1413,10 +1413,18 @@ export async function runTick(
     // 임계값에 닿을 때만 알린다 (일시적 단절 오탐 억제)
     if (fails === FAIL_ALERT_THRESHOLD) {
       try {
-        await deps.slack.post(
+        const res = await deps.slack.post(
           opsChannel,
           `❌ QA Router · ${cfg.name} · ${fails}회 연속 실패: ${(e as Error).message}`
         );
+        /*
+          이 글의 ts 를 들고 있는다. 복구 알림을 그 댓글로 달기 위한 것이다
+          (`finishOk`). 발송이 실패했으면(ts 없음) 아무것도 안 남긴다 -
+          없는 스레드로 보내면 Slack 이 통째로 거절한다.
+        */
+        if (res.ok && res.ts) {
+          await repo.saveState(cfg.id, { failAlertTs: res.ts });
+        }
       } catch {
         /* 알림 실패는 로그로만 */
       }
@@ -1446,10 +1454,23 @@ async function finishOk(
   });
   if (state.consecutiveFails >= FAIL_ALERT_THRESHOLD) {
     try {
-      await deps.slack.post(
+      /*
+        실패 알림이 남긴 ts 가 있으면 **그 스레드**로 보낸다. 7분짜리
+        일시 장애에 최상위 글이 둘 생기는 것을 막는다. ts 가 없으면
+        지금처럼 최상위로 - 직전 실패가 이 코드 이전이거나 실패 알림
+        자체가 실패한 경우다.
+      */
+      const res = await deps.slack.post(
         opsChannel,
-        `✅ QA Router · ${cfg.name} 복구됨 (직전 ${state.consecutiveFails}회 연속 실패)`
+        `✅ QA Router · ${cfg.name} 복구됨 (직전 ${state.consecutiveFails}회 연속 실패)`,
+        undefined,
+        state.failAlertTs
       );
+      // 보낸 뒤에 지운다. 발송이 실패했으면 들고 있어야 다음 복구가 그
+      // 스레드로 간다 - 지워 버리면 짝 없는 최상위 글이 또 생긴다.
+      if (res.ok && state.failAlertTs) {
+        await repo.saveState(cfg.id, { failAlertTs: null });
+      }
     } catch {
       /* noop */
     }
