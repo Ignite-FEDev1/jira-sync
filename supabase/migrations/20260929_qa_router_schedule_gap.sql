@@ -247,6 +247,106 @@ as $$
   from hit;
 $$;
 
+-- ── 템플릿 변수 · 본문도 사다리가 정한 날짜를 말하게 ─────────────────────
+/*
+  울릴 날은 사다리(`qa_router_qa_window`)가 정하는데, 본문을 만드는
+  `qa_router_vars` 는 `cycles` 의 대장 칸(`qa_end_ymd`·`deploy_ymd`)을 다시
+  읽고 있었다. 이 분기는 전에는 없었다 - 사다리가 생기기 전에는 그 칸들이
+  곧 앵커였기 때문이다. 지금은 둘이 갈린다.
+
+    수동 09-20~09-25 · 대장 09-29  →  09-26 에 `QA 종료` 를 울리면서
+                                      본문은 `QA 종료일 : 09-29`
+    규칙 층에서 온 기간            →  대장 칸이 비어 일정 두 줄이 통째로
+                                      빠진다. 이 브랜치가 고치려던 GW
+                                      (대장 33개 중 0개 파싱) 가 정확히 이것이다
+
+  그래서 정해진 기간을 **인자로 받는다**. 안 넘기면 예전처럼 칸을 읽는다 -
+  `qa_router_preview_message`(20260914)가 지금도 4인자로 부르고, 그쪽 답은
+  안 바뀌어야 한다.
+
+  세 값은 사다리가 **함께** 정한 한 덩어리라 셋 다 받는다. 지금 본문에
+  나가는 것은 종료일과 배포일뿐이지만, 넘기는 쪽이 창을 쪼개 반만 넘기는
+  길을 열어 두지 않는다.
+
+  ── 오버로드를 만들지 않는다 ──
+
+  인자를 뒤에 붙이면 옛 4인자 판과 **둘 다 후보**가 되어, 남아 있는 4인자
+  호출이 `function ... is not unique` 로 죽는다. 이 저장소가 이미 한 번
+  겪은 사고다(`20260915_qa_router_drop_orphan_overloads.sql`). 옛 판을
+  먼저 지운다 - plpgsql 본문은 의존성으로 안 잡히므로 cascade 없이 지워도
+  `qa_router_preview_message` 는 그대로 남고, 다음 호출에서 새 판에 붙는다.
+*/
+drop function if exists public.qa_router_vars(uuid, text, text, date);
+
+create or replace function public.qa_router_vars(
+  p_config_id uuid,
+  p_fix_version text,
+  p_milestone text,
+  p_today date,
+  -- 사다리가 정한 QA 기간과 운영 배포일. 안 넘기면 대장 칸을 읽는다.
+  p_qa_start date default null,
+  p_qa_end   date default null,
+  p_prod     date default null
+)
+returns jsonb
+language plpgsql
+stable
+set search_path = public
+as $$
+declare
+  cyc record;
+  qa_end_v date; prod_v date;
+  total_n int; done_n int;
+  dow text[] := array['일','월','화','수','목','금','토'];
+begin
+  select * into cyc from public.qa_router_cycles
+   where config_id = p_config_id and fix_version = p_fix_version;
+  if not found then return '{}'::jsonb; end if;
+
+  /*
+    넘어온 값이 있으면 그것이 답이다. 없으면 20260921 판과 같이 대장 칸.
+    `p_qa_start` 는 창을 통째로 받기 위한 것이고, 오늘 이 함수가 만드는
+    변수 중에는 그것을 쓰는 것이 없다 (`TEMPLATE_VARS` 에 `{QA시작일}` 이
+    없다).
+  */
+  qa_end_v := coalesce(p_qa_end, cyc.qa_end_ymd);
+  prod_v   := coalesce(p_prod,   cyc.deploy_ymd);
+
+  total_n := coalesce((cyc.plan_progress->>'total')::int, 0);
+  done_n := coalesce((cyc.plan_progress->>'ticketDone')::int, 0);
+
+  return jsonb_strip_nulls(jsonb_build_object(
+    -- 기호는 "지금 문제인가" 만 가른다. 무슨 날인지는 문구가 말한다.
+    '기호', case when total_n > 0 and done_n < total_n
+                 then ':warning:' else ':date:' end,
+    '차수', coalesce(cyc.deploy_page_title, p_fix_version),
+    '문구', p_milestone,
+    '진행률', public.qa_router_progress_line(
+      cyc.plan_progress, cyc.plan_collected_at, p_today),
+    'QA종료일', case when qa_end_v is not null then
+      to_char(qa_end_v, 'MM-DD') || '(' ||
+      dow[extract(dow from qa_end_v)::int + 1] || ')' end,
+    '운영배포일', case when prod_v is not null then
+      to_char(prod_v, 'MM-DD') || '(' ||
+      dow[extract(dow from prod_v)::int + 1] || ')' end,
+    -- 링크의 날짜는 차수를 식별하는 키다. 사다리가 아니라 대장 제목의 날.
+    '상세링크', case when cyc.deploy_ymd is not null then
+      format('<%s/admin/qa-router/%s/cycles/%s|판정 기록 · 기획티켓 진행>',
+             public.qa_router_admin_base(), p_config_id, cyc.deploy_ymd) end,
+    -- 사이트는 대상을 따라가고, 스페이스는 쓰지 않는다 (pageId 만으로 연다).
+    '배포대장링크', case when cyc.deploy_page_id is not null then
+      format('<%s/wiki/pages/viewpage.action?pageId=%s|%s>',
+             public.qa_router_wiki_base(p_config_id),
+             cyc.deploy_page_id,
+             public.qa_router_esc(coalesce(cyc.deploy_page_title, '문서 열기'))) end,
+    'fixVersion', p_fix_version,
+    -- 숫자는 0 도 뜻이 있다. 다만 아직 안 읽었으면(total 0) 둘 다 뺀다.
+    '기획건수', case when total_n > 0 then total_n::text end,
+    '완료건수', case when total_n > 0 then done_n::text end
+  ));
+end;
+$$;
+
 -- ── 아침 브리핑 · 갈래를 하나에서 셋으로 ─────────────────────────────────
 create or replace function public.qa_router_morning_brief()
 returns void
@@ -259,6 +359,7 @@ declare
   today_kst date := (now() at time zone 'Asia/Seoul')::date;
   cyc record;
   win record;
+  prod_day date;
   rules jsonb; rule jsonb; body text; payload jsonb; target text;
 begin
   select decrypted_secret into token from vault.decrypted_secrets
@@ -292,17 +393,23 @@ begin
       cyc.prod_ymd,            cyc.deploy_ymd,
       r.qa_schedule_rule);
 
+    -- 운영 배포일은 제목과 본문 중 늦은 쪽 (TS prodDayOf 와 같다).
+    prod_day := greatest(cyc.deploy_ymd, coalesce(cyc.prod_ymd, cyc.deploy_ymd));
+
     rules := public.qa_router_alert_rules_for(cyc.alert_rules_override, r.alert_rules);
     rule  := public.qa_router_hit_rule(
-               rules, win.qa_start, win.qa_end,
-               greatest(cyc.deploy_ymd, coalesce(cyc.prod_ymd, cyc.deploy_ymd)),
-               today_kst);
+               rules, win.qa_start, win.qa_end, prod_day, today_kst);
 
     if rule is not null then
-      -- ① 평소. 지금과 같다.
+      /*
+        ① 평소. 울릴 날을 정한 값과 **같은 값**으로 본문을 만든다. 예전처럼
+        `qa_router_vars` 가 대장 칸을 다시 읽게 두면, 사다리가 수동·규칙으로
+        간 차수에서 "언제 울릴지" 와 "본문이 말하는 날" 이 갈린다.
+      */
       body := public.qa_router_render(
         coalesce(rule->>'template', public.qa_router_default_template()),
-        public.qa_router_vars(r.id, r.active_fv, rule->>'label', today_kst));
+        public.qa_router_vars(r.id, r.active_fv, rule->>'label', today_kst,
+                              win.qa_start, win.qa_end, prod_day));
       continue when body is null;
       target := case when r.thread_ts is not null
                      then r.slack_channel_id else r.ops_channel end;
@@ -348,6 +455,8 @@ revoke execute on function public.qa_router_morning_brief()
   ① 사다리가 실측 케이스를 이상함으로 잡나 (CPO 10-07)
   ② 규칙 층이 영업일로 계산되나
   ③ 컬럼이 다 생겼나
+  ④ qa_router_vars 판이 **하나뿐인가**. 둘이면 4인자 호출이 모호해져
+     `qa_router_preview_message` 가 죽는다.
 */
 select
   (select source from public.qa_router_qa_window(
@@ -358,4 +467,7 @@ select
      '{"startOffset":-6,"endOffset":-1,"businessDays":true}'::jsonb)) as by_rule,
   (select count(*) from information_schema.columns
     where table_schema = 'public' and table_name = 'qa_router_cycles'
-      and column_name in ('qa_start_ymd_manual','qa_end_ymd_manual','schedule_warned_on')) as new_cols;
+      and column_name in ('qa_start_ymd_manual','qa_end_ymd_manual','schedule_warned_on')) as new_cols,
+  (select count(*) from pg_proc p
+     join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'qa_router_vars') as vars_overloads;

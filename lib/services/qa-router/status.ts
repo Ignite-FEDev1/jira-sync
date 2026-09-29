@@ -6,6 +6,7 @@
  */
 
 import { buildFixVersion, type FixVersionRule } from './derive';
+import { prodDayOf } from './qa-window';
 import { DEPLOY_KINDS } from './types';
 import type {
   AlertRule,
@@ -668,19 +669,40 @@ export function milestoneFrom(
   s: {
     qaStartYmd: string | null;
     qaEndYmd: string | null;
+    /** 대장 본문이 말한 운영 배포일. 없을 수 있다. */
     prodYmd: string | null;
+    /** 대장 제목의 날짜. 넘기면 운영 배포일을 `prodDayOf` 로 정한다. */
+    deployYmd?: string;
   },
   todayYmd: string
 ): string | null {
+  /*
+    ── 운영 배포일은 제목과 본문 중 늦은 쪽 ──
+
+    SQL 쌍둥이 `qa_router_hit_rule` 은 `greatest(deploy_ymd,
+    coalesce(prod_ymd, deploy_ymd))` 를 받는다. 여기서 `s.prodYmd` 를 그대로
+    쓰면 **대장 본문에 운영일이 없는 차수에서 둘이 갈린다** - SQL 은 제목의
+    날짜로 마감선을 긋고 prod 앵커 규칙도 울리는데, 이쪽은 선을 안 긋고
+    아무것도 안 울린다. 쌍둥이의 값은 "돌고 있는 것을 고정하는 것" 뿐이라,
+    갈리면 고정하는 것이 없다.
+
+    `deployYmd` 를 안 넘긴 호출은 예전 그대로다 - 넘겨줄 값이 없는 자리에서
+    `prodDayOf` 를 흉내 내면 없는 날짜를 지어내게 된다.
+  */
+  const prod =
+    s.deployYmd === undefined
+      ? s.prodYmd
+      : prodDayOf({ deployYmd: s.deployYmd, prodYmd: s.prodYmd });
+
   const anchorOf = (a: AlertRule['anchor']) =>
-    a === 'qa_start' ? s.qaStartYmd : a === 'qa_end' ? s.qaEndYmd : s.prodYmd;
+    a === 'qa_start' ? s.qaStartYmd : a === 'qa_end' ? s.qaEndYmd : prod;
 
   /*
     ── 차수 마감선 ──
 
     운영 배포일이 지나면 그 차수는 끝이다. 규칙이 무엇이든 울리지 않는다.
 
-    **`s.prodYmd` 를 그대로 쓰면 안 된다.** `prod` 앵커 규칙에 양수 오프셋을
+    **운영 배포일을 그대로 쓰면 안 된다.** `prod` 앵커 규칙에 양수 오프셋을
     넣어 배포일을 보정하는 패턴이 이미 있다 - 차수 덮어쓰기로
     `{anchor:'prod', offset:4}` 를 넣으면 "브랜치를 자른 날보다 4일 뒤에
     배포했다" 는 뜻이다. 그 규칙은 마감선에 **막히는 쪽이 아니라 정하는 쪽**이라,
@@ -699,10 +721,10 @@ export function milestoneFrom(
   const prodRule = rules.find(
     (r) => r.enabled !== false && r.anchor === 'prod'
   );
-  const cutoff = s.prodYmd
+  const cutoff = prod
     ? prodRule
-      ? ruleDay(s.prodYmd, prodRule.offset, prodRule.shift)
-      : s.prodYmd
+      ? ruleDay(prod, prodRule.offset, prodRule.shift)
+      : prod
     : null;
 
   for (const r of rules) {

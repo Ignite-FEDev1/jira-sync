@@ -15,7 +15,7 @@ import {
   kstYmdOf,
   type Health,
 } from '@/lib/services/qa-router/status';
-import { resolveQaWindow } from '@/lib/services/qa-router/qa-window';
+import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   QaRouterConfig,
   QaRouterState,
@@ -97,10 +97,21 @@ export default function QaRouterListPage() {
       }
     }
 
-    // 배지용 차수. 지난 차수까지 세면 배지가 영영 안 꺼지므로, 운영
-    // 배포일이 오늘보다 이른 것은 여기서 먼저 뺀다.
+    /*
+      배지용 차수. 지난 차수까지 세면 배지가 영영 안 꺼지므로, 운영
+      배포일이 오늘보다 이른 것은 여기서 먼저 뺀다.
+
+      운영 배포일은 `prodDayOf` - 제목과 본문 중 **늦은 쪽**이다. `본문이
+      있으면 본문` 으로 고르면 본문이 제목보다 이른 차수가 일찍 빠진다
+      (실측: `release_20260914` 는 제목 09-14 · 본문 09-10 이라 나흘 먼저
+      배지에서 사라졌다). 마감선·알림이 쓰는 정의와 같아야 한다.
+    */
     const scheduleCycles = (scheduleCycRes.data ?? []).filter(
-      (r) => (r.prod_ymd ?? r.deploy_ymd) >= todayYmd
+      (r) =>
+        prodDayOf({
+          deployYmd: r.deploy_ymd as string,
+          prodYmd: (r.prod_ymd as string | null) ?? null,
+        }) >= todayYmd
     );
 
     const stateByConfig = new Map(

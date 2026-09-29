@@ -41,7 +41,7 @@ import {
   settlementBucket,
   type EventProblem,
 } from '@/lib/services/qa-router/outcome';
-import { resolveQaWindow } from '@/lib/services/qa-router/qa-window';
+import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   AlertAnchor,
   AlertRule,
@@ -178,6 +178,19 @@ export default function CycleDetailPage() {
   // 날짜 출처 판정. 화면과 배치(SQL)가 같은 규칙을 쓴다.
   const deploy = resolveDeployYmd(cycle);
   const qaEnd = resolveQaEndYmd(cycle);
+  /*
+    알림 기준 목록이 쓸 QA 기간. 아래 `QaScheduleSection` 이 보여주는 것과
+    같은 사다리다 — 09:10 배치가 이 값으로 울릴 날을 고르기 때문이다.
+  */
+  const alertWindow = resolveQaWindow({
+    manualStartYmd: cycle.qaStartYmdManual ?? null,
+    manualEndYmd: cycle.qaEndYmdManual ?? null,
+    ledgerStartYmd: cycle.qaStartYmd,
+    ledgerEndYmd: cycle.qaEndYmd,
+    prodYmd: cycle.prodYmd,
+    deployYmd: cycle.deployYmd,
+    rule: config.qaScheduleRule,
+  });
   /*
     봇이 이 차수 알림을 모으는 스레드. permalink 는 ts 의 점을 빼고 p 를 붙인다.
     데모에서는 실제 ts 가 없으니 만들지 않는다.
@@ -462,10 +475,18 @@ export default function CycleDetailPage() {
         configRules={config.alertRules}
         override={cycle.alertRulesOverride ?? null}
         deployYmd={cycle.deployYmd}
+        /*
+          09:10 배치가 쓰는 값과 같아야 한다. 대장 칸(`cycle.qaEndYmd`)을
+          넘기면 기간이 직접 입력이나 규칙에서 온 차수에서 **울리지도 않을
+          날짜가 목록에 적힌다.**
+        */
         schedule={{
-          qaStartYmd: cycle.qaStartYmd,
-          qaEndYmd: qaEnd.ymd,
-          prodYmd: deploy.ymd,
+          qaStartYmd: alertWindow.qaStartYmd,
+          qaEndYmd: alertWindow.qaEndYmd,
+          prodYmd: prodDayOf({
+            deployYmd: cycle.deployYmd,
+            prodYmd: cycle.prodYmd,
+          }),
         }}
         onSaved={t.reload}
       />

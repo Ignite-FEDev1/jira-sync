@@ -29,7 +29,7 @@ import {
   overdueSlot,
   staleFilterCycle,
 } from '@/lib/services/qa-router/status';
-import { resolveQaWindow } from '@/lib/services/qa-router/qa-window';
+import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import {
   ALERT_DESC,
   ALERT_KINDS,
@@ -282,13 +282,34 @@ export default function QaRouterSettingsPage() {
   const activeCycle = t.cycles.find(
     (c) => c.fixVersion === t.state?.activeCycle?.fixVersion
   );
-  const schedule = activeCycle
-    ? {
-        qaStartYmd: activeCycle.qaStartYmd,
-        qaEndYmd: activeCycle.qaEndYmd,
+  /*
+    대장 칸을 그대로 넘기면 안 된다. 09:10 배치는 사다리(`resolveQaWindow`)가
+    정한 QA 기간과 `prodDayOf` 가 정한 운영 배포일로 울릴 날을 고른다 —
+    여기에 대장 칸을 넣으면, 기간이 직접 입력이나 규칙에서 온 차수에서
+    **화면이 배치와 다른 날짜를 적는다.**
+  */
+  const activeWindow = activeCycle
+    ? resolveQaWindow({
+        manualStartYmd: activeCycle.qaStartYmdManual ?? null,
+        manualEndYmd: activeCycle.qaEndYmdManual ?? null,
+        ledgerStartYmd: activeCycle.qaStartYmd,
+        ledgerEndYmd: activeCycle.qaEndYmd,
         prodYmd: activeCycle.prodYmd,
-      }
+        deployYmd: activeCycle.deployYmd,
+        rule: config.qaScheduleRule,
+      })
     : null;
+  const schedule: AlertSchedule | null =
+    activeCycle && activeWindow
+      ? {
+          qaStartYmd: activeWindow.qaStartYmd,
+          qaEndYmd: activeWindow.qaEndYmd,
+          prodYmd: prodDayOf({
+            deployYmd: activeCycle.deployYmd,
+            prodYmd: activeCycle.prodYmd,
+          }),
+        }
+      : null;
 
   /*
     ── 필터가 지금 무슨 차수를 보고 있나 ──
@@ -3257,7 +3278,7 @@ function RuleDetail({
       <div
         className={cn(
           'mt-3 rounded-md border px-3 py-2 text-[12.5px]',
-          row.shadowed
+          row.shadowed || row.pastCutoff
             ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300'
             : 'bg-muted/30'
         )}
@@ -3266,6 +3287,12 @@ function RuleDetail({
           '꺼져 있어 안 울립니다'
         ) : !row.day ? (
           '이번 차수 날짜를 아직 못 읽어 언제 울릴지 계산할 수 없습니다'
+        ) : row.pastCutoff ? (
+          /*
+            날짜는 잡혔는데 차수 마감선 뒤다. 09:10 배치가 여기서 끊으므로
+            화면도 끊어 말한다 — `며칠에 걸린다` 만 적으면 나가는 줄 안다.
+          */
+          `${ymdDow(row.day)} 에 걸리는데, 운영 배포일이 지난 뒤라 이 차수엔 안 나갑니다`
         ) : row.shadowed ? (
           /*
             겹침은 고쳐야 할 문제다. 무엇과 겹쳤는지 이름을 대고, 푸는

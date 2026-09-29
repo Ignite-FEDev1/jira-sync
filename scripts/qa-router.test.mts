@@ -4272,6 +4272,54 @@ test('마감선 — 운영 배포일을 모르면 막지 않는다', () => {
 });
 
 /*
+  ── 쌍둥이가 도는 것을 고정하나 ──
+
+  SQL `qa_router_hit_rule` 은 `greatest(deploy_ymd, coalesce(prod_ymd,
+  deploy_ymd))` 를 받는다. 대장 본문에 운영일이 없는 차수 - GW 는 대장 33개가
+  전부 그렇다 - 에서 TS 가 `prodYmd` 만 보면 **선을 안 긋고 prod 앵커도 안
+  울려**, 쌍둥이가 고정하는 것이 없어진다. `deployYmd` 를 넘기면 둘이 같은
+  답을 낸다. 안 넘기는 호출은 예전 그대로다.
+*/
+test('마감선 — 대장 본문에 운영일이 없으면 제목의 날짜가 선이다', () => {
+  const rules = [
+    {
+      id: 'qaEnd',
+      anchor: 'qa_end' as const,
+      offset: 0,
+      shift: 'none' as const,
+      label: 'QA 종료',
+      enabled: true,
+    },
+    {
+      id: 'prodToday',
+      anchor: 'prod' as const,
+      offset: 0,
+      shift: 'none' as const,
+      label: '오늘 운영 배포',
+      enabled: true,
+    },
+  ];
+  const ledger = {
+    qaStartYmd: '2026-09-01',
+    qaEndYmd: '2026-09-11',
+    prodYmd: null,
+  };
+
+  // 제목이 09-10 이면 선도 09-10 이다. qaEnd(09-11)는 그 뒤라 막힌다.
+  assert.equal(
+    milestoneFrom(rules, { ...ledger, deployYmd: '2026-09-10' }, '2026-09-11'),
+    null
+  );
+  // 그리고 prod 앵커 규칙은 제목의 날짜로 울린다 (SQL 이 그렇게 한다).
+  assert.equal(
+    milestoneFrom(rules, { ...ledger, deployYmd: '2026-09-10' }, '2026-09-10'),
+    '오늘 운영 배포'
+  );
+  // deployYmd 를 안 넘기면 선이 없다 - 기존 호출부의 답은 안 바뀐다.
+  assert.equal(milestoneFrom(rules, ledger, '2026-09-11'), 'QA 종료');
+});
+
+/*
   `prod` 앵커 규칙은 마감선에 **막히는 쪽이 아니라 정하는 쪽**이다.
   차수 덮어쓰기로 배포일을 보정하는 기존 패턴을 죽이면 안 된다.
 */
@@ -4474,6 +4522,45 @@ test('마감선 — SQL 에도 같은 가드가 있다', () => {
   assert.match(hit, /p_prod is null or p_today <= coalesce\(\(/);
   // prod 앵커 규칙이 선을 정한다 (막히는 쪽이 아니다)
   assert.match(hit, /pr\.value->>'anchor' = 'prod'/);
+});
+
+/*
+  ── 본문도 사다리를 따라가나 ──
+
+  울릴 날은 `qa_router_qa_window` 가 정하는데 본문을 만드는 `qa_router_vars`
+  는 대장 칸을 다시 읽고 있었다. 수동 09-20~09-25 · 대장 09-29 인 차수는
+  09-26 에 `QA 종료` 를 울리면서 본문엔 `QA 종료일 : 09-29` 를 적고, 기간이
+  규칙 층에서 온 차수는 대장 칸이 비어 일정 두 줄이 통째로 빠진다.
+*/
+test('알림 본문 — 사다리가 정한 날짜를 qa_router_vars 에 넘긴다', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260929_qa_router_schedule_gap.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 브리핑은 울릴 날을 정한 값을 그대로 본문에 넘긴다
+  assert.match(
+    sql,
+    /qa_router_vars\(r\.id, r\.active_fv, rule->>'label', today_kst,\s+win\.qa_start, win\.qa_end, prod_day\)/
+  );
+
+  const vars = sql.slice(
+    sql.indexOf('drop function if exists public.qa_router_vars')
+  );
+  /*
+    옛 4인자 판을 먼저 지운다. 안 지우면 인자를 뒤에 붙인 새 판과 둘 다
+    후보가 되어, 아직 4인자로 부르는 `qa_router_preview_message`(20260914)가
+    `function ... is not unique` 로 죽는다.
+  */
+  assert.match(
+    vars,
+    /drop function if exists public\.qa_router_vars\(uuid, text, text, date\);/
+  );
+  // 안 넘기면 예전처럼 대장 칸을 읽는다 - 그 4인자 호출의 답은 안 바뀐다
+  assert.match(vars, /coalesce\(p_qa_end, cyc\.qa_end_ymd\)/);
+  assert.match(vars, /coalesce\(p_prod,\s+cyc\.deploy_ymd\)/);
 });
 
 test('수동 일정 — 둘 다 비우면 지우는 것이다', () => {
