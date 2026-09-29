@@ -35,7 +35,7 @@ import {
   resolveQaWindow,
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
-import { cycleUpsertRow } from '@/lib/services/qa-router/repository';
+import { cycleUpsertRow } from '@/lib/services/qa-router/rows';
 import {
   extractIssueKeys,
   extractJqlStrings,

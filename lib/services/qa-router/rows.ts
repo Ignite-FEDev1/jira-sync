@@ -21,6 +21,7 @@
 import type { JudgeEvidence } from './judge';
 import type {
   ActiveCycle,
+  DeployCycle,
   DerivedContext,
   AlertRule,
   AlertSwitches,
@@ -188,5 +189,41 @@ export function toEvent(r: EventRow): QaRouterEvent {
     error: r.error,
     fixVersion: r.fix_version,
     createdAt: r.created_at,
+  };
+}
+
+/**
+ * 배치가 쓸 한 행. **수동 입력 칸을 담지 않는다.**
+ *
+ * `upsert` 는 payload 에 있는 칸을 전부 덮어쓴다. 여기에 `qa_start_ymd_manual`
+ * 을 넣으면 사람이 넣은 값이 다음 수집에서 null 로 지워진다. 담지 않으면
+ * DB 의 값이 그대로 남는다.
+ *
+ * 테스트가 이 함수를 직접 부른다 - DB 없이 "무엇을 덮어쓰나" 를 고정한다.
+ *
+ * 이 함수가 `repository.ts` 가 아니라 여기 있는 이유: `DeployCycle → Record`
+ * 순수 변환일 뿐 I/O 가 없는데, `repository.ts` 는 맨 위에서 `dbServer`
+ * (Supabase 클라이언트)를 만든다. 거기 두면 이 함수 하나를 부르려고 테스트가
+ * `dbServer` 생성까지 모듈 그래프에 끌고 들어와, 환경변수 없이는 테스트
+ * 스위트 자체가 로드 시점에 죽는다 — 실제로 그렇게 깨진 적이 있다.
+ */
+export function cycleUpsertRow(
+  configId: string,
+  c: DeployCycle
+): Record<string, unknown> {
+  return {
+    config_id: configId,
+    deploy_ymd: c.deployYmd,
+    fix_version: c.fixVersion,
+    cycle_label: c.cycleLabel,
+    qa_start_ymd: c.qaStartYmd,
+    qa_end_ymd: c.qaEndYmd,
+    prod_ymd: c.prodYmd,
+    deploy_page_id: c.deployPageId,
+    deploy_page_title: c.deployPageTitle,
+    jira_version_exists: c.jiraVersionExists,
+    fix_version_source: c.fixVersionSource ?? null,
+    dev_project_key: c.devProjectKey ?? null,
+    collected_at: new Date().toISOString(),
   };
 }

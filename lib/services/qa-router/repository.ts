@@ -15,6 +15,7 @@ import { dbServer } from '@/lib/db';
   **매핑 규칙은 같다** — 복제해 두었다가 컬럼을 더할 때 한쪽을 빠뜨린다.
 */
 import {
+  cycleUpsertRow,
   toConfig,
   toEvent,
   toState,
@@ -520,38 +521,10 @@ export async function listEvents(
  * 보낸 컬럼만 `on conflict do update set` 에 넣으므로, 사람이 그 차수에 걸어 둔
  * 알림 덮어쓰기는 하루 한 번 도는 이 수집에 지워지지 않는다 (실측으로 확인).
  * 새 컬럼을 payload 에 더할 때 이 칸을 같이 넣지 않도록 주의한다.
- */
-
-/**
- * 배치가 쓸 한 행. **수동 입력 칸을 담지 않는다.**
  *
- * `upsert` 는 payload 에 있는 칸을 전부 덮어쓴다. 여기에 `qa_start_ymd_manual`
- * 을 넣으면 사람이 넣은 값이 다음 수집에서 null 로 지워진다. 담지 않으면
- * DB 의 값이 그대로 남는다.
- *
- * 테스트가 이 함수를 직접 부른다 - DB 없이 "무엇을 덮어쓰나" 를 고정한다.
+ * 행을 만드는 `cycleUpsertRow` 는 `rows.ts` 에 있다 — I/O 없는 순수 변환이라
+ * `dbServer` 를 만드는 이 파일에 두지 않는다.
  */
-export function cycleUpsertRow(
-  configId: string,
-  c: DeployCycle
-): Record<string, unknown> {
-  return {
-    config_id: configId,
-    deploy_ymd: c.deployYmd,
-    fix_version: c.fixVersion,
-    cycle_label: c.cycleLabel,
-    qa_start_ymd: c.qaStartYmd,
-    qa_end_ymd: c.qaEndYmd,
-    prod_ymd: c.prodYmd,
-    deploy_page_id: c.deployPageId,
-    deploy_page_title: c.deployPageTitle,
-    jira_version_exists: c.jiraVersionExists,
-    fix_version_source: c.fixVersionSource ?? null,
-    dev_project_key: c.devProjectKey ?? null,
-    collected_at: new Date().toISOString(),
-  };
-}
-
 export async function upsertCycles(
   configId: string,
   cycles: DeployCycle[]
