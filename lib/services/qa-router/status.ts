@@ -689,6 +689,13 @@ export function milestoneFrom(
     그래도 "배포 다음날부터는 뭐든 안 울린다" 는 그대로 지켜진다. 보정된
     배포일이 새 선이 될 뿐이다.
   */
+  /*
+    `prod` 앵커 규칙이 여럿 켜져 있을 수도 있다 (`AlertRule[]` 은 유일성을
+    강제하지 않는다). 그런 경우 **배열 순서상 먼저 나오는 첫 규칙**이
+    이긴다 - 임의가 아니라 의도한 선택이다. SQL 쌍둥이
+    `qa_router_hit_rule` 도 같은 선택을 `order by ordinality limit 1` 로
+    표현한다. 여기서 고르는 방식을 바꾸면 그쪽도 같이 바꿔야 한다.
+  */
   const prodRule = rules.find(
     (r) => r.enabled !== false && r.anchor === 'prod'
   );

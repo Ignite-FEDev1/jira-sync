@@ -4304,3 +4304,81 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
   ];
   assert.equal(milestoneFrom(withQa, s, '2026-09-15'), null);
 });
+
+/*
+  `cutoff = s.prodYmd ? (prodRule ? ruleDay(...) : s.prodYmd) : null` 의
+  가운데 갈래 - prodYmd 는 있는데 켜져 있는 `prod` 앵커 규칙이 아예 없는
+  경우 - 는 위 테스트들이 건드리지 않는다. 그 갈래에서는 원본 prodYmd
+  가 그대로 마감선이어야 한다.
+*/
+test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이다', () => {
+  const qaEndOnly = [
+    {
+      id: 'qaEnd',
+      anchor: 'qa_end' as const,
+      offset: 0,
+      shift: 'none' as const,
+      label: 'QA 종료',
+      enabled: true,
+    },
+  ];
+
+  // prod 앵커가 아예 없다 → 마감선은 원본 prodYmd(09-10) 그대로다.
+  // qaEnd(09-11)가 그보다 뒤라 마감선을 넘는다.
+  assert.equal(
+    milestoneFrom(
+      qaEndOnly,
+      {
+        qaStartYmd: '2026-09-01',
+        qaEndYmd: '2026-09-11',
+        prodYmd: '2026-09-10',
+      },
+      '2026-09-11'
+    ),
+    null
+  );
+
+  // qaEnd 가 prodYmd 당일(09-10)이면 마감선을 넘지 않으므로 울린다.
+  assert.equal(
+    milestoneFrom(
+      qaEndOnly,
+      {
+        qaStartYmd: '2026-09-01',
+        qaEndYmd: '2026-09-10',
+        prodYmd: '2026-09-10',
+      },
+      '2026-09-10'
+    ),
+    'QA 종료'
+  );
+
+  /*
+    prod 앵커 규칙이 있어도 꺼져 있으면(enabled:false) `prodRule` 을
+    못 고른 것과 같다 → 여전히 원본 prodYmd 가 선이다. 이 규칙의
+    offset(+4)이 실수로 선 계산에 섞이면 마감선이 09-14 로 밀려서
+    아래 assert 가 깨진다.
+  */
+  const withDisabledProd = [
+    ...qaEndOnly,
+    {
+      id: 'prodDisabled',
+      anchor: 'prod' as const,
+      offset: 4,
+      shift: 'none' as const,
+      label: '오늘 운영 배포',
+      enabled: false,
+    },
+  ];
+  assert.equal(
+    milestoneFrom(
+      withDisabledProd,
+      {
+        qaStartYmd: '2026-09-01',
+        qaEndYmd: '2026-09-12',
+        prodYmd: '2026-09-10',
+      },
+      '2026-09-12'
+    ),
+    null
+  );
+});
