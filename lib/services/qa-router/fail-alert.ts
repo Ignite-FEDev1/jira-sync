@@ -1,0 +1,82 @@
+/**
+ * QA Router · 연속 실패 알림과 복구 알림의 짝 맞추기
+ *
+ * ── 왜 파일을 따로 두나 ──
+ *
+ * `tick.ts` 는 `repository.ts` 를 거쳐 `@/lib/db` 를 끌고 들어온다. 테스트가
+ * 그것을 import 하면 모듈 그래프에 DB 클라이언트가 들어와 환경변수 없이는
+ * 못 도는 스위트가 된다 (이 브랜치에서 한 번 되돌린 적이 있다).
+ *
+ * 그런데 "복구 알림을 어디로 보낼까" 는 DB 를 하나도 안 쓰는 결정이고,
+ * **실측으로 틀렸던 자리**다 - 7분짜리 일시 장애에 최상위 글이 둘 생겼고,
+ * 고친 뒤에는 스레드가 사라진 경우에 복구 사실이 통째로 사라질 수 있었다.
+ * 글자를 훑는 테스트로는 그것을 못 잡는다. 그래서 가짜 `post` 하나로
+ * 진짜 돌려 볼 수 있게 이 결정만 떼어 둔다.
+ */
+
+import type { SlackPostResult } from './clients';
+
+/** `SlackClient['post']` 와 같은 모양. 가짜를 끼우기 위해 따로 이름을 준다. */
+export type SlackPost = (
+  channel: string,
+  text: string,
+  blocks?: unknown[],
+  threadTs?: string | null
+) => Promise<SlackPostResult>;
+
+export interface RecoveryPost {
+  /**
+   * 실제로 한 통이 나갔나.
+   *
+   * 로그가 `복구 알림 발송` 이라고 말해도 되는 조건이다. 전에는 발송
+   * 결과를 안 보고 무조건 그렇게 적었다 - 안 나간 날의 로그가 나간 날과
+   * 똑같이 생겨서, 장애를 되짚는 사람이 여기서부터 틀린 길로 간다.
+   */
+  posted: boolean;
+  /** 실패 글의 댓글로 붙었나. false 면 최상위로 나갔다. */
+  inThread: boolean;
+}
+
+/**
+ * 복구 알림을 보낸다. 실패 알림의 ts 가 있으면 **그 스레드**로 먼저 보낸다.
+ *
+ * 스레드로 못 붙으면(실패 글이 지워졌거나 운영 채널이 바뀌어
+ * `thread_not_found`) **최상위로 한 번 더** 보낸다. 댓글 자리를 못 찾은 것이
+ * "복구됐다" 를 삼킬 이유는 안 된다 - 최상위 글 하나가 생기는 것은 이
+ * 함수가 줄이려는 비용이고, 복구를 아예 안 알리는 것은 그보다 비싸다.
+ *
+ * ts 가 없으면 곧장 최상위다 (직전 실패가 이 코드 이전이거나 실패 알림
+ * 자체가 실패한 경우).
+ */
+export async function postRecovery(
+  post: SlackPost,
+  channel: string,
+  text: string,
+  failAlertTs: string | null
+): Promise<RecoveryPost> {
+  if (failAlertTs) {
+    const threaded = await tryPost(post, channel, text, failAlertTs);
+    if (threaded?.ok) return { posted: true, inThread: true };
+  }
+  const top = await tryPost(post, channel, text, null);
+  return { posted: top?.ok === true, inThread: false };
+}
+
+/**
+ * 던지는 것과 `{ok:false}` 를 같은 실패로 본다.
+ *
+ * 부르는 쪽이 알고 싶은 것은 "한 통이 나갔나" 뿐이다. 네트워크가 끊겨
+ * 던진 것과 Slack 이 거절한 것을 여기서 갈라 봐야 할 일이 다르지 않다.
+ */
+async function tryPost(
+  post: SlackPost,
+  channel: string,
+  text: string,
+  threadTs: string | null
+): Promise<SlackPostResult | null> {
+  try {
+    return await post(channel, text, undefined, threadTs);
+  } catch {
+    return null;
+  }
+}

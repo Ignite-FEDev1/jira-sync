@@ -499,12 +499,23 @@ select
   "확인이 멈췄나" 라는 **판정**만 넣는다 - 사람이 읽고 반응하는 것도
   분침이 아니라 그 판정이다.
 
-  ── 경고는 지문을 건너뛴다 ──
+  ── 문제가 있는 날은 지문을 건너뛴다 ──
 
   머리말이 경고인 날(`확인이 멈춰 있습니다`·`실패 N건`·`연속 실패 N회`)은
   지문이 같아도 보낸다. 이틀째 같은 장애가 이어지는 것은 "달라진 게 없다"
   가 아니라 "아직 안 고쳐졌다" 이고, 조용한 실패가 이 시스템이 없애려는
   병이다.
+
+  **일정 경고(`invalid`·`none`)도 같다.** 창이 어긋나도 머리말은 `ok` 이고
+  그 한 줄은 매일 같은 글자라, 우회가 없으면 이틀째부터 조용해진다.
+  아침 브리핑의 경고 갈래마저 `rule is not null` 에 먼저 걸려 규칙이 맞는
+  차수에서는 도달하지 않으므로, 둘을 합치면 봇이 아는 모순이 딱 한 번
+  말해지고 영영 묻힌다 - 이 브랜치가 고치려던 병 그 자체다.
+
+  대가는 정직하게 적는다: 일정이 어긋난 차수는 사람이 고칠 때까지 **매
+  평일 18시 요약이 나간다**(`0 9 * * 1-5` UTC). 의도한 거래다. 값어치가
+  없는 쪽(QA 시작·종료 알림을 끈 대상)은 `qa_router_wants_qa_alerts` 로
+  걸러 애초에 일정 경고를 안 만든다.
 
   ── detail_lines 의 서명은 그대로 둔다 ──
 
@@ -542,6 +553,7 @@ declare
   stalled boolean;
   head_kind text; head text; body_text text;
   progress_line text; detail_lines text; schedule_note text;
+  rules jsonb;
   digest text;
   payload jsonb;
 begin
@@ -556,7 +568,7 @@ begin
   for r in
     select c.id, c.name, c.slack_channel_id,
            coalesce(c.slack_ops_channel_id, c.slack_channel_id) as ops_channel,
-           c.alerts, c.qa_schedule_rule,
+           c.alerts, c.alert_rules, c.qa_schedule_rule,
            s.last_poll_at, s.consecutive_fails, s.daily_summary_digest,
            s.active_cycle->>'fixVersion' as active_fv,
            s.active_cycle->>'threadTs' as thread_ts
@@ -643,12 +655,31 @@ begin
     end if;
 
     /*
-      사다리가 모순을 잡았으면 그 말을 싣는다. 모순된 날짜를 아무 말 없이
-      찍는 것이 지금 문제다. `win.why` 가 날짜를 문장 안에 들고 있어
-      일정 줄이 빠진 스레드 안에서도 혼자 말이 된다.
+      사다리가 할 말이 있으면 싣는다. 모순된 날짜를 아무 말 없이 찍는 것이
+      지금 문제다. `win.why` 가 날짜를 문장 안에 들고 있어, 일정 줄이 빠진
+      스레드 안에서도 이 한 줄이 혼자 말이 된다.
+
+      `none` 과 `invalid` 은 **다른 문장**이다. 어드민 화면이 둘을 가르는
+      것과 같은 이유다 - "아무도 안 적었다" 와 "적힌 날짜가 서로 어긋난다"
+      는 할 일이 다르다. GW 는 대장 33개 중 0개가 파싱되는 대상이라 늘
+      `none` 이고, 지금까지 18시 요약은 그것을 한마디도 안 했다.
+
+      단, QA 시작·종료 알림을 **끈** 대상은 조르지 않는다. 아침 브리핑의
+      경고 갈래가 쓰는 `qa_router_wants_qa_alerts` 와 같은 문이다 - 아래에서
+      이 줄이 지문을 건너뛰게 만들었으므로, 이 문이 없으면 "QA 기간 개념이
+      없어 규칙을 끈" 대상이 매 평일 같은 잔소리를 영영 받는다. 그러면
+      사람은 일정을 넣는 게 아니라 18시 요약을 끈다.
     */
-    schedule_note := case when win.source = 'invalid' then
-      format(':warning: QA 일정을 확인해 주세요 · %s', win.why) end;
+    rules := public.qa_router_alert_rules_for(cyc.alert_rules_override,
+                                              r.alert_rules);
+    schedule_note := case
+      when not public.qa_router_wants_qa_alerts(rules) then null
+      when win.source = 'invalid' then
+        format(':warning: QA 일정이 서로 어긋납니다 · %s · 차수 화면에서 고쳐 주세요',
+               win.why)
+      when win.source = 'none' then
+        ':warning: 이 차수의 QA 시작·종료일이 아직 없습니다 · 차수 화면에서 넣거나 배포대장에 적어 주세요'
+      end;
 
     /*
       보낼 내용의 지문. 시각은 넣지 않는다 - `마지막 확인 17:59` 가 매일
@@ -666,9 +697,24 @@ begin
       coalesce(schedule_note, ''),
       coalesce(detail_lines, '')));
 
-    -- 경고인 날은 지문과 무관하게 보낸다. 조용한 실패가 이 시스템이
-    -- 없애려는 병이다. 평온한 날만 같은 글을 두 번 안 보낸다.
+    /*
+      문제가 있는 날은 지문과 무관하게 보낸다. 평온한 날만 같은 글을 두 번
+      안 보낸다.
+
+      `schedule_note is not null` 이 여기 있어야 하는 이유가 이 브랜치의
+      존재 이유다. 창이 `invalid` 여도 머리말은 `ok` 이고 그 한 줄은 매일
+      같은 글자라, 이것이 없으면 지문이 안정되어 **이틀째부터 조용해진다.**
+      게다가 아침 브리핑의 경고 갈래는 `rule is not null` 에 먼저 걸려,
+      규칙이 맞는 차수에서는 애초에 도달하지 않는다 - 둘을 합치면 봇이
+      아는 모순이 딱 한 번 말해지고 영영 묻힌다. 고치려던 병 그 자체다.
+
+      대가는 정직하게 적는다: 일정이 `invalid`·`none` 인 차수는 사람이
+      고칠 때까지 **매 평일 18시 요약이 나간다** (`0 9 * * 1-5` UTC).
+      의도한 거래다 - 모순된 일정은 매일 조를 값어치가 있다. 값어치가
+      없는 쪽(QA 알림을 끈 대상)은 위 `wants_qa_alerts` 문에서 걸러진다.
+    */
     continue when head_kind = 'ok'
+              and schedule_note is null
               and r.daily_summary_digest is not distinct from digest;
 
     payload := jsonb_build_object(
@@ -687,8 +733,26 @@ begin
       body := payload);
 
     /*
-      보낸 것을 남긴다. state 행은 없을 수 있다 (위 조인이 left join 이다) -
-      update 로 쓰면 그 대상은 지문이 영영 null 이라 매일 또 나간다.
+      보낸 것을 남긴다.
+
+      ── 이 기록이 뜻하는 것 ──
+
+      `net.http_post` 는 pg_net 이라 **큐에 넣고 바로 돌아온다.** 반환값이
+      있다고 Slack 이 받았다는 뜻이 아니다. 그래서 이 지문은 "보냈다" 가
+      아니라 **"보내려 했다"** 다. 채널이 잘못됐거나 토큰이 회수돼 실제로는
+      한 통도 안 갔어도, 다음 날 같은 내용이면 건너뛴다 - 발송 실패 한 번의
+      대가가 조용한 하루 하루다.
+
+      동기 확인 수단이 없어 여기서 더 할 수 있는 것이 없다. 다만 터지는
+      범위는 받아들일 만하다: 위에서 **문제가 있는 날은 지문을 통째로
+      건너뛰게** 해 두었으므로(경고 머리말·일정 경고), 놓친 글이 최대로
+      가져갈 수 있는 것은 "아무 일도 없었다" 는 요약 하나다. 그 요약은
+      다음에 내용이 바뀌는 날 다시 나간다.
+
+      insert 로 쓰는 이유: 여기까지 온 대상은 `active_fv` 를 state 에서
+      읽었으므로 행이 반드시 있다. `insert ... on conflict` 는 그래도
+      항상 update 로 떨어지는 안전한 형태라 그대로 둔다 - update 문으로
+      바꿔도 답은 같다.
     */
     insert into public.qa_router_state (config_id, daily_summary_digest)
     values (r.id, digest)

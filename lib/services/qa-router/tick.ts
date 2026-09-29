@@ -21,6 +21,7 @@ import {
   parseFixVersion,
   type FixVersionRule,
 } from './derive';
+import { postRecovery } from './fail-alert';
 import { judge, type JudgeResult } from './judge';
 import {
   collectPlanProgress,
@@ -1453,28 +1454,32 @@ async function finishOk(
     staleAlertedAt: null,
   });
   if (state.consecutiveFails >= FAIL_ALERT_THRESHOLD) {
-    try {
-      /*
-        실패 알림이 남긴 ts 가 있으면 **그 스레드**로 보낸다. 7분짜리
-        일시 장애에 최상위 글이 둘 생기는 것을 막는다. ts 가 없으면
-        지금처럼 최상위로 - 직전 실패가 이 코드 이전이거나 실패 알림
-        자체가 실패한 경우다.
-      */
-      const res = await deps.slack.post(
-        opsChannel,
-        `✅ QA Router · ${cfg.name} 복구됨 (직전 ${state.consecutiveFails}회 연속 실패)`,
-        undefined,
-        state.failAlertTs
-      );
-      // 보낸 뒤에 지운다. 발송이 실패했으면 들고 있어야 다음 복구가 그
-      // 스레드로 간다 - 지워 버리면 짝 없는 최상위 글이 또 생긴다.
-      if (res.ok && state.failAlertTs) {
-        await repo.saveState(cfg.id, { failAlertTs: null });
-      }
-    } catch {
-      /* noop */
+    /*
+      실패 알림이 남긴 ts 가 있으면 **그 스레드**로 보낸다. 7분짜리 일시
+      장애에 최상위 글이 둘 생기는 것을 막는다. 스레드로 못 붙으면 최상위로
+      한 번 더 - 갈래는 `postRecovery` 에 있고 그쪽에 테스트가 붙어 있다.
+    */
+    const { posted } = await postRecovery(
+      (c, t, b, ts) => deps.slack.post(c, t, b, ts),
+      opsChannel,
+      `✅ QA Router · ${cfg.name} 복구됨 (직전 ${state.consecutiveFails}회 연속 실패)`,
+      state.failAlertTs
+    );
+    /*
+      이 시점에 그 ts 는 쓸모가 없다. 댓글이 붙었으면 할 일이 끝났고, 안
+      붙었으면 내일 또 시도해도 같은 답이다 (지워진 글은 되살아나지 않는다).
+      들고 있으면 다음 장애의 복구가 없는 스레드를 다시 찾아간다.
+    */
+    if (state.failAlertTs) {
+      await repo.saveState(cfg.id, { failAlertTs: null }).catch(() => {});
     }
-    log(`복구 알림 발송 (직전 ${state.consecutiveFails}회 실패)`);
+    // 안 나간 날의 로그가 나간 날과 똑같이 생기면 장애를 되짚는 사람이
+    // 여기서부터 틀린 길로 간다.
+    log(
+      posted
+        ? `복구 알림 발송 (직전 ${state.consecutiveFails}회 실패)`
+        : `복구 알림 발송 실패 (직전 ${state.consecutiveFails}회 실패)`
+    );
   }
 }
 

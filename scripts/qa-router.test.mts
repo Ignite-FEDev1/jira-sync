@@ -37,6 +37,8 @@ import {
   resolveQaWindow,
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
+import { postRecovery } from '@/lib/services/qa-router/fail-alert';
+import type { SlackPostResult } from '@/lib/services/qa-router/clients';
 import { cycleUpsertRow, toState } from '@/lib/services/qa-router/rows';
 import type { StateRow } from '@/lib/services/qa-router/rows';
 import {
@@ -4636,8 +4638,24 @@ test('18시 요약 — 일정을 사다리에서 받는다 (SQL)', () => {
   );
 
   // 모순이면 그렇다고 말한다. 아무 말 없이 찍는 것이 지금 문제다.
-  assert.match(sum, /schedule_note := case when win\.source = 'invalid' then/);
-  assert.match(sum, /QA 일정을 확인해 주세요/);
+  assert.match(sum, /when win\.source = 'invalid' then/);
+  assert.match(sum, /QA 일정이 서로 어긋납니다/);
+  /*
+    `none` 은 다른 문장이다. "아무도 안 적었다" 와 "적힌 날짜가 서로
+    어긋난다" 는 할 일이 다르다. GW 는 대장 33개 중 0개가 파싱되는
+    대상이라 늘 `none` 이고, 지금까지 18시 요약은 한마디도 안 했다.
+  */
+  assert.match(sum, /when win\.source = 'none' then/);
+  assert.match(sum, /QA 시작·종료일이 아직 없습니다/);
+  /*
+    단, QA 시작·종료 알림을 끈 대상은 조르지 않는다 - 아침 브리핑의
+    경고 갈래와 같은 문이다. 이 줄이 지문을 건너뛰게 만들었으므로,
+    문이 없으면 그런 대상이 매 평일 같은 잔소리를 영영 받는다.
+  */
+  assert.match(
+    sum,
+    /when not public\.qa_router_wants_qa_alerts\(rules\) then null/
+  );
   // 그 말은 본문에 실린다
   assert.match(
     sum,
@@ -4682,10 +4700,10 @@ test('18시 요약 — 달라진 게 없으면 건너뛴다 (SQL)', () => {
   const sum = sql.slice(sql.indexOf('function public.qa_router_daily_summary'));
   assert.match(sum, /digest := md5\(concat_ws\('\|',/);
 
-  const fingerprint = sum.slice(
-    sum.indexOf('digest := md5('),
-    sum.indexOf('-- 경고인 날은')
-  );
+  // md5 식 자체만 잘라 본다. 끝을 주석으로 잡으면 주석을 고칠 때마다
+  // 범위가 조용히 넓어져 아래 doesNotMatch 가 헛통과한다.
+  const fpFrom = sum.indexOf('digest := md5(');
+  const fingerprint = sum.slice(fpFrom, sum.indexOf("')));", fpFrom) + 5);
   // 차수가 들어 있어야 새 차수의 첫 요약이 반드시 나간다
   assert.match(fingerprint, /r\.active_fv,/);
   assert.match(fingerprint, /head_kind,/);
@@ -4697,10 +4715,19 @@ test('18시 요약 — 달라진 게 없으면 건너뛴다 (SQL)', () => {
   assert.doesNotMatch(fingerprint, /body_text/);
   assert.match(fingerprint, /case when stalled then 'stale' else 'live' end/);
 
-  // 평온한 날만 건너뛴다. 경고 머리말은 지문과 무관하게 나간다.
+  /*
+    평온한 날만 건너뛴다.
+
+    `schedule_note is null` 이 이 조건에 있어야 하는 이유가 이 브랜치의
+    존재 이유다. 창이 `invalid` 여도 머리말은 `ok` 이고 그 한 줄은 매일
+    같은 글자라, 이것이 없으면 지문이 안정되어 이틀째부터 조용해진다.
+    게다가 아침 브리핑의 경고 갈래는 `rule is not null` 에 먼저 걸려
+    규칙이 맞는 차수에서는 도달하지 않는다 - 둘을 합치면 봇이 아는
+    모순이 딱 한 번 말해지고 영영 묻힌다.
+  */
   assert.match(
     sum,
-    /continue when head_kind = 'ok'\s+and r\.daily_summary_digest is not distinct from digest;/
+    /continue when head_kind = 'ok'\s+and schedule_note is null\s+and r\.daily_summary_digest is not distinct from digest;/
   );
   // 보낸 뒤 남긴다. state 행이 없을 수 있어 update 로는 안 된다.
   assert.match(
@@ -4708,6 +4735,20 @@ test('18시 요약 — 달라진 게 없으면 건너뛴다 (SQL)', () => {
     /insert into public\.qa_router_state \(config_id, daily_summary_digest\)/
   );
   assert.match(sum, /on conflict \(config_id\) do update/);
+  /*
+    pg_net 은 큐에 넣고 바로 돌아온다. 그래서 이 지문은 "보냈다" 가 아니라
+    "보내려 했다" 다 - 한 통이 유실되면 조용한 하루를 무는 값이다. 동기
+    확인 수단이 없어 더 할 수 있는 것이 없고, 대신 그 한계가 코드 옆에
+    적혀 있어야 다음 사람이 지문을 믿지 않는다.
+  */
+  const write = sum.slice(
+    sum.indexOf('보낸 것을 남긴다'),
+    sum.indexOf('insert into public.qa_router_state')
+  );
+  assert.match(write, /pg_net 이라 \*\*큐에 넣고 바로 돌아온다/);
+  assert.match(write, /"보내려 했다"/);
+  // 터지는 범위가 왜 받아들일 만한지도 같이 적는다
+  assert.match(write, /문제가 있는 날은 지문을 통째로/);
 });
 
 test('18시 요약 — 스레드 안에서는 일정·참고를 뺀다 (SQL)', () => {
@@ -4737,7 +4778,7 @@ test('18시 요약 — 스레드 안에서는 일정·참고를 뺀다 (SQL)', (
   `slack.post` 는 이미 4번째 인자로 `threadTs` 를 받고 `SlackPostResult.ts`
   를 돌려준다 - 시그니처를 넓힐 필요가 없었다. 없던 것은 그 ts 를 둘 곳뿐이다.
 */
-test('복구 알림 — 실패 글의 ts 를 들고 있다가 그 스레드로 보낸다', () => {
+test('복구 알림 — 실패 글의 ts 를 남기고, 붙인 뒤 지운다 (tick.ts)', () => {
   const src = readFileSync(
     new URL('../lib/services/qa-router/tick.ts', import.meta.url),
     'utf8'
@@ -4751,16 +4792,104 @@ test('복구 알림 — 실패 글의 ts 를 들고 있다가 그 스레드로 �
   );
 
   const finish = src.slice(src.indexOf('async function finishOk'));
-  // 복구 알림: 저장된 ts 를 threadTs 자리에 넘긴다 (blocks 는 안 쓴다)
+  // 복구 알림: 갈래는 postRecovery 가 쥔다 (아래에 진짜 돌려 보는 테스트가 있다)
+  assert.match(finish, /const \{ posted \} = await postRecovery\(/);
+  assert.match(finish, /state\.failAlertTs\s+\);/);
+  /*
+    답글을 못 붙인 ts 도 지운다. 지워진 글은 되살아나지 않아 내일 또
+    시도해도 같은 답이고, 들고 있으면 다음 장애의 복구가 없는 스레드를
+    다시 찾아간다.
+  */
   assert.match(
     finish,
-    /복구됨 \(직전 \$\{state\.consecutiveFails\}회 연속 실패\)`,\s+undefined,\s+state\.failAlertTs\s+\);/
+    /if \(state\.failAlertTs\) \{\s+await repo\.saveState\(cfg\.id, \{ failAlertTs: null \}\)/
   );
-  // 보낸 뒤에만 지운다
-  assert.match(
-    finish,
-    /if \(res\.ok && state\.failAlertTs\) \{\s+await repo\.saveState\(cfg\.id, \{ failAlertTs: null \}\);/
-  );
+  // 안 나간 날의 로그가 나간 날과 똑같이 생기면 안 된다
+  assert.match(finish, /posted\s*\?\s*`복구 알림 발송 /);
+  assert.match(finish, /:\s*`복구 알림 발송 실패 /);
+});
+
+/*
+  ── 복구 알림을 진짜 돌려 본다 ──
+
+  `postRecovery` 는 `@/lib/db` 를 안 끌고 오는 자리에 떼어 뒀다. 그래서
+  가짜 `post` 하나로 실제 갈래를 밟아 볼 수 있다 - 글자를 훑는 테스트는
+  "스레드가 사라지면 복구가 통째로 사라진다" 를 못 잡는다.
+*/
+function fakePost(results: SlackPostResult[]) {
+  const calls: { channel: string; text: string; threadTs?: string | null }[] =
+    [];
+  const post = async (
+    channel: string,
+    text: string,
+    _blocks?: unknown[],
+    threadTs?: string | null
+  ) => {
+    calls.push({ channel, text, threadTs });
+    return (
+      results[calls.length - 1] ?? { ok: false, error: '준비된 답이 없음' }
+    );
+  };
+  return { post, calls };
+}
+
+test('복구 알림 — 저장된 ts 가 있으면 그 스레드로 간다', async () => {
+  const { post, calls } = fakePost([{ ok: true, ts: '2.0' }]);
+  const out = await postRecovery(post, 'C-OPS', '✅ 복구됨', '1.0');
+  assert.deepEqual(out, { posted: true, inThread: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].threadTs, '1.0');
+});
+
+test('복구 알림 — ts 가 없으면 최상위로 간다', async () => {
+  const { post, calls } = fakePost([{ ok: true, ts: '2.0' }]);
+  const out = await postRecovery(post, 'C-OPS', '✅ 복구됨', null);
+  assert.deepEqual(out, { posted: true, inThread: false });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].threadTs, null);
+});
+
+/*
+  실패 글이 지워졌거나 운영 채널이 바뀌면 Slack 이 thread_not_found 를 준다.
+  전에는 거기서 끝이면서 로그만 "복구 알림 발송" 이라고 적혔다.
+*/
+test('복구 알림 — 스레드가 사라졌으면 최상위로 한 번 더 보낸다', async () => {
+  const { post, calls } = fakePost([
+    { ok: false, error: 'thread_not_found' },
+    { ok: true, ts: '3.0' },
+  ]);
+  const out = await postRecovery(post, 'C-OPS', '✅ 복구됨', '1.0');
+  assert.deepEqual(out, { posted: true, inThread: false });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].threadTs, '1.0');
+  assert.equal(calls[1].threadTs, null);
+});
+
+test('복구 알림 — 둘 다 실패하면 보냈다고 하지 않는다', async () => {
+  const { post, calls } = fakePost([
+    { ok: false, error: 'thread_not_found' },
+    { ok: false, error: 'channel_not_found' },
+  ]);
+  const out = await postRecovery(post, 'C-OPS', '✅ 복구됨', '1.0');
+  assert.deepEqual(out, { posted: false, inThread: false });
+  assert.equal(calls.length, 2);
+});
+
+test('복구 알림 — 스레드 발송이 던져도 최상위 시도는 남는다', async () => {
+  const calls: (string | null | undefined)[] = [];
+  const post = async (
+    _c: string,
+    _t: string,
+    _b?: unknown[],
+    threadTs?: string | null
+  ) => {
+    calls.push(threadTs);
+    if (threadTs) throw new Error('fetch failed');
+    return { ok: true, ts: '3.0' };
+  };
+  const out = await postRecovery(post, 'C-OPS', '✅ 복구됨', '1.0');
+  assert.deepEqual(out, { posted: true, inThread: false });
+  assert.deepEqual(calls, ['1.0', null]);
 });
 
 test('상태 행 — 실패 알림 ts 를 도메인 값으로 옮긴다', () => {
