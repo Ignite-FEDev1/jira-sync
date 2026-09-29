@@ -4430,6 +4430,11 @@ test('일정 사다리 — 크론 함수도 사다리를 거친다 (SQL)', () =>
   assert.match(sql, /add column if not exists qa_start_ymd_manual date/);
   assert.doesNotMatch(sql, /qa_start_ymd_manual date[^,;]*default/);
 
+  // 파일 안의 rollback 은 db-migrate.sh 의 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
   const brief = sql.slice(
     sql.indexOf('function public.qa_router_morning_brief')
   );

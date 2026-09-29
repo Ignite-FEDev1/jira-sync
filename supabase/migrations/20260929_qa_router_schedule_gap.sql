@@ -24,12 +24,16 @@
           qa_router_should_warn     경고 차례인가
           qa_router_wants_qa_alerts QA 앵커 규칙이 켜져 있나
 
-  ── 리허설 ──
+  ── 트랜잭션은 이 파일이 잡지 않는다 ──
 
-  begin; ... rollback; 으로 감싸 두었다. 확인 쿼리 결과를 보고 rollback 을
-  commit 으로 바꿔 적용한다.
+  `db-migrate.sh` 가 `--single-transaction` 으로 이 파일 전체를 이미
+  감싸서 돈다. 여기서 또 `begin;` 을 쓰면 "there is already a transaction
+  in progress" 경고가 뜨고, `rollback;` 을 쓰면 그 바깥 트랜잭션이
+  통째로 되돌아간다 - 그런데 뒤이어 실행되는 `_migrations` insert 는
+  별도 커밋으로 살아남아, DDL 은 안 먹었는데 원장에는 "적용됨" 으로
+  남는다. 체크섬이 같으니 다음에도 다시 시도되지 않는다. 리허설은
+  이 파일을 감싸는 대신 로컬의 버리는 Postgres 에 따로 돌린다.
 */
-begin;
 
 -- ── 컬럼 ─────────────────────────────────────────────────────────────────
 /*
@@ -355,5 +359,3 @@ select
   (select count(*) from information_schema.columns
     where table_schema = 'public' and table_name = 'qa_router_cycles'
       and column_name in ('qa_start_ymd_manual','qa_end_ymd_manual','schedule_warned_on')) as new_cols;
-
-rollback;
