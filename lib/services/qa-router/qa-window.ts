@@ -12,6 +12,8 @@
  * 안 보여야 SQL 과 대조할 수 있다.
  */
 
+import type { QaScheduleRule, QaWindow } from './types';
+
 function shiftDays(ymd: string, days: number): string {
   const d = new Date(`${ymd}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
@@ -40,4 +42,107 @@ export function shiftBusinessDays(ymd: string, n: number): string {
     if (!isWeekend(d)) left -= 1;
   }
   return d;
+}
+
+/**
+ * 이 차수의 **운영 배포일**.
+ *
+ * `status.ts` 의 `resolveDeployYmd` 와 같은 규칙이다 - 대장 제목의 날짜와
+ * 본문이 말한 날짜 중 **늦은 쪽**. 새 정의를 만들면 화면과 알림이 또 갈린다.
+ *
+ * 늦은 쪽인 것이 마감선에는 느슨한 선택이다. 본문이 맞고 제목이 틀린
+ * 차수라면 실제 배포 뒤 며칠 더 울릴 수 있다. 그래도 이 쪽인 이유는, 이른
+ * 쪽을 고르면 **제목이 맞는 대부분의 차수에서 정상 알림을 막기** 때문이다.
+ * 막는 사고는 울리는 사고보다 조용해서 더 늦게 발견된다.
+ */
+export function prodDayOf(c: {
+  deployYmd: string;
+  prodYmd: string | null;
+}): string {
+  return c.prodYmd && c.prodYmd > c.deployYmd ? c.prodYmd : c.deployYmd;
+}
+
+/** 규칙이 쓸 만한가. 뒤집히거나 양수면 안 쓴다. */
+function usableRule(r: QaScheduleRule | null): r is QaScheduleRule {
+  if (!r) return false;
+  if (r.startOffset > 0 || r.endOffset > 0) return false;
+  return r.startOffset < r.endOffset;
+}
+
+export interface QaWindowInput {
+  /** 1순위. 차수 화면에서 사람이 넣은 값. */
+  manualStartYmd: string | null;
+  manualEndYmd: string | null;
+  /** 2순위. 배포대장 본문에서 읽은 값. */
+  ledgerStartYmd: string | null;
+  ledgerEndYmd: string | null;
+  /** 대장 본문이 말한 운영 배포일. 없을 수 있다. */
+  prodYmd: string | null;
+  /** 대장 제목의 날짜. 차수를 식별하는 값이라 항상 있다. */
+  deployYmd: string;
+  /** 3순위. 라우터 기본 규칙. */
+  rule: QaScheduleRule | null;
+}
+
+/**
+ * 이 차수의 QA 기간을 정한다.
+ *
+ * 위에서부터 보고 **처음 둘 다 있는 순위**를 쓴다. 한 칸만 있는 순위는
+ * 건너뛴다 - 섞으면 대장의 시작과 규칙의 종료가 만나 아무도 적지 않은
+ * 기간이 생긴다.
+ *
+ * 값을 찾은 뒤 앞뒤가 맞는지 본다. 안 맞으면 `invalid` 로 내되 **값은 그대로
+ * 들고 있는다.** 화면이 "무엇이 이상한지" 를 보여줘야 사람이 고칠 수 있다.
+ */
+export function resolveQaWindow(c: QaWindowInput): QaWindow {
+  const prod = prodDayOf(c);
+
+  const tiers: {
+    source: 'manual' | 'ledger' | 'rule';
+    s: string | null;
+    e: string | null;
+  }[] = [
+    { source: 'manual', s: c.manualStartYmd, e: c.manualEndYmd },
+    { source: 'ledger', s: c.ledgerStartYmd, e: c.ledgerEndYmd },
+    {
+      source: 'rule',
+      s: usableRule(c.rule)
+        ? offsetOf(prod, c.rule.startOffset, c.rule.businessDays)
+        : null,
+      e: usableRule(c.rule)
+        ? offsetOf(prod, c.rule.endOffset, c.rule.businessDays)
+        : null,
+    },
+  ];
+
+  const hit = tiers.find((t) => t.s && t.e);
+  if (!hit)
+    return { qaStartYmd: null, qaEndYmd: null, source: 'none', why: null };
+
+  const start = hit.s!;
+  const end = hit.e!;
+
+  if (start > end) {
+    return {
+      qaStartYmd: start,
+      qaEndYmd: end,
+      source: 'invalid',
+      why: `QA 시작(${start})이 종료(${end})보다 뒤입니다`,
+    };
+  }
+  if (end > prod) {
+    return {
+      qaStartYmd: start,
+      qaEndYmd: end,
+      source: 'invalid',
+      why: `QA 종료(${end})가 운영 배포일(${prod})보다 뒤입니다`,
+    };
+  }
+  return { qaStartYmd: start, qaEndYmd: end, source: hit.source, why: null };
+}
+
+function offsetOf(prod: string, offset: number, businessDays: boolean): string {
+  return businessDays
+    ? shiftBusinessDays(prod, offset)
+    : shiftDays(prod, offset);
 }

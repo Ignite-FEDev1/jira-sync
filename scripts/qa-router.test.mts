@@ -31,7 +31,10 @@ import {
   resolveQaEndYmd,
   staleFilterCycle,
 } from '../lib/services/qa-router/status';
-import { shiftBusinessDays } from '@/lib/services/qa-router/qa-window';
+import {
+  resolveQaWindow,
+  shiftBusinessDays,
+} from '@/lib/services/qa-router/qa-window';
 import {
   extractIssueKeys,
   extractJqlStrings,
@@ -4059,4 +4062,151 @@ test('영업일 — 0 이면 그날 그대로다', () => {
 test('영업일 — 앞으로도 센다', () => {
   // 2026-09-25(금)에서 1영업일 뒤 = 09-28(월)
   assert.equal(shiftBusinessDays('2026-09-25', 1), '2026-09-28');
+});
+
+/** 기본 입력. 각 테스트가 필요한 칸만 덮어쓴다. */
+const WIN_BASE = {
+  manualStartYmd: null,
+  manualEndYmd: null,
+  ledgerStartYmd: null,
+  ledgerEndYmd: null,
+  prodYmd: null,
+  deployYmd: '2026-09-30',
+  rule: null,
+};
+
+test('QA 기간 — 사람이 넣은 값이 대장과 규칙을 이긴다', () => {
+  const w = resolveQaWindow({
+    ...WIN_BASE,
+    manualStartYmd: '2026-09-21',
+    manualEndYmd: '2026-09-29',
+    ledgerStartYmd: '2026-09-18',
+    ledgerEndYmd: '2026-09-28',
+    rule: { startOffset: -6, endOffset: -1, businessDays: true },
+  });
+  assert.equal(w.source, 'manual');
+  assert.equal(w.qaStartYmd, '2026-09-21');
+  assert.equal(w.qaEndYmd, '2026-09-29');
+});
+
+test('QA 기간 — 사람이 안 넣었으면 대장이 규칙을 이긴다', () => {
+  const w = resolveQaWindow({
+    ...WIN_BASE,
+    ledgerStartYmd: '2026-09-18',
+    ledgerEndYmd: '2026-09-28',
+    rule: { startOffset: -6, endOffset: -1, businessDays: true },
+  });
+  assert.equal(w.source, 'ledger');
+  assert.equal(w.qaStartYmd, '2026-09-18');
+});
+
+test('QA 기간 — 대장이 비면 규칙으로 계산한다', () => {
+  const w = resolveQaWindow({
+    ...WIN_BASE,
+    rule: { startOffset: -6, endOffset: -1, businessDays: true },
+  });
+  assert.equal(w.source, 'rule');
+  // 09-30(수) 기준 6영업일 전 = 09-22(화), 1영업일 전 = 09-29(화)
+  assert.equal(w.qaStartYmd, '2026-09-22');
+  assert.equal(w.qaEndYmd, '2026-09-29');
+});
+
+test('QA 기간 — 셋 다 없으면 날짜를 지어내지 않는다', () => {
+  const w = resolveQaWindow({ ...WIN_BASE });
+  assert.equal(w.source, 'none');
+  assert.equal(w.qaStartYmd, null);
+  assert.equal(w.qaEndYmd, null);
+});
+
+/*
+  한 순위에서 **둘 다** 나와야 그 순위를 쓴다. 섞으면 대장의 시작과 규칙의
+  종료가 만나 아무도 적지 않은 기간이 생긴다.
+*/
+test('QA 기간 — 한 칸만 있는 순위는 건너뛴다', () => {
+  const w = resolveQaWindow({
+    ...WIN_BASE,
+    manualStartYmd: '2026-09-21', // 종료를 안 넣었다
+    ledgerStartYmd: '2026-09-18',
+    ledgerEndYmd: '2026-09-28',
+  });
+  assert.equal(w.source, 'ledger', '반쪽짜리 manual 을 쓰면 안 된다');
+  assert.equal(w.qaStartYmd, '2026-09-18');
+});
+
+/*
+  ── 실측에서 온 케이스 ──
+
+  CPO 배포대장 Dev) 배포 - 2026-10-07(수). 맨 위에 "배포일정 변경됨".
+    9/29(화) ~ 10/8(목): QA
+    10/12(월) → 10/7(수): 운영계 배포
+  배포일만 당기고 QA 줄을 안 고쳤다. 이 상태로 두면 "QA 종료" 알림이
+  배포 다음날 울린다.
+*/
+test('QA 기간 — QA 종료가 운영 배포일보다 뒤면 이상함이다', () => {
+  const w = resolveQaWindow({
+    ...WIN_BASE,
+    deployYmd: '2026-10-07',
+    prodYmd: '2026-10-07',
+    ledgerStartYmd: '2026-09-29',
+    ledgerEndYmd: '2026-10-08',
+  });
+  assert.equal(w.source, 'invalid');
+  assert.match(w.why!, /배포/);
+  // 값은 그대로 들고 있어야 화면이 "무엇이 이상한지" 를 보여줄 수 있다
+  assert.equal(w.qaEndYmd, '2026-10-08');
+});
+
+test('QA 기간 — 시작이 종료보다 뒤여도 이상함이다', () => {
+  const w = resolveQaWindow({
+    ...WIN_BASE,
+    ledgerStartYmd: '2026-09-28',
+    ledgerEndYmd: '2026-09-18',
+  });
+  assert.equal(w.source, 'invalid');
+});
+
+test('QA 기간 — 종료가 운영 배포일 당일이면 정상이다', () => {
+  const w = resolveQaWindow({
+    ...WIN_BASE,
+    deployYmd: '2026-09-30',
+    ledgerStartYmd: '2026-09-22',
+    ledgerEndYmd: '2026-09-30',
+  });
+  assert.equal(w.source, 'ledger');
+});
+
+/*
+  뒤집힌 규칙은 규칙이 없는 것으로 본다. 기간이 거꾸로면 알림이 과거에 울린다.
+*/
+test('QA 기간 — 뒤집히거나 양수인 규칙은 안 쓴다', () => {
+  assert.equal(
+    resolveQaWindow({
+      ...WIN_BASE,
+      rule: { startOffset: -1, endOffset: -6, businessDays: true },
+    }).source,
+    'none'
+  );
+  assert.equal(
+    resolveQaWindow({
+      ...WIN_BASE,
+      rule: { startOffset: -6, endOffset: 1, businessDays: true },
+    }).source,
+    'none'
+  );
+});
+
+/*
+  운영배포일은 `resolveDeployYmd` 와 같은 규칙으로 정한다 — 제목과 본문 중
+  **늦은 쪽**. 새 정의를 만들면 화면과 알림이 또 갈린다.
+*/
+test('QA 기간 — 운영배포일은 제목과 본문 중 늦은 쪽이다', () => {
+  // 제목 09-14, 본문 09-10 → 늦은 09-14 가 기준. 그래서 09-12 종료는 정상
+  const w = resolveQaWindow({
+    ...WIN_BASE,
+    deployYmd: '2026-09-14',
+    prodYmd: '2026-09-10',
+    ledgerStartYmd: '2026-09-08',
+    ledgerEndYmd: '2026-09-12',
+  });
+  assert.equal(w.source, 'ledger');
 });

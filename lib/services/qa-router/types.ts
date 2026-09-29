@@ -17,7 +17,11 @@ export type ReassignMode = 'off' | 'self_only' | 'all_members';
  */
 export type DeployKind = 'regular' | 'adhoc' | 'hotfix';
 
-export const DEPLOY_KINDS: readonly DeployKind[] = ['regular', 'adhoc', 'hotfix'];
+export const DEPLOY_KINDS: readonly DeployKind[] = [
+  'regular',
+  'adhoc',
+  'hotfix',
+];
 
 export interface QuietHours {
   startHour: number;
@@ -266,9 +270,7 @@ export function renderTemplate(
   for (const line of template.split('\n')) {
     const used = [...line.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1]);
     if (used.some((k) => !vars[k])) continue;
-    out.push(
-      line.replace(/\{([^{}]+)\}/g, (_, k: string) => vars[k] ?? '')
-    );
+    out.push(line.replace(/\{([^{}]+)\}/g, (_, k: string) => vars[k] ?? ''));
   }
   return out.join('\n');
 }
@@ -905,4 +907,49 @@ export interface FilterGap {
    *   false 기능 일부만 빠진다 (차수가 없으면 차수 현황만 빠진다)
    */
   blocking: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────
+// QA 기간
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 대장에 QA 기간이 없을 때 쓰는 라우터 기본 규칙.
+ *
+ * 기준점은 **운영 배포일**이다. 배포일은 대장 제목에서 거의 항상 잡히므로
+ * 배포가 불규칙해도 규칙이 계산된다.
+ *
+ * 둘 다 0 이하여야 한다. QA 는 배포 전에 끝난다. 한때 `endOffset` 을 양수로
+ * 열어 둘까 했는데, 그 근거였던 CPO 10-07 차수가 대장의 오류였다
+ * (배포일만 10/12 → 10/7 로 당기고 QA 줄을 안 고침).
+ */
+export interface QaScheduleRule {
+  /** 운영 배포일 기준. 음수 또는 0. */
+  startOffset: number;
+  /** 운영 배포일 기준. 음수 또는 0. `startOffset` 보다 커야 한다. */
+  endOffset: number;
+  /** 주말을 세지 않는다. */
+  businessDays: boolean;
+}
+
+/**
+ * 이 QA 기간이 어디서 왔나.
+ *
+ *   manual   차수에 사람이 직접 넣었다 (1순위)
+ *   ledger   배포대장 본문에서 읽었다 (2순위)
+ *   rule     라우터 기본 규칙으로 계산했다 (3순위)
+ *   none     셋 다 비었다. **날짜를 지어내지 않는다**
+ *   invalid  값은 있는데 말이 안 된다 (QA 종료가 운영 배포일보다 뒤 등)
+ *
+ * `none` 과 `invalid` 를 가르는 이유는 사람이 할 일이 다르기 때문이다.
+ * `none` 은 **없는 값을 채우는 것**이고 `invalid` 는 **있는 값을 고치는 것**이다.
+ */
+export type QaWindowSource = 'manual' | 'ledger' | 'rule' | 'none' | 'invalid';
+
+export interface QaWindow {
+  qaStartYmd: string | null;
+  qaEndYmd: string | null;
+  source: QaWindowSource;
+  /** `invalid` 일 때 무엇이 이상한가. 화면과 알림 문구가 그대로 쓴다. */
+  why: string | null;
 }
