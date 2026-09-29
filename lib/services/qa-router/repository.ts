@@ -709,3 +709,31 @@ export async function saveOutcomes(
     if (error) throw new Error(`saveOutcomes(${r.issueKey}): ${error.message}`);
   }
 }
+
+/**
+ * 차수의 수동 QA 일정을 쓴다. 대장 파싱 칸은 건드리지 않는다.
+ *
+ * 둘 다 null 이면 지우는 것이고, 그러면 사다리가 2순위(대장)로 내려간다.
+ */
+export async function saveManualSchedule(
+  configId: string,
+  deployYmd: string,
+  startYmd: string | null,
+  endYmd: string | null
+): Promise<void> {
+  if (writesDisabled) return;
+  const { error } = await dbServer
+    .from('qa_router_cycles')
+    .update({
+      qa_start_ymd_manual: startYmd,
+      qa_end_ymd_manual: endYmd,
+      /*
+        사람이 값을 넣었으면 경고 기록을 지운다. 다음에 또 미정이 되면
+        (값을 지우거나 배포일이 바뀌면) 처음처럼 한 번 알려야 한다.
+      */
+      schedule_warned_on: null,
+    })
+    .eq('config_id', configId)
+    .eq('deploy_ymd', deployYmd);
+  if (error) throw new Error(`saveManualSchedule: ${error.message}`);
+}

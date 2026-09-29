@@ -32,6 +32,7 @@ import {
   staleFilterCycle,
 } from '../lib/services/qa-router/status';
 import {
+  checkManualSchedule,
   resolveQaWindow,
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
@@ -4472,4 +4473,24 @@ test('마감선 — SQL 에도 같은 가드가 있다', () => {
   assert.match(hit, /p_prod is null or p_today <= coalesce\(\(/);
   // prod 앵커 규칙이 선을 정한다 (막히는 쪽이 아니다)
   assert.match(hit, /pr\.value->>'anchor' = 'prod'/);
+});
+
+test('수동 일정 — 둘 다 비우면 지우는 것이다', () => {
+  assert.equal(checkManualSchedule(null, null), null);
+});
+
+test('수동 일정 — 한 칸만 채우면 막는다', () => {
+  assert.match(checkManualSchedule('2026-09-22', null) ?? '', /둘 다/);
+});
+
+test('수동 일정 — 거꾸로면 막는다', () => {
+  assert.match(checkManualSchedule('2026-09-29', '2026-09-22') ?? '', /시작/);
+});
+
+test('수동 일정 — 날짜 모양이 아니면 막는다', () => {
+  assert.match(checkManualSchedule('2026/09/22', '2026-09-29') ?? '', /형식/);
+});
+
+test('수동 일정 — 맞으면 통과한다', () => {
+  assert.equal(checkManualSchedule('2026-09-22', '2026-09-29'), null);
 });

@@ -146,3 +146,29 @@ function offsetOf(prod: string, offset: number, businessDays: boolean): string {
     ? shiftBusinessDays(prod, offset)
     : shiftDays(prod, offset);
 }
+
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * 사람이 넣은 QA 기간이 저장할 만한가. 문제가 없으면 null.
+ *
+ * **둘 다 비우는 것은 지우는 것**이라 통과시킨다. 한 칸만 채우는 것은 막는다 -
+ * 사다리가 반쪽짜리 순위를 건너뛰므로 저장해도 아무 일이 안 일어나고,
+ * 사람은 넣었다고 생각한다.
+ *
+ * 운영 배포일과의 앞뒤는 여기서 안 본다. 그건 `resolveQaWindow` 가 보고,
+ * 넣은 뒤 화면이 `invalid` 로 말한다 - 배포일이 나중에 또 바뀔 수 있어서
+ * 저장 시점에 막으면 고칠 방법이 없어진다.
+ */
+export function checkManualSchedule(
+  start: string | null,
+  end: string | null
+): string | null {
+  if (!start && !end) return null;
+  if (!start || !end)
+    return 'QA 시작과 종료를 둘 다 넣어 주세요. 한쪽만 넣으면 쓰이지 않습니다.';
+  if (!YMD.test(start) || !YMD.test(end))
+    return '날짜 형식이 아닙니다. YYYY-MM-DD 로 넣어 주세요.';
+  if (start > end) return `QA 시작(${start})이 종료(${end})보다 뒤입니다.`;
+  return null;
+}
