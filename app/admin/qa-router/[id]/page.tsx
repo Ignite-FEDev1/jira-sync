@@ -290,13 +290,10 @@ function DisabledBanner({
   return (
     <div className="flex flex-wrap items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm dark:border-blue-900 dark:bg-blue-950">
       <p className="min-w-0 flex-1 text-blue-900 dark:text-blue-200">
-        <span className="font-semibold">
-          라우팅이 꺼져 있어 알림이 나가지 않습니다.
-        </span>{' '}
+        <span className="font-semibold">라우팅이 꺼져 있습니다.</span>{' '}
         {watchingCycle ? (
           <span>
-            켜면 {watchingCycle.deployYmd.slice(5)} 차수(
-            <Code>{watchingCycle.fixVersion}</Code>)부터 다시 알림이 나갑니다.
+            켜면 {watchingCycle.deployYmd.slice(5)} 차수부터 다시 알립니다.
           </span>
         ) : (
           // 필터가 지금 가리키는 차수가 없다 — 전부 지났거나 아직 예정만 있다.
