@@ -1417,7 +1417,10 @@ test('cycleStage — 꺼진 라우터는 필터가 가리키는 차수도 알림
   const r = cycleStage(c, 'release_20260914', '2026-09-08', false);
   assert.equal(r.stage, 'disabled');
   assert.equal(r.tone, 'off');
-  assert.match(r.label, /알림/);
+  // 라벨은 "라우팅 꺼짐" — 옆 칸(알림 중·예정·지난 차수)과 같은 길이·격이다.
+  // "알림 안 나감" 을 반복하지 않는다: 꺼졌으면 안 나가는 게 당연하고,
+  // 화면 헤더의 "꺼짐" 칩이 이미 그 사실을 말한다.
+  assert.equal(r.label, '라우팅 꺼짐');
 });
 
 test('planToggleEnabled — 채널 없이는 못 켠다', () => {

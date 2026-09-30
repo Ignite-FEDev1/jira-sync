@@ -392,7 +392,7 @@ export function cycleStage(
       `deployed` 분기와 같은 병, 다른 원인이라 여기서도 먼저 끊는다.
     */
     if (!enabled) {
-      return { stage: 'disabled', label: '꺼짐 · 알림 안 나감', tone: 'off' };
+      return { stage: 'disabled', label: '라우팅 꺼짐', tone: 'off' };
     }
     // "보는 중"은 주체가 모호하고 옆 라벨(예정·전환 대기)과 성격이 어긋났다.
     // 실제 동작은 이 차수 티켓을 찾아 담당자에게 알리는 것이다.
