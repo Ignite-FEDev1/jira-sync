@@ -1414,7 +1414,6 @@ test('cycleStage — 꺼진 라우터는 필터가 가리키는 차수도 알림
     jiraVersionExists: true,
   };
   const r = cycleStage(c, 'release_20260914', '2026-09-08', false);
-  assert.notEqual(r.stage, 'watching');
   assert.equal(r.stage, 'disabled');
   assert.equal(r.tone, 'off');
   assert.match(r.label, /알림/);

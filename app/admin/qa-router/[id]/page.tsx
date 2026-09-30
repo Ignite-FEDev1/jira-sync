@@ -355,9 +355,17 @@ function CycleTable({
                   유지한다 — 그건 배포 일정상 위치를 말할 뿐 알림 여부를
                   말하지 않는다. 알림 여부는 아래 배지(`st.tone`·`st.label`)가
                   따로, 정직하게 말한다.
+
+                  이 둘을 하나의 boolean 으로 묶으면 안 된다 — 실제로 한 번
+                  묶었다가 LED 점멸(`StatusLed pulse`)까지 같이 켜졌다.
+                  점멸은 "지금 살아서 돈다"는 뜻이고 꺼진 대상에는 거짓말이다.
+                  그래서 이름부터 갈라 각자 뜻대로만 쓴다.
                 */
-                const active =
+                // "이 차수가 필터가 가리키는, 화면이 초점을 두는 차수인가" — 배경·굵게·QA 진행률.
+                const isCurrentCycle =
                   st.stage === 'watching' || st.stage === 'disabled';
+                // "지금 실제로 알림이 도는가" — LED 점멸에만 쓴다. 꺼졌으면 절대 점멸하지 않는다.
+                const isWatching = st.stage === 'watching';
                 const n = ambiguous(c)
                   ? undefined
                   : (counted.get(c.fixVersion) ?? 0);
@@ -365,7 +373,7 @@ function CycleTable({
                   <tr
                     key={c.deployYmd}
                     // relative: RowLink 의 덮개가 이 행 안에 갇히게 한다.
-                    className={`relative cursor-pointer border-b last:border-0 hover:bg-muted/60 ${active ? 'bg-muted/40' : ''}`}
+                    className={`relative cursor-pointer border-b last:border-0 hover:bg-muted/60 ${isCurrentCycle ? 'bg-muted/40' : ''}`}
                   >
                     <td className="px-3 py-2.5 align-baseline">
                       {/*
@@ -385,7 +393,7 @@ function CycleTable({
                   */}
                       <RowLink
                         href={`/admin/qa-router/${configId}/cycles/${c.deployYmd}${demo ? '?demo=1' : ''}`}
-                        className={`rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${active ? 'font-medium' : ''}`}
+                        className={`rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${isCurrentCycle ? 'font-medium' : ''}`}
                       >
                         {c.deployPageTitle ?? c.deployYmd}
                       </RowLink>
@@ -401,7 +409,7 @@ function CycleTable({
                             {c.qaEndYmd?.slice(5) ?? '?'}
                           </span>
                           {/* 진행 상태는 QA 기간 정보라 이 열에 둔다. */}
-                          {active && (
+                          {isCurrentCycle && (
                             <span className="whitespace-nowrap text-xs text-muted-foreground">
                               {describeQaProgress(
                                 c.qaStartYmd,
@@ -420,8 +428,8 @@ function CycleTable({
                     </td>
                     <td className="px-3 py-2.5 align-baseline">
                       <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                        <StatusLed tone={st.tone} pulse={active} />
-                        <span className={active ? 'font-medium' : ''}>
+                        <StatusLed tone={st.tone} pulse={isWatching} />
+                        <span className={isCurrentCycle ? 'font-medium' : ''}>
                           {st.label}
                         </span>
                         {/*

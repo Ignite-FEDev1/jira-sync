@@ -22,6 +22,7 @@ import type {
   QaRouterState,
 } from '@/lib/services/qa-router/types';
 import { NewRoutingDialog } from './new-routing-dialog';
+import { planToggleEnabled, writeEnabled } from './toggle-enabled';
 
 /** 이 화면은 브라우저에서 anon 키로 직접 읽는다 (settings/projects 와 같은 패턴). */
 interface Row {
@@ -336,43 +337,30 @@ function ConfigRow({
   const [toggling, setToggling] = useState(false);
 
   /*
-    켜고 끄기. 설정 화면(app/admin/qa-router/[id]/settings/page.tsx 의
-    toggleEnabled)과 같은 순서로 쓴다 — 규칙이 두 곳에 있으면 어긋난다.
-
-    채널 없이 켜면 봇이 빈 채널로 발송을 시도한다. DB 제약
-    (20260916_qa_router_enabled_needs_channel.sql)이 이미 막지만, 거기 걸리면
-    Postgres 오류 문구가 그대로 온다 — 그 앞에서 먼저 **무엇을 채워야
-    하는지**로 말한다. 끄는 것은 이 검사가 없다 — 항상 된다.
+    켜고 끄기. 무엇을 확인·차단할지(`planToggleEnabled`)와 실제로 쓰는 법
+    (`writeEnabled`)은 설정 화면(app/admin/qa-router/[id]/settings/page.tsx)과
+    `./toggle-enabled` 한 곳을 같이 쓴다 — 예전엔 이 로직이 두 화면에
+    복붙돼 있었다.
 
     실패하면 `c.enabled` 를 로컬로 미리 뒤집지 않으므로(스위치는 `row.config.enabled`
     를 그대로 보여준다) 행은 실패 전 상태 그대로 남는다 — 성공했을 때만
     `onToggled` 로 목록을 다시 읽어 실제 값으로 맞춘다.
   */
   const toggleEnabled = async (next: boolean) => {
-    if (next && !c.slackChannelId?.trim()) {
-      toast.error('알림 채널을 먼저 넣어 주세요', {
-        description: '채널이 없으면 켜도 알림이 나가지 않습니다',
+    const plan = planToggleEnabled(c, next);
+    if (!plan.allowed) {
+      toast.error(plan.blockedReason!.title, {
+        description: plan.blockedReason!.description,
       });
       return;
     }
-    const ok = window.confirm(
-      next
-        ? `${c.name} 을 켤까요?\n\n` +
-            '동작 시간 안이면 다음 확인부터 바로 Slack 알림이 나갑니다.'
-        : `${c.name} 을 끌까요?\n\n` +
-            '끄는 동안 만들어지는 QA 티켓은 아무에게도 알림이 가지 않습니다.\n' +
-            '다시 켜도 그 사이 티켓은 소급 알림되지 않습니다.'
-    );
-    if (!ok) return;
+    if (!window.confirm(plan.confirmMessage)) return;
     setToggling(true);
     try {
-      const { error } = await db
-        .from('qa_router_configs')
-        .update({ enabled: next })
-        .eq('id', c.id);
-      if (error) {
+      const errorMessage = await writeEnabled(c.id, next);
+      if (errorMessage) {
         // DB 제약(채널 없이 켜기 등)에 걸리면 이 문구가 곧 그 이유다.
-        toast.error(`변경 실패: ${error.message}`);
+        toast.error(`변경 실패: ${errorMessage}`);
         return;
       }
       toast.success(next ? '켰습니다' : '껐습니다');

@@ -17,7 +17,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
-import { db } from '@/lib/db';
+import { planToggleEnabled, writeEnabled } from '../../toggle-enabled';
 import {
   isFilterInput,
   parseFilterUrl,
@@ -196,38 +196,24 @@ export default function QaRouterSettingsPage() {
    *
    * 양쪽 다 확인을 받는다. 켜는 것도 즉시 알림이 나가기 시작하는 일이라
    * 한쪽만 묻는 근거가 없다.
+   *
+   * 무엇을 확인·차단할지(`planToggleEnabled`)와 실제로 쓰는 법
+   * (`writeEnabled`)은 목록 화면(app/admin/qa-router/page.tsx)과
+   * `../../toggle-enabled` 한 곳을 같이 쓴다 — 예전엔 이 로직이 두 화면에
+   * 복붙돼 있었다.
    */
   const toggleEnabled = async (next: boolean) => {
-    /*
-      채널 없이 켜면 봇이 1분마다 빈 채널로 발송을 시도한다. Slack 은
-      `channel_not_found` 를 돌려주고 그건 화면 어디에도 안 뜨므로, 사람은
-      켜 뒀다고 믿는데 알림만 안 온다.
-
-      DB 제약이 이미 막지만(20260916_qa_router_enabled_needs_channel.sql),
-      제약에 걸리면 Postgres 오류 문구가 그대로 토스트에 뜬다. 여기서 먼저
-      **무엇을 채워야 하는지** 로 말한다. 끄는 것은 언제나 막지 않는다.
-    */
-    if (next && !config.slackChannelId?.trim()) {
-      toast.error('알림 채널을 먼저 넣어 주세요', {
-        description: '채널이 없으면 켜도 알림이 나가지 않습니다',
+    const plan = planToggleEnabled(config, next);
+    if (!plan.allowed) {
+      toast.error(plan.blockedReason!.title, {
+        description: plan.blockedReason!.description,
       });
       return;
     }
-    const ok = window.confirm(
-      next
-        ? `${config.name} 을 켤까요?\n\n` +
-            '동작 시간 안이면 다음 확인부터 바로 Slack 알림이 나갑니다.'
-        : `${config.name} 을 끌까요?\n\n` +
-            '끄는 동안 만들어지는 QA 티켓은 아무에게도 알림이 가지 않습니다.\n' +
-            '다시 켜도 그 사이 티켓은 소급 알림되지 않습니다.'
-    );
-    if (!ok) return;
-    const { error } = await db
-      .from('qa_router_configs')
-      .update({ enabled: next })
-      .eq('id', id);
-    if (error) {
-      toast.error(`변경 실패: ${error.message}`);
+    if (!window.confirm(plan.confirmMessage)) return;
+    const errorMessage = await writeEnabled(id, next);
+    if (errorMessage) {
+      toast.error(`변경 실패: ${errorMessage}`);
       return;
     }
     toast.success(next ? '켰습니다' : '껐습니다');
