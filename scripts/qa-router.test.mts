@@ -738,6 +738,113 @@ test('buildConfigChangedMessage — 사후 통보임을 명시하고, 변경 없
   );
 });
 
+/*
+  ── 메시지에 프로젝트 이름을 박지 않는다 (안전 불변식) ──
+
+  실측: GW(ICTQMSCHE) 대상 알림에서 배포대장 링크는 GW 인데 바로 옆
+  필터 링크만 `[KQ-QA 필터]` 로 찍혔다. URL 은 `jiraBaseOf`/
+  `qa_router_wiki_base` 로 대상마다 제대로 갈라져 있었는데, 그 URL을
+  감싸는 **라벨 문자열**에 KQ 가 하드코딩돼 있었다 — 코드는 맞고 글자만
+  틀렸던 셈이다.
+
+  이 봇은 대상 하나가 아니라 **여러 프로젝트를 두 Jira 사이트에 걸쳐**
+  돌린다. 출력 문자열에 특정 프로젝트 이름(`KQ`, `CPO`, `AUTOWAY`,
+  `ICTQMSCHE`)이나 특정 사이트 호스트(`ignitecorp`, `hmg.atlassian`)가
+  박히면, 그 문자열은 그 프로젝트를 뺀 나머지 **전부에게 틀린 말**이
+  된다. 게다가 이 종류의 버그는 컴파일도, 다른 테스트도 안 잡는다 —
+  URL 은 여전히 맞으니 눌러 보면 GW 로 가고, 화면이 빨간불도 안 켠다.
+  다른 대상 알림을 실제로 읽는 사람이 나타나야만 보인다.
+
+  그래서 동작이 아니라 **소스 문자열**을 본다. 주석은 예시로 KQ-18599
+  같은 실제 키를 자주 인용하므로(이 파일의 함수 docblock 이 그렇다)
+  먼저 블록·라인 주석만 걷어내고, 남는 코드를 스캔한다 — 안 그러면
+  주석 하나가 가짜 빨간불을 켠다.
+
+  문자열·템플릿 리터럴 **안**은 지우지 않고 그대로 둔다. 정작 찾는
+  버그(`[KQ-QA 필터]`)가 사는 곳이 바로 그 문자열 리터럴이다 — 여기를
+  지우면 검사가 스스로 증거를 없애는 꼴이다. 대신 `//`·`/*` 가 문자열
+  **안에** 있을 때 주석 시작으로 오인하지 않도록, 인용부호 상태만
+  추적하고 내용은 손대지 않는다.
+
+  단어 경계(`\b`)로 끊어서 본다. `cpoSomething`, `CPOSomething` 처럼
+  프로젝트 키가 식별자의 일부로만 들어간 변수명·타입명은 안 걸린다 -
+  두 경우 다 `CPO` 양옆이 같은 단어 문자라 경계가 없다.
+*/
+function stripComments(src: string): string {
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const c2 = i + 1 < n ? src[i + 1] : '';
+    if (c === '/' && c2 === '/') {
+      while (i < n && src[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && c2 === '*') {
+      i += 2;
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n && src[i] !== quote) {
+        if (src[i] === '\\') {
+          out += src[i] + (src[i + 1] ?? '');
+          i += 2;
+          continue;
+        }
+        out += src[i];
+        i++;
+      }
+      out += src[i] ?? '';
+      i++; // 닫는 인용부호
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+test('message.ts — 출력 문자열에 프로젝트 이름을 하드코딩하지 않는다', () => {
+  const src = readFileSync(
+    new URL('../lib/services/qa-router/message.ts', import.meta.url),
+    'utf8'
+  );
+  const code = stripComments(src);
+
+  const FORBIDDEN = [
+    'KQ',
+    'CPO',
+    'AUTOWAY',
+    'ICTQMSCHE',
+    'ignitecorp',
+    'hmg.atlassian',
+  ];
+  const hits: string[] = [];
+  for (const name of FORBIDDEN) {
+    const re = new RegExp(`\\b${name}\\b`);
+    if (re.test(code)) hits.push(name);
+  }
+
+  assert.deepEqual(
+    hits,
+    [],
+    `message.ts 의 출력 문자열에 특정 프로젝트/사이트 이름이 박혀 있습니다: ${hits.join(', ')}\n` +
+      '이 봇은 여러 프로젝트를 두 Jira 사이트에 걸쳐 돌립니다 — 이름을 박으면 ' +
+      '그 프로젝트를 뺀 나머지 전부에게 틀린 문장이 되고, 다른 대상 알림을 ' +
+      '읽는 사람이 나타나기 전까지는 아무 데도 빨간불이 안 켜집니다. ' +
+      '프로젝트 이름 대신 URL 이 이미 뭘 가리키는지로 말하거나(예: `[QA 필터]`), ' +
+      '꼭 필요하면 호출부에서 `jiraBaseOf`/`qa_router_wiki_base` 처럼 설정에서 ' +
+      '뽑아 인자로 넘기세요. 주석 안의 예시 키(KQ-18599 등)는 이 검사가 먼저 ' +
+      '걷어내므로 여기 걸릴 리 없습니다 — 걸렸다면 진짜 코드에 박힌 것입니다.'
+  );
+});
+
 // ─────────────────────────────────────────────────────────────
 // Jira 재배정 차단 (안전 불변식)
 // ─────────────────────────────────────────────────────────────
