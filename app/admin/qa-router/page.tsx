@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { Badge, StatusLed } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
 import { db } from '@/lib/db';
 import { toConfig, toState } from '@/lib/services/qa-router/rows';
 import {
@@ -306,12 +307,13 @@ export default function QaRouterListPage() {
                     마지막 확인
                   </th>
                   <th className="px-3 py-2 text-right font-medium">오늘</th>
+                  <th className="px-3 py-2 text-right font-medium">사용</th>
                   <th className="w-8" />
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <ConfigRow key={r.config.id} row={r} />
+                  <ConfigRow key={r.config.id} row={r} onToggled={load} />
                 ))}
               </tbody>
             </table>
@@ -322,8 +324,64 @@ export default function QaRouterListPage() {
   );
 }
 
-function ConfigRow({ row }: { row: Row }) {
+function ConfigRow({
+  row,
+  onToggled,
+}: {
+  row: Row;
+  /** 켜고 끄기가 성공한 뒤 목록을 다시 읽는다. */
+  onToggled: () => void;
+}) {
   const { config: c, state, health } = row;
+  const [toggling, setToggling] = useState(false);
+
+  /*
+    켜고 끄기. 설정 화면(app/admin/qa-router/[id]/settings/page.tsx 의
+    toggleEnabled)과 같은 순서로 쓴다 — 규칙이 두 곳에 있으면 어긋난다.
+
+    채널 없이 켜면 봇이 빈 채널로 발송을 시도한다. DB 제약
+    (20260916_qa_router_enabled_needs_channel.sql)이 이미 막지만, 거기 걸리면
+    Postgres 오류 문구가 그대로 온다 — 그 앞에서 먼저 **무엇을 채워야
+    하는지**로 말한다. 끄는 것은 이 검사가 없다 — 항상 된다.
+
+    실패하면 `c.enabled` 를 로컬로 미리 뒤집지 않으므로(스위치는 `row.config.enabled`
+    를 그대로 보여준다) 행은 실패 전 상태 그대로 남는다 — 성공했을 때만
+    `onToggled` 로 목록을 다시 읽어 실제 값으로 맞춘다.
+  */
+  const toggleEnabled = async (next: boolean) => {
+    if (next && !c.slackChannelId?.trim()) {
+      toast.error('알림 채널을 먼저 넣어 주세요', {
+        description: '채널이 없으면 켜도 알림이 나가지 않습니다',
+      });
+      return;
+    }
+    const ok = window.confirm(
+      next
+        ? `${c.name} 을 켤까요?\n\n` +
+            '동작 시간 안이면 다음 확인부터 바로 Slack 알림이 나갑니다.'
+        : `${c.name} 을 끌까요?\n\n` +
+            '끄는 동안 만들어지는 QA 티켓은 아무에게도 알림이 가지 않습니다.\n' +
+            '다시 켜도 그 사이 티켓은 소급 알림되지 않습니다.'
+    );
+    if (!ok) return;
+    setToggling(true);
+    try {
+      const { error } = await db
+        .from('qa_router_configs')
+        .update({ enabled: next })
+        .eq('id', c.id);
+      if (error) {
+        // DB 제약(채널 없이 켜기 등)에 걸리면 이 문구가 곧 그 이유다.
+        toast.error(`변경 실패: ${error.message}`);
+        return;
+      }
+      toast.success(next ? '켰습니다' : '껐습니다');
+      onToggled();
+    } finally {
+      setToggling(false);
+    }
+  };
+
   // 색만으로 구분하지 않는다 — 행 배경 + LED + 텍스트를 겹친다.
   const rowTint =
     health.tone === 'bad'
@@ -407,10 +465,39 @@ function ConfigRow({ row }: { row: Row }) {
         )}
       </td>
       {/*
-        스위치를 뺐다. 훑다가 스쳐 누르면 알림이 멈추는데 되돌려도 그 사이
-        티켓은 소급되지 않는다 — 그런 토글이 목록 행에 있을 자리가 아니다.
-        "알림만" 배지도 뺐다: 재배정을 없앤 뒤로 모든 행에 늘 붙어 무정보였다.
+        한때 여기서 스위치를 뺐었다 — 훑다가 스쳐 누르면 알림이 멈추는데
+        되돌려도 그 사이 티켓은 소급되지 않는다는 이유였다. "설정 화면을
+        열어야만 끌 수 있다"의 값이, 배지가 거짓말을 하던 시절에는 그나마
+        안전판이었다.
 
+        그런데 그 배지 자체가 문제였다 — 꺼놔도 필터가 가리키는 차수는
+        계속 초록 "알림 중" 이었다(cycleStage 참고). 그러니 목록에서 끄고
+        싶어도 그 사실을 확인할 방법도, 확인한 뒤 바로 끌 방법도 없었다.
+        배지를 고친 지금은 "스쳐 눌러도 괜찮은가" 만 남는데, 아래 스위치는
+        설정 화면과 똑같이 켜고 끄기 전에 확인을 받는다 — 그 확인 한 번이
+        스친 클릭을 막는다. "알림만" 배지는 그대로 뺀 채다: 재배정을 없앤
+        뒤로 모든 행에 늘 붙어 무정보였다.
+      */}
+      <td className="px-3 py-2.5 text-right">
+        {/*
+          relative: 이름 열의 스트레치드 링크(after:absolute after:inset-0,
+          tr 전체를 덮는다)보다 DOM 순서상 뒤에 있어 위에 그려진다 — 그래야
+          스위치를 눌렀을 때 행 이동이 아니라 스위치가 클릭을 받는다.
+          stopPropagation 은 혹시 모를 상위 클릭 핸들러에 대한 안전판이다.
+        */}
+        <span
+          className="relative inline-flex"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Switch
+            checked={c.enabled}
+            disabled={toggling}
+            onCheckedChange={(v) => void toggleEnabled(v)}
+            aria-label={`${c.name} 사용 여부`}
+          />
+        </span>
+      </td>
+      {/*
         아이콘은 ChevronRight 다. 전에 쓰던 ExternalLink 는 "이 앱을 떠난다"는
         뜻이라 Jira·Confluence 링크와 같은 기호가 두 뜻을 갖고 있었다.
         이 화살표는 표시일 뿐이고 누르는 것은 행 전체다.

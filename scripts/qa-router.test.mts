@@ -1272,7 +1272,7 @@ test('cycleStage — 필터가 가리키는 차수는 보는 중', () => {
     jiraVersionExists: true,
   };
   assert.equal(
-    cycleStage(c, 'release_20260914', '2026-09-08').stage,
+    cycleStage(c, 'release_20260914', '2026-09-08', true).stage,
     'watching'
   );
 });
@@ -1286,7 +1286,7 @@ test('cycleStage — Jira 버전이 없으면 예정 (봇이 볼 수 없다)', (
     qaEndYmd: '2026-10-07',
     jiraVersionExists: false,
   };
-  const r = cycleStage(c, 'release_20260914', '2026-09-08');
+  const r = cycleStage(c, 'release_20260914', '2026-09-08', true);
   assert.equal(r.stage, 'planned');
   assert.equal(r.label, '예정');
 });
@@ -1300,7 +1300,7 @@ test('cycleStage — 버전은 있는데 필터가 안 가리키면 전환 대�
     qaEndYmd: '2026-10-07',
     jiraVersionExists: true,
   };
-  const r = cycleStage(c, 'release_20260914', '2026-09-29');
+  const r = cycleStage(c, 'release_20260914', '2026-09-29', true);
   assert.equal(r.stage, 'pending_switch');
   assert.equal(r.tone, 'warn');
 });
@@ -1314,7 +1314,10 @@ test('cycleStage — QA 가 끝났고 보는 차수도 아니면 지난 차수',
     qaEndYmd: '2026-08-16',
     jiraVersionExists: true,
   };
-  assert.equal(cycleStage(c, 'release_20260914', '2026-09-08').stage, 'past');
+  assert.equal(
+    cycleStage(c, 'release_20260914', '2026-09-08', true).stage,
+    'past'
+  );
 });
 
 test('cycleStage — QA 가 끝나도 배포 전까지는 알림 중이다', () => {
@@ -1329,12 +1332,12 @@ test('cycleStage — QA 가 끝나도 배포 전까지는 알림 중이다', () 
     jiraVersionExists: true,
   };
   assert.equal(
-    cycleStage(c, 'release_20260914', '2026-09-11').stage,
+    cycleStage(c, 'release_20260914', '2026-09-11', true).stage,
     'watching'
   );
   // 배포 당일까지도 아직이다.
   assert.equal(
-    cycleStage(c, 'release_20260914', '2026-09-14').stage,
+    cycleStage(c, 'release_20260914', '2026-09-14', true).stage,
     'watching'
   );
 });
@@ -1356,16 +1359,65 @@ test('cycleStage — 배포가 끝났으면 필터가 남아 있어도 알림 �
     qaEndYmd: '2026-09-09',
     jiraVersionExists: true,
   };
-  const still = cycleStage(c, 'release_20260914', '2026-09-17');
+  const still = cycleStage(c, 'release_20260914', '2026-09-17', true);
   assert.equal(still.stage, 'past');
   assert.equal(still.label, '배포 완료');
   assert.equal(still.tone, 'off');
 
   // 필터가 이미 옮겨 갔으면 평범한 지난 차수다.
   assert.equal(
-    cycleStage(c, 'release_20261012', '2026-09-17').label,
+    cycleStage(c, 'release_20261012', '2026-09-17', true).label,
     '지난 차수'
   );
+});
+
+test('cycleStage — enabled=true 는 이전 동작과 바이트 단위로 동일하다', () => {
+  /*
+    `enabled` 를 네 번째 인자로 추가하면서 기존 호출부(목록·상세·차수 상세)가
+    전부 실제 `config.enabled` 값을 넘기도록 바뀌었다. 이 테스트는 그 인자가
+    `true` 일 때 값 자체(스테이지·라벨·톤)가 인자 추가 전과 한 글자도
+    다르지 않음을 고정한다 — 위의 기존 테스트들이 전부 `true` 를 넘기도록
+    바뀐 것과 같은 값을 별도로 다시 확인한다.
+  */
+  const c = {
+    ...CYCLE_BASE,
+    deployYmd: '2026-09-14',
+    fixVersion: 'release_20260914',
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    jiraVersionExists: true,
+  };
+  assert.deepEqual(cycleStage(c, 'release_20260914', '2026-09-08', true), {
+    stage: 'watching',
+    label: '알림 중',
+    tone: 'ok',
+  });
+});
+
+test('cycleStage — 꺼진 라우터는 필터가 가리키는 차수도 알림 중이 아니다', () => {
+  /*
+    실측(2026-09-30): 설정 화면에서 대상을 껐는데 차수 목록은 09-30 차수에
+    여전히 초록 "알림 중" 을 띄우고 있었다. "알림 안 나가는 거 맞지?" 라는
+    질문에 판정 경로(SQL 함수 넷·TS 진입점·수동 실행 라우트) 전부가
+    "맞다, 아무것도 안 나간다" 였는데 화면만 반대로 말했다.
+
+    `enabled: false` 를 넘기면 필터가 정확히 이 차수를 가리켜도 `stage` 가
+    `'watching'` 이 아니어야 한다 — 값 자체가 갈려야 `.stage === 'watching'`
+    으로 분기하는 호출부가 거짓을 물려받지 않는다.
+  */
+  const c = {
+    ...CYCLE_BASE,
+    deployYmd: '2026-09-14',
+    fixVersion: 'release_20260914',
+    qaStartYmd: '2026-09-03',
+    qaEndYmd: '2026-09-09',
+    jiraVersionExists: true,
+  };
+  const r = cycleStage(c, 'release_20260914', '2026-09-08', false);
+  assert.notEqual(r.stage, 'watching');
+  assert.equal(r.stage, 'disabled');
+  assert.equal(r.tone, 'off');
+  assert.match(r.label, /알림/);
 });
 
 test('상태 — 차수 사이에는 폴링이 늦어도 응답 없음이 아니다', () => {

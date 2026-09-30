@@ -309,13 +309,45 @@ export function describeScope(derived: DerivedContext | null): string | null {
  *   ② Jira 버전이 생기고 필터가 그걸 가리킨다   → 보는 중
  * 사이에 "버전은 생겼는데 필터가 아직 이전 차수" 구간이 있고, 그때 사람이
  * 필터를 바꿔야 넘어간다. 그 구간을 전환 대기로 드러낸다.
+ *
+ * ── `enabled` 를 세 번째가 아니라 네 번째 인자로 받는 이유 ──
+ *
+ * 실측(2026-09-30): 대상 하나를 설정 화면에서 껐는데, 차수 목록은 09-30
+ * 차수에 여전히 초록 "알림 중" 을 띄우고 있었다. "알림 안 나가는 거
+ * 맞지?" 라는 질문에 SQL 함수 넷·TS 진입점·수동 실행 라우트를 다 확인해
+ * "맞다, 아무것도 안 나간다" 였는데, 화면은 반대로 말하고 있었다.
+ *
+ * 위 `deployed` 검사(2026-09-17 실측, 배포일이 지나면 "알림 중" 을 끊는
+ * 것)와 **같은 병**이다. "이 라벨이 지금 뭘 약속하는가" 를 안 보고
+ * 필터 포인터 하나만 보고 라벨을 정해서 생긴다. 그때는 원인이 "배포일이
+ * 지났는데 필터를 안 옮김" 이었고, 이번은 원인이 "봇 자체가 꺼짐" 이다.
+ * 병은 같아도 원인이 다르므로 이 함수 안에서 따로 검사해야 한다 — 호출부
+ * 셋(목록·상세 정렬·상세 배지·차수 상세) 각각이 매번 `config.enabled` 를
+ * 기억해서 라벨을 덮어써야 한다면, 하나라도 빠뜨리는 순간 같은 거짓말이
+ * 되돌아온다. 그래서 계산 자체를 이 함수 안으로 넣는다 — 목록과 상세가
+ * 같은 규칙을 써야 한다는 이 파일 맨 위 원칙 그대로다.
+ *
+ * `stage` 를 `'watching'` 그대로 두고 `label`/`tone` 만 바꾸는 방법도
+ * 있었다. 그러지 않는다 — 이 필드 이름 자체가 `CycleStage` 고, 값
+ * `'watching'` 은 "지금 이 차수를 보고 있다(=알릴 수 있다)" 는 뜻이다.
+ * 꺼진 봇은 그 뜻을 채우지 못하므로 값 자체를 `'disabled'` 로 갈라
+ * `.stage === 'watching'` 을 보는 호출부가 거짓을 물려받지 않게 한다.
+ * 대신 "이게 필터가 가리키는 차수다" 라는 구조 정보(정렬 1순위, 행
+ * 강조)까지 잃지 않도록 호출부에서 `'watching' || 'disabled'` 로 같이
+ * 묶는다 — 아래 세 호출부의 주석 참고.
  */
-export type CycleStage = 'watching' | 'pending_switch' | 'planned' | 'past';
+export type CycleStage =
+  | 'watching'
+  | 'pending_switch'
+  | 'planned'
+  | 'past'
+  | 'disabled';
 
 export function cycleStage(
   cycle: DeployCycle,
   activeFixVersion: string | null,
-  todayYmd: string
+  todayYmd: string,
+  enabled: boolean
 ): { stage: CycleStage; label: string; tone: HealthTone } {
   /*
     ── 배포가 끝났으면 무엇보다 먼저 끝난 것이다 ──
@@ -354,6 +386,14 @@ export function cycleStage(
   }
 
   if (cycle.fixVersion === activeFixVersion) {
+    /*
+      필터는 이 차수를 가리키지만, 대상 자체가 꺼져 있으면 아무도 못 받는다.
+      실측(2026-09-30): 설정에서 껐는데 이 줄만 초록 "알림 중" 이었다 — 위
+      `deployed` 분기와 같은 병, 다른 원인이라 여기서도 먼저 끊는다.
+    */
+    if (!enabled) {
+      return { stage: 'disabled', label: '꺼짐 · 알림 안 나감', tone: 'off' };
+    }
     // "보는 중"은 주체가 모호하고 옆 라벨(예정·전환 대기)과 성격이 어긋났다.
     // 실제 동작은 이 차수 티켓을 찾아 담당자에게 알리는 것이다.
     return { stage: 'watching', label: '알림 중', tone: 'ok' };

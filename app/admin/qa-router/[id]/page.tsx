@@ -192,6 +192,7 @@ export default function QaRouterDetailPage() {
           todayYmd={todayKst}
           configId={id}
           demo={demo}
+          enabled={config.enabled}
         />
       </section>
     </div>
@@ -222,6 +223,7 @@ function CycleTable({
   todayYmd,
   configId,
   demo,
+  enabled,
 }: {
   cycles: DeployCycle[];
   activeFixVersion: string | null;
@@ -237,6 +239,8 @@ function CycleTable({
    * 켠 모드가 한 번 클릭에 꺼지면 그건 모드가 아니다.
    */
   demo: boolean;
+  /** 이 대상이 켜져 있나. 꺼져 있으면 "알림 중" 배지를 못 띄운다. */
+  enabled: boolean;
 }) {
   const [page, setPage] = useState(0);
 
@@ -284,10 +288,20 @@ function CycleTable({
     그게 위로 올라가 정작 지금 보는 차수가 아래로 밀린다.
     매일 확인하러 오는 대상은 "알림 중" 하나다.
     끝나면 고정이 풀려 원래 순서로 돌아간다.
+
+    대상이 꺼져 있어도 고정한다. 여기서 뽑는 것은 "필터가 지금 가리키는
+    차수가 어디냐"는 구조적 위치이지 "알림이 나가고 있냐"가 아니다 — 후자는
+    아래 표시용 `cycleStage` 호출(`enabled` 를 실제 값으로 넘기는 쪽)이
+    배지로 이미 정직하게 말한다. 꺼졌다고 정렬까지 풀면 매일 이 화면에
+    오는 사람이 "지금 보는 차수"를 표 아래에서 다시 찾아야 한다 — 꺼둔
+    이유를 확인하러 온 사람에게 그건 불필요한 방해다. 그래서 `enabled` 를
+    늘 `true` 로 고정해 부른다.
   */
   const ordered = [...cycles].sort((a, b) => {
     const rank = (c: DeployCycle) =>
-      cycleStage(c, activeFixVersion, todayYmd).stage === 'watching' ? 0 : 1;
+      cycleStage(c, activeFixVersion, todayYmd, true).stage === 'watching'
+        ? 0
+        : 1;
     return rank(a) - rank(b);
   });
 
@@ -335,8 +349,15 @@ function CycleTable({
         */}
             <tbody>
               {shown.map((c) => {
-                const st = cycleStage(c, activeFixVersion, todayYmd);
-                const active = st.stage === 'watching';
+                const st = cycleStage(c, activeFixVersion, todayYmd, enabled);
+                /*
+                  꺼져 있어도 "지금 보는 차수" 강조(굵게·배경·QA 진행률)는
+                  유지한다 — 그건 배포 일정상 위치를 말할 뿐 알림 여부를
+                  말하지 않는다. 알림 여부는 아래 배지(`st.tone`·`st.label`)가
+                  따로, 정직하게 말한다.
+                */
+                const active =
+                  st.stage === 'watching' || st.stage === 'disabled';
                 const n = ambiguous(c)
                   ? undefined
                   : (counted.get(c.fixVersion) ?? 0);

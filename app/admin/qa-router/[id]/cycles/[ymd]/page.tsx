@@ -172,7 +172,8 @@ export default function CycleDetailPage() {
   const st = cycleStage(
     cycle,
     state?.activeCycle?.fixVersion ?? null,
-    todayKst
+    todayKst,
+    config.enabled
   );
   const jiraBase = jiraBaseUrl(config.jiraInstance);
   // 날짜 출처 판정. 화면과 배치(SQL)가 같은 규칙을 쓴다.
@@ -1088,7 +1089,9 @@ function CycleAssignments({
         ? 'Jira 릴리스가 만들어지고 필터가 이 차수를 가리키면 시작합니다.'
         : stage === 'past'
           ? '이 차수 동안 알릴 티켓이 없었습니다.'
-          : 'QA 팀이 티켓을 만들면 담당자를 찾아 Slack 으로 알립니다.';
+          : stage === 'disabled'
+            ? '라우터가 꺼져 있어 티켓이 쌓여도 알리지 않습니다.'
+            : 'QA 팀이 티켓을 만들면 담당자를 찾아 Slack 으로 알립니다.';
     return (
       <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
         아직 배정한 티켓이 없습니다.
