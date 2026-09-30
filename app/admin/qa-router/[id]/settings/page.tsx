@@ -17,7 +17,8 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
-import { planToggleEnabled, writeEnabled } from '../../toggle-enabled';
+import { planToggleEnabled } from '../../toggle-enabled-plan';
+import { writeEnabled } from '../../toggle-enabled';
 import {
   isFilterInput,
   parseFilterUrl,
@@ -199,7 +200,7 @@ export default function QaRouterSettingsPage() {
    *
    * 무엇을 확인·차단할지(`planToggleEnabled`)와 실제로 쓰는 법
    * (`writeEnabled`)은 목록 화면(app/admin/qa-router/page.tsx)과
-   * `../../toggle-enabled` 한 곳을 같이 쓴다 — 예전엔 이 로직이 두 화면에
+   * `../../toggle-enabled-plan`·`../../toggle-enabled` 두 곳을 같이 쓴다 — 예전엔 이 로직이 두 화면에
    * 복붙돼 있었다.
    */
   const toggleEnabled = async (next: boolean) => {

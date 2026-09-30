@@ -22,7 +22,8 @@ import type {
   QaRouterState,
 } from '@/lib/services/qa-router/types';
 import { NewRoutingDialog } from './new-routing-dialog';
-import { planToggleEnabled, writeEnabled } from './toggle-enabled';
+import { planToggleEnabled } from './toggle-enabled-plan';
+import { writeEnabled } from './toggle-enabled';
 
 /** 이 화면은 브라우저에서 anon 키로 직접 읽는다 (settings/projects 와 같은 패턴). */
 interface Row {
@@ -339,7 +340,7 @@ function ConfigRow({
   /*
     켜고 끄기. 무엇을 확인·차단할지(`planToggleEnabled`)와 실제로 쓰는 법
     (`writeEnabled`)은 설정 화면(app/admin/qa-router/[id]/settings/page.tsx)과
-    `./toggle-enabled` 한 곳을 같이 쓴다 — 예전엔 이 로직이 두 화면에
+    `./toggle-enabled-plan`·`./toggle-enabled` 두 곳을 같이 쓴다 — 예전엔 이 로직이 두 화면에
     복붙돼 있었다.
 
     실패하면 `c.enabled` 를 로컬로 미리 뒤집지 않으므로(스위치는 `row.config.enabled`

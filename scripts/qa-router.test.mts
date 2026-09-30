@@ -37,6 +37,7 @@ import {
   resolveQaWindow,
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
+import { planToggleEnabled } from '@/app/admin/qa-router/toggle-enabled-plan';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
 import { cycleUpsertRow, toState } from '@/lib/services/qa-router/rows';
@@ -1417,6 +1418,59 @@ test('cycleStage — 꺼진 라우터는 필터가 가리키는 차수도 알림
   assert.equal(r.stage, 'disabled');
   assert.equal(r.tone, 'off');
   assert.match(r.label, /알림/);
+});
+
+test('planToggleEnabled — 채널 없이는 못 켠다', () => {
+  const p = planToggleEnabled(
+    { name: '테스트 대상', slackChannelId: '' },
+    true
+  );
+  assert.equal(p.allowed, false);
+  // 문구 전체가 아니라 "채널을 넣으라" 는 조치가 담겨 있는지만 본다.
+  assert.match(p.blockedReason!.title + p.blockedReason!.description, /채널/);
+});
+
+test('planToggleEnabled — 공백만 있는 채널도 없는 것으로 본다', () => {
+  // trim() 을 빼먹기 쉬운 지점이다 — 리팩터에서 잃기 쉬워 따로 고정한다.
+  const p = planToggleEnabled(
+    { name: '테스트 대상', slackChannelId: '   ' },
+    true
+  );
+  assert.equal(p.allowed, false);
+});
+
+test('planToggleEnabled — 채널이 있으면 켜기가 허용되고 확인 문구에 이름이 들어간다', () => {
+  const p = planToggleEnabled(
+    { name: 'CPO BO', slackChannelId: 'C0123456789' },
+    true
+  );
+  assert.equal(p.allowed, true);
+  assert.equal(p.blockedReason, null);
+  assert.match(p.confirmMessage, /CPO BO/);
+});
+
+test('planToggleEnabled — 끄기는 채널이 없어도 항상 허용된다', () => {
+  /*
+    비대칭이 핵심이다 — 켜기는 설정 누락으로 막힐 수 있지만, 끄기는 무엇이
+    비어 있든 항상 된다. 안 그러면 "채널을 못 읽어서" 처럼 사소한 이유로
+    끄지도 못하는 상태에 빠질 수 있다.
+  */
+  const p = planToggleEnabled(
+    { name: '테스트 대상', slackChannelId: '' },
+    false
+  );
+  assert.equal(p.allowed, true);
+  assert.equal(p.blockedReason, null);
+});
+
+test('planToggleEnabled — 끄기 확인 문구는 소급 알림되지 않는다는 경고를 담는다', () => {
+  const p = planToggleEnabled(
+    { name: '테스트 대상', slackChannelId: 'C0123456789' },
+    false
+  );
+  // 문구 전체를 고정하지 않는다 — "꺼진 동안 생긴 티켓은 못 챙긴다" 는
+  // 경고가 담겨 있는지만 본다. 표현이 바뀌어도 이 사실은 남아야 한다.
+  assert.match(p.confirmMessage, /소급/);
 });
 
 test('상태 — 차수 사이에는 폴링이 늦어도 응답 없음이 아니다', () => {
