@@ -77,3 +77,6 @@ docs/auth-query.md
 # 각자 녹화한다: npx tsx scripts/qa-router.record.mts
 # 없으면 회귀 테스트만 건너뛴다 (나머지는 그대로 돈다).
 /scripts/fixtures/*.json
+
+# SDD 작업공간 (원장·브리프·리뷰 꾸러미) — 기록은 git 히스토리가 한다
+.superpowers/
