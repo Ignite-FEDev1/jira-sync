@@ -406,7 +406,15 @@ export function buildCycleHeader(i: CycleHeaderInput): SlackMessage {
 
   const links: string[] = [];
   if (i.deployPageUrl) links.push(`• [배포대장] ${i.deployPageUrl}`);
-  if (i.filterUrl) links.push(`• [KQ-QA 필터] ${i.filterUrl}`);
+  /*
+    라벨에 프로젝트 이름을 박지 않는다. 봇은 두 Jira 사이트의 여러
+    대상을 함께 돌리는데(`buildConfigChangedMessage` 의 `필터 열기`
+    처럼 이미 중립 라벨을 쓰는 자리도 있다), 예전엔 여기 `KQ-QA` 가
+    박혀 있어서 GW(ICTQMSCHE) 알림에도 "KQ-QA 필터" 라는 KQ 링크가
+    떴다 — 배포대장 링크는 GW 인데 필터만 KQ 로 보였다. 어느 대상이든
+    항상 맞는 말만 남긴다.
+  */
+  if (i.filterUrl) links.push(`• [QA 필터] ${i.filterUrl}`);
 
   const blocks: unknown[] = [
     {

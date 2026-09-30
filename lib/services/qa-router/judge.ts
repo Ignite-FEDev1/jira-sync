@@ -629,16 +629,41 @@ export async function findViaRefOwner(
   issue: JiraIssue,
   members: DerivedMember[],
   jira: JiraPort,
+  /**
+   * `triageAccountId` 는 **필수다.** 선택으로 두면 안 넘긴 호출부가
+   * 조용히 옛 동작(트리아지를 답으로 내는 버그)으로 돌아간다.
+   * 필수로 두면 컴파일러가 모든 호출부를 짚는다.
+   */
   opts: {
+    triageAccountId: string;
     projectKey?: string;
     devIssueTypes?: string[];
     /** 담당자 말고 한 칸 더. 안 넘기면 지금까지 쓰던 값으로 돈다. */
     coAssigneeField?: string;
     onWarn?: (msg: string) => void;
-  } = {}
+  }
 ): Promise<RefOwnerMatch | null> {
   const memberIds = new Set(members.map((m) => m.accountId));
   const refKeys = extractRefKeys(issue.fields?.labels, opts.projectKey);
+
+  /*
+    ── 트리아지 본인은 답이 아니다 ──
+
+    이 티켓은 이미 트리아지가 쥐고 있다. "트리아지 담당" 이라고 답하는 것은
+    판정이 아니라 메아리고, 그 답이 나오면 **진짜 담당자를 찾을 기회가
+    사라진다** (여기가 마지막 단계라 그대로 끝난다).
+
+    실측(2026-09-22 백테스트) KQ 최근 90일: 오지목 10건이 **전부** 이 경우
+    였다. 봇은 "김가빈 담당" 이라고 답했고 실제 담당은 10건 모두 차성숙
+    (APP_ 계열)이었다.
+
+    다른 세 단계는 이 가드가 이미 있다 — `findAssigned`, `findViaSiblings`,
+    `heldByMembers`. 여기만 빠져 있었다.
+
+    전후 측정(같은 표본 136건): 맞은 답 78건 그대로, 오지목 17 → 7.
+    잃는 것이 없다.
+  */
+  const isTriage = (accountId: string) => accountId === opts.triageAccountId;
 
   const devTypes = opts.devIssueTypes ?? DEFAULT_DEV_ISSUE_TYPES;
   const evidence: string[] = [];
@@ -674,7 +699,7 @@ export async function findViaRefOwner(
         for (const kid of kids) {
           if (!devTypes.includes(kid.fields?.issuetype?.name ?? '')) continue;
           const ka = kid.fields?.assignee;
-          if (!ka?.accountId) continue;
+          if (!ka?.accountId || isTriage(ka.accountId)) continue;
           candidates.push({
             accountId: ka.accountId,
             name: ka.displayName ?? ka.accountId,
@@ -687,7 +712,7 @@ export async function findViaRefOwner(
       }
 
       const a = ref.fields?.assignee;
-      if (!a?.accountId) continue;
+      if (!a?.accountId || isTriage(a.accountId)) continue;
       candidates.push({
         accountId: a.accountId,
         name: a.displayName ?? a.accountId,
@@ -779,10 +804,7 @@ export function cycleScopeJql(
  * `{name}`, 선택형은 `{value}`, 그냥 글자면 문자열이다. 배열인 칸도 있다.
  * 어느 칸이 올지 모르므로 **모양을 보고** 고른다 — 칸 이름을 아는 대신에.
  */
-function jqlValueAt(
-  fields: JiraIssue['fields'],
-  field: string
-): string | null {
+function jqlValueAt(fields: JiraIssue['fields'], field: string): string | null {
   const raw = fields?.[field];
   const one = Array.isArray(raw) ? raw[0] : raw;
   if (one == null) return null;
@@ -920,7 +942,10 @@ export async function findViaSiblings(
     const p = extractPrefixes(s.fields?.summary)[0];
     const k = p ? prefixKey(p) : '';
     if (k.length === 0) continue;
-    byKey.set(k, [...(byKey.get(k) ?? []), ...holders.map((h) => ({ ...h, s }))]);
+    byKey.set(k, [
+      ...(byKey.get(k) ?? []),
+      ...holders.map((h) => ({ ...h, s })),
+    ]);
   }
   if (byKey.size === 0) return null;
 
@@ -1016,6 +1041,35 @@ export async function findViaSiblings(
     );
     const mine = ranked.filter(([, r]) => r.isMember);
     if (mine.length === 0) continue;
+    /*
+      ── 표가 같으면 **답이 아니다** ──
+
+      위 `sort` 의 `localeCompare` 는 동률일 때 accountId 문자열 순서로 1위를
+      정한다. 그건 결정을 **재현 가능하게** 만들 뿐 옳게 만들지 않는다.
+      그런데 이 함수는 그 값을 다수결의 답인 것처럼 돌려줬다.
+
+      실측 (2026-09-22, GW 최근 300일 41건):
+
+        형제 판정이 답한 것        23건 · 13 맞음 (57%)
+          그중 우리 팀 1위가 동률   3건 ·  0 맞음 <<0%>>
+
+      세 건 다 `형제 1건 · A 1표 (B 1건)` 이다. 형제가 하나인데 표가 둘인
+      것은 **그 하나를 우리 팀원 둘이 차례로 맡았다**는 뜻이라, 둘 중 누구도
+      그 메뉴의 주인이라고 말할 근거가 없다.
+
+      버려도 잃는 것이 없다 — 맞던 답이 0건이다. 그리고 여기서 null 을
+      돌려주면 다음 단계가 이어 답하므로, 판정 기회 자체를 닫는 것도 아니다.
+
+      "동률은 답이 아니다" 는 프로젝트 관행이 아니라 다수결의 정의라서,
+      새 프로젝트를 붙여도 그대로 맞는다.
+    */
+    if (mine.length > 1 && mine[0][1].n === mine[1][1].n) {
+      ctx.onWarn?.(
+        `[${prefix}] 형제 표가 갈렸습니다 ` +
+          `(${mine[0][1].name} ${mine[0][1].n}건 = ${mine[1][1].name} ${mine[1][1].n}건) — 판정하지 않습니다`
+      );
+      continue;
+    }
     const [accountId, v] = mine[0];
     return {
       accountId,
@@ -1396,6 +1450,7 @@ async function refOwnerResult(
   let ref: RefOwnerMatch | null = null;
   try {
     ref = await findViaRefOwner(issue, ctx.members, jira, {
+      triageAccountId: ctx.triageAccountId,
       devIssueTypes: ctx.devIssueTypes,
       coAssigneeField: ctx.coAssigneeField,
       onWarn: ctx.onWarn,

@@ -4,20 +4,8 @@ import {
   missingCredsMessage,
   resolveJiraAccess,
 } from '@/lib/services/qa-router/api-creds';
-import {
-  createJiraClient,
-  createSlackReader,
-} from '@/lib/services/qa-router/clients';
-import {
-  collectPlanProgress,
-  threadTableFrom,
-  type ThreadStatus,
-} from '@/lib/services/qa-router/plan-tickets';
-import {
-  findQaThread,
-  readThreadTable,
-  shouldLookForThread,
-} from '@/lib/services/qa-router/qa-thread';
+import { createJiraClient } from '@/lib/services/qa-router/clients';
+import { collectPlanProgress } from '@/lib/services/qa-router/plan-tickets';
 import * as repo from '@/lib/services/qa-router/repository';
 
 /**
@@ -29,9 +17,9 @@ import * as repo from '@/lib/services/qa-router/repository';
  * Jira 만 읽고 Slack 은 건드리지 않는다 — 알림이 나가는 경로와 분리해서
  * "확인하려고 눌렀는데 채널에 메시지가 갔다"는 일이 없게 한다.
  *
- * QA 스레드는 SLACK_READ_TOKEN 이 있으면 같이 읽는다. 화면의 "지금 갱신"
- * 버튼이 이 경로라, 개인 토큰을 .env.local 에 넣고 눌러 보는 것이 배치를
- * 기다리지 않고 스레드 읽기를 확인하는 가장 빠른 길이다.
+ * 완료 여부는 **기획티켓의 Jira 상태**로 본다. 전에는 QA 스레드(Slack)의
+ * 표를 같이 읽었는데, 그 경로는 개인 토큰이 필요하고 QA 팀이 손으로 채우는
+ * 메시지에 묶여 있어 걷어냈다.
  */
 export async function POST(
   _req: Request,
@@ -81,83 +69,25 @@ export async function POST(
   try {
     // 주소와 토큰을 함께 해석한다 — 따로 두면 한쪽만 바뀌어 401 이 난다.
     const jira = createJiraClient(access);
-    /*
-      ── [배포 전 전환] ──────────────────────────────────────────────
-      지금은 개인 사용자 토큰(xoxp-)으로 읽는다. 발송용 봇 토큰에는 읽기
-      스코프가 없다 (실측: conversations.history → missing_scope,
-      provided = incoming-webhook·chat:write·usergroups:read·users:read).
-
-      배포 직전에 할 일:
-        1. 봇(FE1 Tool Alert)을 #cpo-qa 에 초대
-        2. 봇 앱에 channels:history 스코프 추가 후 재설치
-        3. SLACK_READ_TOKEN 값을 봇 토큰으로 교체
-      코드는 그대로 둔다 — 바꿀 것은 토큰 값 하나뿐이다.
-      같은 표시가 붙은 곳: scripts/qa-router.ts, lib/…/clients.ts,
-      .github/workflows/qa-router.yml
-      ────────────────────────────────────────────────────────────────
-    */
-    const readToken = process.env.SLACK_READ_TOKEN;
-    let threadTs = cycle.qaThreadTs ?? null;
-    let threadDeployYmd: string | null = null;
-    let threadTable: Map<string, ThreadStatus> | undefined;
-    let threadUnavailable: string | undefined =
-      'QA 스레드 읽기 토큰이 없습니다 (SLACK_READ_TOKEN)';
-
-    if (readToken) {
-      const reader = createSlackReader({ token: readToken });
-      try {
-        const today = new Date(Date.now() + 9 * 3_600_000)
-          .toISOString()
-          .slice(0, 10);
-        if (shouldLookForThread({ ...cycle, qaThreadTs: threadTs }, today)) {
-          const found = await findQaThread(reader, cycle.deployYmd, {
-            channelId: cfg.qaThreadChannelId,
-          });
-          if (found) {
-            threadTs = found.ts;
-            threadDeployYmd = found.deployYmd;
-          }
-        }
-        if (threadTs) {
-          threadTable = await readThreadTable(
-            reader,
-            threadTs,
-            cfg.qaThreadChannelId
-          );
-          threadUnavailable = undefined;
-        }
-      } catch (e) {
-        // 스레드를 못 읽어도 Jira 집계는 낸다. 이유는 화면에 그대로 뜬다.
-        threadUnavailable = (e as Error).message;
-      }
-    }
-
-    /*
-      스레드를 못 읽었으면 마지막으로 안 값을 그대로 들고 간다.
-      안 그러면 갱신 한 번에 threadDone 이 0 으로 밀린다 (실측 7 → 0).
-      "못 읽음"과 "0 건"은 다른 말이다.
-    */
-    const carried = threadTable ?? threadTableFrom(cycle.planProgress);
     const progress = await collectPlanProgress(jira, {
-      projectKey: derived.projectKey,
+      /*
+        **개발 프로젝트**를 본다. 필터의 프로젝트(QA 큐)가 아니다.
+        배포대장 본문 JQL 에서 읽어 차수에 담아 둔 값이고, 없으면
+        필터 쪽으로 떨어진다 — KQ 처럼 둘이 같으면 그게 맞다.
+        배치(`tick.ts`)와 같은 규칙이어야 "화면은 7건인데 알림은 0건"
+        이 안 생긴다.
+      */
+      projectKey: cycle.devProjectKey || derived.projectKey,
       fixVersion,
       memberIds: new Set(derived.members.map((m) => m.accountId)),
-      threadTable: carried,
-      threadUnavailable,
       planIssueTypeId: cfg.planIssueTypeId,
       devIssueTypeId: cfg.devIssueTypeId,
     });
-    await repo.savePlanProgress(id, cycle.deployYmd, progress, {
-      qaThreadTs: threadTs,
-      threadDeployYmd,
-    });
+    await repo.savePlanProgress(id, cycle.deployYmd, progress);
     return NextResponse.json({
       ok: true,
       total: progress.total,
-      threadDone: progress.threadDone,
-      // 스레드를 읽었는지 화면이 알아야 "지금 갱신"의 결과를 말해 줄 수 있다.
-      threadRead: !threadUnavailable,
-      threadUnavailable: threadUnavailable ?? null,
+      ticketDone: progress.ticketDone,
     });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 502 });

@@ -1001,7 +1001,14 @@ export function DayStepper({
  * `운영 배포일 1일 전 · 주말이면 이전 근무일` 만 적으면 머릿속으로 달력을
  * 그려야 한다. 옆에 `09-11(금)` 이 있으면 맞게 넣었는지 바로 안다.
  */
-/** 지금 보는 차수의 날짜들. 없으면 규칙이 며칠에 걸리는지 정할 수 없다. */
+/**
+ * 지금 보는 차수의 날짜들. 없으면 규칙이 며칠에 걸리는지 정할 수 없다.
+ *
+ * **대장 칸을 그대로 넣으면 안 된다.** QA 기간은 `resolveQaWindow` 가
+ * (직접 입력 > 대장 > 규칙 순으로) 정하고 운영 배포일은 `prodDayOf` 가
+ * 정한다 — 09:10 배치가 쓰는 값이 그것이라, 다른 값을 넣으면 화면이
+ * 울리지도 않을 날을 적는다.
+ */
 export interface AlertSchedule {
   qaStartYmd: string | null;
   qaEndYmd: string | null;
@@ -1022,6 +1029,13 @@ export interface AlertRuleRow {
    * 훑어 짐작해야 한다 — 정작 답은 계산할 때 이미 손에 있었다.
    */
   shadowedBy: AlertRule | null;
+  /**
+   * 차수 마감선(운영 배포일)을 넘어 이 차수에는 안 나간다.
+   *
+   * 날짜는 그대로 들고 있는다 — 화면이 "며칠에 걸리는데 선을 넘었다" 고
+   * 말해야 사람이 오프셋을 어디로 옮길지 안다.
+   */
+  pastCutoff: boolean;
 }
 
 /**
@@ -1056,14 +1070,38 @@ export function alertRuleRows(
           ? schedule.qaEndYmd
           : schedule.prodYmd;
 
+  /*
+    ── 차수 마감선 ──
+
+    `milestoneFrom`(TS)·`qa_router_hit_rule`(SQL)이 배포일 다음날부터는
+    무엇도 안 울린다. 그 선을 여기서도 그어야 미리보기가 **실제로 나갈
+    것만** 적는다. 선을 긋는 쪽은 첫 번째로 켜져 있는 `prod` 앵커 규칙이다 —
+    그 규칙은 배포일을 보정하는 쪽이라 막히지 않는다. 고르는 방식을 바꾸면
+    저 둘도 같이 바꿔야 한다.
+  */
+  const prodRule = rules.find((r) => r.enabled && r.anchor === 'prod');
+  const cutoff = schedule?.prodYmd
+    ? prodRule
+      ? ruleDay(schedule.prodYmd, prodRule.offset, prodRule.shift)
+      : schedule.prodYmd
+    : null;
+
   const taken = new Map<string, AlertRule>();
   return rules.map((r) => {
     const day = r.enabled
       ? ruleDay(anchorOf(r.anchor), r.offset, r.shift)
       : null;
-    const blocker = day ? (taken.get(day) ?? null) : null;
-    if (day && !blocker) taken.set(day, r);
-    return { rule: r, day, shadowed: !!blocker, shadowedBy: blocker };
+    const pastCutoff = !!(day && cutoff && day > cutoff);
+    // 안 나가는 줄은 다른 줄을 가리지도 않는다.
+    const blocker = day && !pastCutoff ? (taken.get(day) ?? null) : null;
+    if (day && !pastCutoff && !blocker) taken.set(day, r);
+    return {
+      rule: r,
+      day,
+      shadowed: !!blocker,
+      shadowedBy: blocker,
+      pastCutoff,
+    };
   });
 }
 
@@ -1265,11 +1303,12 @@ export interface AlertGroups {
  * 것이 앞에 오므로 "위에 있는 게 이긴다" 는 규칙이 화면에도 그대로 선다.
  */
 export function groupAlertRows(rows: AlertRuleRow[]): AlertGroups {
+  // 마감선을 넘은 줄은 날짜가 잡혀도 안 나간다 - `안 울림` 쪽이다.
   return {
     dated: rows
-      .filter((r) => r.day)
+      .filter((r) => r.day && !r.pastCutoff)
       .sort((a, b) => a.day!.localeCompare(b.day!)),
-    silent: rows.filter((r) => !r.day),
+    silent: rows.filter((r) => !r.day || r.pastCutoff),
   };
 }
 

@@ -14,11 +14,31 @@
  *   기획티켓과 개발티켓은 형제다(부모가 에픽). 그리고 둘 다 같은 fixVersion 을
  *   달기 때문에 Confluence 배포대장을 긁을 필요가 없다 — JQL 한 번이면 된다.
  *
- * 상태 두 축을 왜 같이 두는가:
- *   기획티켓의 "완료"는 두 시점에 나온다. 개발 시작 전(기획 확정)과 QA 통과 후다.
- *   상태 하나로는 앞뒤가 갈리지 않는다. QA 스레드의 완료 공유를 함께 봐야
- *   "QA 를 통과한 완료"인지 알 수 있다.
- *   실측: KQ-17670 은 Jira 가 Verify in QA 인데 스레드 표에는 완료로 적혀 있었다.
+ * 완료를 무엇으로 보는가:
+ *   기획티켓의 상태 **카테고리**가 done 이면 완료다. 상태 이름이 아니다.
+ *   이름은 프로젝트마다 다르다 — KQ 는 `완료`, AUTOWAY 는 `Done`. 이름으로
+ *   세면 프로젝트를 붙일 때마다 문자열을 추가해야 하고, 빠뜨리면 진행률이
+ *   조용히 0 이 된다. 카테고리는 Jira 가 워크플로에서 주는 값이라 무관하다.
+ *
+ *   전에는 QA 팀이 Slack 스레드에 손으로 적는 표를 읽어 판정했다. KQ 에만
+ *   있는 관행이고 개인 토큰이 필요했고, 프로덕션에는 토큰이 없어 아예 안
+ *   돌고 있었다 — 화면의 7/7 은 이월된 옛 값이었다. 실측으로 스레드 표와
+ *   Jira 상태가 7건 전부 같았으므로 Jira 쪽만 남긴다.
+ *
+ * ── 여기는 아직 KQ 구조에 묶여 있다 ──
+ *
+ *   이슈타입 번호(10001·10205)와 제목 `[기획]` 은 KQ 관행이다. AUTOWAY 에는
+ *   그 번호도 `개발처리` 타입도 없어서 **GW 진행률은 0건이다.**
+ *
+ *   "부모(에픽)로 묶어 센다" 로 일반화를 시도했다가 실측에서 되돌렸다.
+ *   두 군데가 깨졌다.
+ *     ① 에픽 상태는 완료 신호가 아니다. KQ-17669(에픽)는 영영 TO_DO 인데
+ *        그 아래 기획 KQ-17670 은 완료다 — 7/7 이 4/12 가 됐다.
+ *     ② 차수를 안 단 형제를 딸려오게 하면 옛 차수가 섞인다. KQ-15867 이
+ *        KQ-16395·KQ-16404 같은 이전 차수 작업을 끌어왔다.
+ *
+ *   **완료 신호가 어느 노드에 있는지가 프로젝트마다 다르다**는 것이 핵심이고,
+ *   그건 코드가 추론할 값이 아니라 사람이 정해 줘야 하는 값으로 보인다.
  */
 
 import type { JiraIssue } from './judge';
@@ -56,14 +76,31 @@ function isOurs(i: JiraIssue, memberIds: Set<string>): boolean {
   return !!a && memberIds.has(a);
 }
 
-/** QA 스레드 표의 대응상태. 그대로 쓰지 않고 뜻이 있는 값으로 좁힌다. */
-export type ThreadStatus = 'done' | 'working' | 'issue' | 'waiting' | 'unknown';
+/**
+ * Jira 상태 카테고리. 상태 **이름** 대신 이걸로 판정한다.
+ *
+ * 이름은 프로젝트·로케일마다 다르지만 카테고리는 Jira 가 워크플로 정의에서
+ * 주는 값이라 무관하다.
+ *   new           아직 시작 안 함
+ *   indeterminate 진행 중 (Verify in QA 가 여기)
+ *   done          끝남
+ */
+export type StatusCategory = 'new' | 'indeterminate' | 'done';
+
+/** 진행 흐름 순서. 화면의 조각 순서도 이걸 따른다. */
+export const STATUS_CATEGORY_ORDER: StatusCategory[] = [
+  'new',
+  'indeterminate',
+  'done',
+];
 
 export interface PlanTicket {
   key: string;
   summary: string;
-  /** Jira 상태 이름 (예: Verify in QA, 완료) */
+  /** Jira 상태 이름 (예: Verify in QA, 완료). 표시용이다. */
   status: string;
+  /** 그 상태가 속한 카테고리. **판정은 이쪽으로 한다.** */
+  statusCategory: StatusCategory;
   /** 이 기획건을 개발한 담당자들. 형제 개발티켓에서 모은다. */
   devNames: string[];
   /** 개발티켓에 붙은 FE 라벨. 표시용이고 판정 기준은 아니다. */
@@ -78,56 +115,26 @@ export interface PlanTicket {
     key: string;
     summary: string;
     status: string;
+    statusCategory: StatusCategory;
     name: string | null;
     labels: string[];
   }[];
   /** 개발티켓이 모두 완료인가. 담당 개발자가 기획티켓을 VQ 로 올릴 조건이다. */
   devDone: boolean;
-  /** QA 스레드 표에 적힌 대응상태. 스레드를 못 읽으면 null 이다. */
-  threadStatus: ThreadStatus | null;
 }
 
 export interface PlanProgress {
   tickets: PlanTicket[];
   /** 분모 — FE1 개발티켓이 붙은 기획건 수 */
   total: number;
-  /** QA 스레드에서 완료로 공유된 수 */
-  threadDone: number;
-  /** Jira 기획티켓이 완료로 넘어간 수 */
+  /**
+   * 기획티켓이 완료로 넘어간 수. **진행률의 분자다.**
+   *
+   * 전에는 QA 스레드 표에서 읽은 `threadDone` 을 썼다. 실측으로 두 값이
+   * 같았고(7건 전부 일치), 스레드 쪽은 프로덕션에 토큰이 없어 아예 안
+   * 돌고 있었다 — 화면의 7/7 은 언제 값인지 모르는 이월값이었다.
+   */
   ticketDone: number;
-  /** 스레드를 읽지 못했으면 이유. 읽었으면 null. */
-  threadUnavailable: string | null;
-}
-
-/** 표의 한국어 대응상태를 뜻으로 좁힌다. */
-export function parseThreadStatus(raw: string): ThreadStatus {
-  const s = raw.trim();
-  if (s === '완료') return 'done';
-  if (s === '대응중') return 'working';
-  if (s === '이슈') return 'issue';
-  if (s.startsWith('테스트')) return 'waiting';
-  return 'unknown';
-}
-
-/**
- * QA 스레드 상황 메시지의 표를 읽는다.
- *
- * 형태는 `KQ-18432\t테스트 대기` 처럼 티켓 키와 상태가 한 줄에 오는 것이다.
- * 표가 블록이든 스니펫이든 결국 텍스트로 풀리므로 줄 단위로 훑는다.
- * 헤더("요청 티켓", "대응상태")는 키 패턴이 없어 자연히 걸러진다.
- */
-export function parseThreadTable(text: string): Map<string, ThreadStatus> {
-  const out = new Map<string, ThreadStatus>();
-  for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Z]{2,}-\d+)\s*[|\t]?\s*(.+?)\s*$/);
-    if (!m) continue;
-    const status = parseThreadStatus(m[2]);
-    // 상태 칸이 비어 있거나 알아볼 수 없으면 기록하지 않는다.
-    // 없는 것과 "모르겠다"를 같은 값으로 두면 화면이 거짓말을 한다.
-    if (status === 'unknown') continue;
-    out.set(m[1], status);
-  }
-  return out;
 }
 
 /**
@@ -137,7 +144,7 @@ export function parseThreadTable(text: string): Map<string, ThreadStatus> {
 type IssueFields = {
   summary?: string;
   labels?: string[];
-  status?: { name?: string };
+  status?: { name?: string; statusCategory?: { key?: string } };
   assignee?: { accountId?: string; displayName?: string } | null;
   parent?: { key?: string };
 };
@@ -156,33 +163,23 @@ function statusName(i: JiraIssue): string {
   return f(i).status?.name ?? '?';
 }
 
+/**
+ * 상태 카테고리. Jira 가 `status` 필드 안에 함께 준다.
+ *
+ * 못 읽으면 `new` 로 둔다 — 모르는 것을 완료로 세면 진행률이 부풀고,
+ * 사람은 다 끝난 줄 알고 안 본다. 모르는 쪽이 덜 위험하다.
+ */
+function statusCategoryOf(i: JiraIssue): StatusCategory {
+  const k = f(i).status?.statusCategory?.key;
+  return k === 'done' || k === 'indeterminate' || k === 'new' ? k : 'new';
+}
+
 function assigneeName(i: JiraIssue): string | null {
   return f(i).assignee?.displayName ?? null;
 }
 
 function parentKey(i: JiraIssue): string | null {
   return f(i).parent?.key ?? null;
-}
-
-/**
- * 이전 수집 결과에서 스레드 상태만 뽑아 표로 되돌린다.
- *
- * 스레드를 못 읽은 회차가 **이미 읽어 둔 값을 0 으로 덮는** 것을 막는다.
- * 실측 사고: 읽기 토큰 없이 "지금 갱신" 을 한 번 눌렀더니
- * threadDone 이 7 → 0 이 됐다. 화면은 그걸 "아무것도 안 끝났다"로 그린다.
- *
- * 못 읽는 것과 0 건인 것은 다르다. 못 읽었으면 **마지막으로 안 값을 유지**하고,
- * 언제 값인지는 화면이 plan_collected_at 으로 말한다.
- */
-export function threadTableFrom(
-  prev: PlanProgress | null | undefined
-): Map<string, ThreadStatus> | undefined {
-  if (!prev?.tickets?.length) return undefined;
-  const m = new Map<string, ThreadStatus>();
-  for (const t of prev.tickets) {
-    if (t.threadStatus) m.set(t.key, t.threadStatus);
-  }
-  return m.size > 0 ? m : undefined;
 }
 
 /**
@@ -204,8 +201,6 @@ export async function collectPlanProgress(
     /** 우리 팀 담당자 accountId. 대상 필터에서 파생된 6명이다. */
     memberIds: Set<string>;
     /** QA 스레드에서 읽은 표. 못 읽었으면 넘기지 않는다. */
-    threadTable?: Map<string, ThreadStatus>;
-    threadUnavailable?: string | null;
     /**
      * 기획·개발 이슈타입 ID. 프로젝트마다 번호가 다르다.
      * 안 넘기면 CPO 값을 쓴다 — 호출부가 하나뿐이라 기본값으로 둔다.
@@ -276,6 +271,7 @@ export async function collectPlanProgress(
       key: plan.key,
       summary: summaryOf(plan),
       status: statusName(plan),
+      statusCategory: statusCategoryOf(plan),
       devNames: names,
       devLabels: labels,
       devTickets: devs
@@ -283,12 +279,12 @@ export async function collectPlanProgress(
           key: d.key,
           summary: summaryOf(d),
           status: statusName(d),
+          statusCategory: statusCategoryOf(d),
           name: assigneeName(d),
           labels: labelsOf(d),
         }))
         .sort((a, b) => a.key.localeCompare(b.key)),
-      devDone: devs.every((d) => statusName(d) === '완료'),
-      threadStatus: opts.threadTable?.get(plan.key) ?? null,
+      devDone: devs.every((d) => statusCategoryOf(d) === 'done'),
     });
   }
 
@@ -297,8 +293,6 @@ export async function collectPlanProgress(
   return {
     tickets,
     total: tickets.length,
-    threadDone: tickets.filter((t) => t.threadStatus === 'done').length,
-    ticketDone: tickets.filter((t) => t.status === '완료').length,
-    threadUnavailable: opts.threadUnavailable ?? null,
+    ticketDone: tickets.filter((t) => t.statusCategory === 'done').length,
   };
 }

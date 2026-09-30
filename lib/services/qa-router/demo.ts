@@ -18,7 +18,7 @@
  */
 
 import type { JudgeEvidence } from './judge';
-import type { PlanProgress } from './plan-tickets';
+import type { PlanProgress, StatusCategory } from './plan-tickets';
 import type {
   DeployCycle,
   DerivedContext,
@@ -642,6 +642,7 @@ export function demoState(activeFixVersion: string): QaRouterState {
     lockedUntil: null,
     lockedBy: null,
     staleAlertedAt: null,
+    failAlertTs: null,
     // 데모는 늘 정상이다. 실패 화면은 실데이터에서만 본다.
     sideEffects: {},
     updatedAt: new Date().toISOString(),
@@ -668,11 +669,10 @@ export function demoConfig(
     jiraOperatorAccountId: null,
     confluenceDeployRootId: 'demo',
     fixVersionPattern: 'release_{ymd}',
+    qaScheduleRule: null,
     slackChannelId: 'C0BVDJEJ19C',
     slackFallbackChannelId: 'C0BVDJEJ19C',
     slackOpsChannelId: null,
-    qaThreadChannelId: 'C053GEE9A5R',
-    qaThreadTitlePattern: '%s 정기배포 QA',
     planIssueTypeId: '10001',
     devIssueTypeId: '10205',
     planIssueTypeName: '스토리',
@@ -701,18 +701,15 @@ export function demoConfig(
 /**
  * 기획티켓 진행 현황.
  *
- * 실측(release_20260914)은 FE1 기획건 3건이었고 셋 다 Jira 는 Verify in QA,
- * 스레드는 완료였다. 두 축이 어긋나는 그 모습을 그대로 재현하고, 화면이
- * 길어졌을 때를 보려고 건수만 늘린다.
+ * 실측(release_20260914)은 FE1 기획건 3건이었고 셋 다 Jira 가 Verify in QA
+ * 였다. 화면이 길어졌을 때를 보려고 건수만 늘린다.
  */
 export function demoPlanProgress(cycle: DeployCycle): PlanProgress {
   if (!cycle.jiraVersionExists) {
     return {
       tickets: [],
       total: 0,
-      threadDone: 0,
       ticketDone: 0,
-      threadUnavailable: null,
     };
   }
   const r = rng(Number(cycle.deployYmd.replace(/-/g, '')) + 31);
@@ -723,11 +720,13 @@ export function demoPlanProgress(cycle: DeployCycle): PlanProgress {
     const dev = names[Math.floor(r() * names.length)];
     // 뒤로 갈수록 덜 끝난 것이 남도록 기울인다 — 고르면 진행률이 안 읽힌다.
     const done = roll > 0.35 + (i / n) * 0.4;
-    const stuck = !done && r() > 0.75;
+    // 차수가 끝나기 전에는 대부분 Verify in QA 다. 실측 모습을 그대로 둔다.
+    const planDone = done && r() > 0.7;
     return {
       key: `KQ-${17600 + i * 37 + (Number(cycle.deployYmd.slice(8)) % 9)}`,
       summary: `[기획][BO] 데모 기획건 ${i + 1}`,
-      status: done && r() > 0.7 ? '완료' : 'Verify in QA',
+      status: planDone ? '완료' : 'Verify in QA',
+      statusCategory: (planDone ? 'done' : 'indeterminate') as StatusCategory,
       devNames: [dev],
       // 한 기획건을 FE1·FE2 가 나눠 맡는 모습을 섞는다
       devLabels: [i % 3 === 0 ? 'FE2' : 'FE1'],
@@ -736,6 +735,7 @@ export function demoPlanProgress(cycle: DeployCycle): PlanProgress {
           key: `KQ-${18200 + i * 3}`,
           summary: `[CPO] [BO-FE] 데모 기획건 ${i + 1} - 마크업/기능개발`,
           status: '완료',
+          statusCategory: 'done' as StatusCategory,
           name: dev,
           labels: [i % 3 === 0 ? 'FE2' : 'FE1'],
         },
@@ -743,25 +743,17 @@ export function demoPlanProgress(cycle: DeployCycle): PlanProgress {
           key: `KQ-${18201 + i * 3}`,
           summary: `[CPO] [BO-FE] 데모 기획건 ${i + 1} - API 연동개발`,
           status: done ? '완료' : 'Verify in QA',
+          statusCategory: (done ? 'done' : 'indeterminate') as StatusCategory,
           name: dev,
           labels: [i % 3 === 0 ? 'FE2' : 'FE1'],
         },
       ],
       devDone: done || r() > 0.3,
-      threadStatus: (done
-        ? 'done'
-        : stuck
-          ? 'issue'
-          : r() > 0.5
-            ? 'working'
-            : 'waiting') as PlanProgress['tickets'][number]['threadStatus'],
     };
   });
   return {
     tickets,
     total: tickets.length,
-    threadDone: tickets.filter((t) => t.threadStatus === 'done').length,
-    ticketDone: tickets.filter((t) => t.status === '완료').length,
-    threadUnavailable: null,
+    ticketDone: tickets.filter((t) => t.statusCategory === 'done').length,
   };
 }

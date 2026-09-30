@@ -17,7 +17,8 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
-import { db } from '@/lib/db';
+import { planToggleEnabled } from '../../toggle-enabled-plan';
+import { writeEnabled } from '../../toggle-enabled';
 import {
   isFilterInput,
   parseFilterUrl,
@@ -29,6 +30,7 @@ import {
   overdueSlot,
   staleFilterCycle,
 } from '@/lib/services/qa-router/status';
+import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import {
   ALERT_DESC,
   ALERT_KINDS,
@@ -48,6 +50,7 @@ import {
   type FilterGap,
   type JudgeTier,
   type QaRouterConfig,
+  type QaScheduleRule,
   type SideEffectResult,
 } from '@/lib/services/qa-router/types';
 
@@ -194,38 +197,24 @@ export default function QaRouterSettingsPage() {
    *
    * 양쪽 다 확인을 받는다. 켜는 것도 즉시 알림이 나가기 시작하는 일이라
    * 한쪽만 묻는 근거가 없다.
+   *
+   * 무엇을 확인·차단할지(`planToggleEnabled`)와 실제로 쓰는 법
+   * (`writeEnabled`)은 목록 화면(app/admin/qa-router/page.tsx)과
+   * `../../toggle-enabled-plan`·`../../toggle-enabled` 두 곳을 같이 쓴다 — 예전엔 이 로직이 두 화면에
+   * 복붙돼 있었다.
    */
   const toggleEnabled = async (next: boolean) => {
-    /*
-      채널 없이 켜면 봇이 1분마다 빈 채널로 발송을 시도한다. Slack 은
-      `channel_not_found` 를 돌려주고 그건 화면 어디에도 안 뜨므로, 사람은
-      켜 뒀다고 믿는데 알림만 안 온다.
-
-      DB 제약이 이미 막지만(20260916_qa_router_enabled_needs_channel.sql),
-      제약에 걸리면 Postgres 오류 문구가 그대로 토스트에 뜬다. 여기서 먼저
-      **무엇을 채워야 하는지** 로 말한다. 끄는 것은 언제나 막지 않는다.
-    */
-    if (next && !config.slackChannelId?.trim()) {
-      toast.error('알림 채널을 먼저 넣어 주세요', {
-        description: '채널이 없으면 켜도 알림이 나가지 않습니다',
+    const plan = planToggleEnabled(config, next);
+    if (!plan.allowed) {
+      toast.error(plan.blockedReason!.title, {
+        description: plan.blockedReason!.description,
       });
       return;
     }
-    const ok = window.confirm(
-      next
-        ? `${config.name} 을 켤까요?\n\n` +
-            '동작 시간 안이면 다음 확인부터 바로 Slack 알림이 나갑니다.'
-        : `${config.name} 을 끌까요?\n\n` +
-            '끄는 동안 만들어지는 QA 티켓은 아무에게도 알림이 가지 않습니다.\n' +
-            '다시 켜도 그 사이 티켓은 소급 알림되지 않습니다.'
-    );
-    if (!ok) return;
-    const { error } = await db
-      .from('qa_router_configs')
-      .update({ enabled: next })
-      .eq('id', id);
-    if (error) {
-      toast.error(`변경 실패: ${error.message}`);
+    if (!window.confirm(plan.confirmMessage)) return;
+    const errorMessage = await writeEnabled(id, next);
+    if (errorMessage) {
+      toast.error(`변경 실패: ${errorMessage}`);
       return;
     }
     toast.success(next ? '켰습니다' : '껐습니다');
@@ -280,13 +269,34 @@ export default function QaRouterSettingsPage() {
   const activeCycle = t.cycles.find(
     (c) => c.fixVersion === t.state?.activeCycle?.fixVersion
   );
-  const schedule = activeCycle
-    ? {
-        qaStartYmd: activeCycle.qaStartYmd,
-        qaEndYmd: activeCycle.qaEndYmd,
+  /*
+    대장 칸을 그대로 넘기면 안 된다. 09:10 배치는 사다리(`resolveQaWindow`)가
+    정한 QA 기간과 `prodDayOf` 가 정한 운영 배포일로 울릴 날을 고른다 —
+    여기에 대장 칸을 넣으면, 기간이 직접 입력이나 규칙에서 온 차수에서
+    **화면이 배치와 다른 날짜를 적는다.**
+  */
+  const activeWindow = activeCycle
+    ? resolveQaWindow({
+        manualStartYmd: activeCycle.qaStartYmdManual ?? null,
+        manualEndYmd: activeCycle.qaEndYmdManual ?? null,
+        ledgerStartYmd: activeCycle.qaStartYmd,
+        ledgerEndYmd: activeCycle.qaEndYmd,
         prodYmd: activeCycle.prodYmd,
-      }
+        deployYmd: activeCycle.deployYmd,
+        rule: config.qaScheduleRule,
+      })
     : null;
+  const schedule: AlertSchedule | null =
+    activeCycle && activeWindow
+      ? {
+          qaStartYmd: activeWindow.qaStartYmd,
+          qaEndYmd: activeWindow.qaEndYmd,
+          prodYmd: prodDayOf({
+            deployYmd: activeCycle.deployYmd,
+            prodYmd: activeCycle.prodYmd,
+          }),
+        }
+      : null;
 
   /*
     ── 필터가 지금 무슨 차수를 보고 있나 ──
@@ -784,6 +794,7 @@ export default function QaRouterSettingsPage() {
             <CycleEditor
               id={id}
               config={config}
+              cycles={t.cycles}
               suggest={savedCheck.data?.infer}
               saving={saving}
               onCancel={close}
@@ -938,29 +949,6 @@ export default function QaRouterSettingsPage() {
             ]}
           />
           <Fixed
-            label="QA 스레드 채널"
-            value={config.qaThreadChannelId ?? '없음'}
-            /*
-              ID 를 눌러 열 수 있게 한다.
-
-              이름을 대신 띄우는 것이 더 낫겠지만, `tick.ts` 는 알림 채널
-              둘만 조회한다 — 여기 이름을 채우려면 매 틱마다 Slack 호출이
-              하나 늘고, 그 채널은 봇이 없을 수도 있어 "문제" 로 오인될
-              위험까지 생긴다. 접힌 목록의 라벨 하나에 치를 값이 아니다.
-              한 번의 클릭이면 어느 채널인지 알 수 있으면 충분하다.
-            */
-            href={
-              config.qaThreadChannelId
-                ? `https://slack.com/app_redirect?channel=${config.qaThreadChannelId}`
-                : undefined
-            }
-            reasons={[
-              'QA 팀이 정기배포 QA 스레드를 여는 채널입니다',
-              '스레드는 제목으로 알아서 찾습니다 (9/10(목) 정기배포 QA)',
-              '봇에 channels:history 가 없으면 무엇을 넣어도 안 읽힙니다',
-            ]}
-          />
-          <Fixed
             label="공동담당자 필드"
             value={config.coAssigneeField}
             reasons={[
@@ -975,14 +963,6 @@ export default function QaRouterSettingsPage() {
             reasons={[
               '늘리면 그만큼 장애를 늦게 압니다',
               '사람이 조정할 근거가 없습니다',
-            ]}
-          />
-          <Fixed
-            label="QA 스레드 제목"
-            value="[M/D(요일) 정기배포 QA]"
-            reasons={[
-              '제목을 정규식으로 찾습니다',
-              '설정으로 빼려면 패턴 언어가 하나 더 필요합니다',
             ]}
           />
         </dl>
@@ -1006,14 +986,13 @@ export default function QaRouterSettingsPage() {
  * ⑤ 가 지금 무엇을 만들어 내고 있나.
  *
  * 전에는 `이번 차수 release_… · 기획 7/7 완료 · 마지막 수집 1일 전` 한 줄이
- * 전부였다. 그 줄이 숨긴 것 셋을 실측으로 찾았다.
+ * 전부였다. 그 줄이 숨긴 것 둘을 실측으로 찾았다.
  *
  *   · **수집이 밀려 있었다.** 09시·17시에 걷기로 해 놓고 마지막이 어제
  *     13:26 이었다 — 오늘 09시 슬롯을 놓쳤는데 "1일 전" 이라고만 했다.
- *   · **QA 스레드를 못 읽고 있었다.** 7/7 은 마지막으로 읽은 옛 값이고,
- *     지금은 토큰이 없어 갱신되지 않는다. 그런데 지금 값처럼 보였다.
- *   · **Jira 기준으로는 0/7 이었다.** 두 축이 이렇게 벌어지면 그 자체가
- *     볼거리인데 한쪽만 보여줬다.
+ *   · **7/7 은 지금 값이 아니었다.** 그때 완료 수는 QA 스레드에서 읽었는데
+ *     프로덕션에 읽기 토큰이 없어 갱신이 멈춰 있었다. 지금은 Jira 상태로
+ *     세므로 이 경로 자체가 없다.
  */
 function CycleLive({
   cycles,
@@ -1048,8 +1027,6 @@ function CycleLive({
 
   const p = active.planProgress;
   const overdue = overdueSlot(hours, active.planCollectedAt, now);
-  // 못 읽은 이유가 있으면 그 숫자는 "지금" 이 아니라 "마지막으로 안" 값이다.
-  const stale = p?.threadUnavailable ?? null;
   /*
     fixVersion·차수 건수는 신원이지 문제가 아니다. 전에는 이 둘을 수집
     상태와 한 `<Live bad>` 안에 묶어서, 문제가 있을 때 신원까지 통째로
@@ -1058,8 +1035,14 @@ function CycleLive({
   */
   const hasProblem = !!sideEffect?.error || overdue !== null;
 
-  const done = p ? (stale ? p.ticketDone : p.threadDone) : null;
-  const doneLabel = p && stale ? 'Jira 기준' : 'QA 스레드 기준';
+  /*
+    기획티켓의 Jira 상태가 완료 기준이다.
+
+    전에는 QA 스레드 표에서 읽은 수를 먼저 쓰고, 못 읽었을 때만 Jira 로
+    내려갔다. 그래서 같은 화면이 회차마다 다른 기준으로 숫자를 보여줬다.
+    스레드 경로를 걷어내면서 기준이 하나가 됐다.
+  */
+  const done = p?.ticketDone ?? null;
 
   return (
     <>
@@ -1076,30 +1059,7 @@ function CycleLive({
               </span>
             </span>
             <span className="text-[12px]">기획건 완료</span>
-            <span className="text-[11px] text-muted-foreground">{doneLabel}</span>
-            {/*
-              두 기준이 벌어지는 것은 정상이다 (기획티켓은 QA 통과 뒤에야
-              완료로 넘어간다). 그래서 다른 쪽도 옆에 적는다 — 하나만 보이면
-              "왜 다르지" 를 물을 기회조차 없다.
-            */}
-            {!stale && p.ticketDone !== p.threadDone && (
-              <span className="text-[11px] text-muted-foreground">
-                Jira 기준 {p.ticketDone}
-              </span>
-            )}
           </p>
-          {/* 숫자 바로 아래에 둔다 — 무엇을 설명하는 문장인지 붙어 있어야 한다. */}
-          {stale && (
-            <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
-              {/*
-                `stale` 은 배치가 남긴 문구인데, 예외 경로에서는 가공 안 된
-                `Error.message` 가 그대로 온다(`tick.ts`). 길이를 잘라 화면이
-                통째로 밀리는 것만 막는다 — 원문을 버리지는 않는다. 그게
-                유일한 단서인 경우가 있다.
-              */}
-              QA 스레드를 못 읽어 Jira 기준으로만 셉니다 : {stale.slice(0, 160)}
-            </p>
-          )}
         </>
       )}
 
@@ -2438,6 +2398,7 @@ function DeployRootResult({
 function CycleEditor({
   id,
   config,
+  cycles,
   suggest,
   saving,
   onCancel,
@@ -2445,6 +2406,8 @@ function CycleEditor({
 }: EditorBase & {
   id: string;
   config: QaRouterConfig;
+  /** 오프셋 미리보기에 쓴다 — "최근 차수 3개엔 실제로 며칠로 떨어지나". */
+  cycles: DeployCycle[];
   /** 필터 표본이 찾아낸 기획·개발 티켓 타입 후보 */
   suggest?: {
     planTypes: { id: string; name: string; count: number }[];
@@ -2464,12 +2427,7 @@ function CycleEditor({
     id: config.devIssueTypeId,
     name: config.devIssueTypeName,
   });
-  /*
-    QA 스레드 채널과 수집 시각은 여기서 뺐다.
-      채널   고정값이다. 스레드는 제목으로 알아서 찾고, 지금은 봇에
-             `channels:history` 가 없어 무엇을 넣어도 안 읽힌다
-      시각   "언제 도나" 의 이야기라 ③으로 옮겼다
-  */
+  // 수집 시각은 "언제 도나" 의 이야기라 ③으로 옮겼다.
   const [deployKinds, setDeployKinds] = useState<DeployKind[]>(
     config.deployKinds
   );
@@ -2491,6 +2449,48 @@ function CycleEditor({
   const kindsChanged =
     [...deployKinds].sort().join(',') !==
     [...config.deployKinds].sort().join(',');
+
+  /*
+    대장에 QA 기간이 없을 때 쓸 기본 규칙. 문자열로 들고 있는다 — 지우는
+    중간 상태("-")를 숫자로 담을 수 없어서다. 둘 다 비우면 규칙이 없다.
+  */
+  const [startOffset, setStartOffset] = useState(
+    config.qaScheduleRule ? String(config.qaScheduleRule.startOffset) : ''
+  );
+  const [endOffset, setEndOffset] = useState(
+    config.qaScheduleRule ? String(config.qaScheduleRule.endOffset) : ''
+  );
+  const draftRule: QaScheduleRule | null =
+    startOffset.trim() === '' || endOffset.trim() === ''
+      ? null
+      : {
+          startOffset: Number(startOffset),
+          endOffset: Number(endOffset),
+          businessDays: true,
+        };
+  /*
+    QA 는 배포 전에 끝난다. 양수를 허용할까 했던 근거(CPO 10-07 이 배포
+    다음날 종료)가 배포대장의 오류였다 — 배포일만 10/12 → 10/7 로 당기고
+    QA 줄을 안 고쳤다. `resolveQaWindow` 가 같은 조건으로 이 규칙을
+    조용히 버리므로, 여기서 먼저 사람이 읽을 말로 막는다.
+  */
+  const ruleProblem =
+    draftRule === null
+      ? null
+      : draftRule.startOffset > 0 || draftRule.endOffset > 0
+        ? 'QA 는 배포 전에 끝납니다. 0 이하로 넣어 주세요.'
+        : draftRule.startOffset >= draftRule.endOffset
+          ? 'QA 시작이 종료보다 앞서야 합니다.'
+          : null;
+  /*
+    오프셋 두 개는 머릿속에서 날짜로 바꾸기 어렵다. 최근 차수 3개에 지금
+    고치는 중인 규칙을 적용한 결과를 옆에 적는다. "대장이 이김" 을 같이
+    적는 이유는, 규칙을 고쳤는데 어떤 차수는 안 바뀌는 것이 버그로
+    보이기 때문이다 — 대장이 직접 입력보다는 아래, 규칙보다는 위 순위다.
+  */
+  const recentCycles = [...cycles]
+    .sort((a, b) => b.deployYmd.localeCompare(a.deployYmd))
+    .slice(0, 3);
 
   return (
     <div className="flex flex-col gap-3">
@@ -2588,8 +2588,7 @@ function CycleEditor({
         폼의 절반(810px 중 510px)을 쓰고 있었다.
 
           수집 시각    → ② "언제 도나" 로. 같은 질문의 답이 두 화면에 갈려 있었다
-          QA 채널      → "왜 이건 설정에 없나" 로. 채널은 고정이고
-                         스레드는 제목으로 찾는다
+          QA 채널      → 사라졌다. 스레드에서 완료를 읽는 경로 자체를 걷어냈다
 
         티켓 타입만 여기 남긴다 — **진행률의 정의**라 이 단계와 직결이다.
         다만 한 줄로 접는다. 표본이 정한 값과 어긋날 때만 펴면 된다.
@@ -2633,20 +2632,99 @@ function CycleEditor({
           reloading={loading}
         />
       </div>
+
+      <div className="rounded-md border bg-muted/20 px-3 py-2.5">
+        <p className="text-[11px] font-medium text-muted-foreground">
+          대장에 QA 기간이 없을 때
+        </p>
+        <p className="mt-0.5 text-[11.5px] leading-snug text-muted-foreground">
+          운영 배포일에서 영업일을 세어 만듭니다. 비워 두면 규칙이 없고,
+          대장에서 못 읽은 차수는 미정으로 둡니다.
+        </p>
+
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[12.5px]">
+          <span className="text-muted-foreground">QA 시작 = 운영 배포일</span>
+          <input
+            type="number"
+            max={0}
+            value={startOffset}
+            onChange={(e) => setStartOffset(e.target.value)}
+            aria-label="QA 시작 오프셋"
+            className="h-7 w-16 rounded-md border bg-background px-2 text-right text-[12.5px]"
+          />
+          <span className="text-muted-foreground">영업일</span>
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[12.5px]">
+          <span className="text-muted-foreground">QA 종료 = 운영 배포일</span>
+          <input
+            type="number"
+            max={0}
+            value={endOffset}
+            onChange={(e) => setEndOffset(e.target.value)}
+            aria-label="QA 종료 오프셋"
+            className="h-7 w-16 rounded-md border bg-background px-2 text-right text-[12.5px]"
+          />
+          <span className="text-muted-foreground">영업일</span>
+        </div>
+        {ruleProblem && (
+          <p className="mt-1.5 text-[11.5px] text-red-600 dark:text-red-400">
+            {ruleProblem}
+          </p>
+        )}
+
+        {/*
+          오프셋 두 개는 머릿속에서 날짜로 바꾸기 어렵다. 최근 차수 3개에
+          적용한 결과를 옆에 적는다. "대장이 이김" 을 같이 적는 이유는,
+          규칙을 고쳤는데 어떤 차수는 안 바뀌는 것이 버그로 보이기
+          때문이다.
+        */}
+        {recentCycles.length > 0 && (
+          <ul className="mt-2 space-y-0.5 border-t pt-1.5 text-[11px] text-muted-foreground">
+            {recentCycles.map((c) => {
+              const w = resolveQaWindow({
+                manualStartYmd: c.qaStartYmdManual ?? null,
+                manualEndYmd: c.qaEndYmdManual ?? null,
+                ledgerStartYmd: c.qaStartYmd,
+                ledgerEndYmd: c.qaEndYmd,
+                prodYmd: c.prodYmd,
+                deployYmd: c.deployYmd,
+                rule: draftRule,
+              });
+              const tag =
+                w.source === 'rule'
+                  ? '규칙'
+                  : w.source === 'ledger'
+                    ? '대장이 이김'
+                    : w.source === 'manual'
+                      ? '직접 입력이 이김'
+                      : w.source === 'invalid'
+                        ? '값이 이상함'
+                        : '미정';
+              return (
+                <li key={c.deployYmd}>
+                  {c.deployYmd} 배포 → {w.qaStartYmd ?? '?'} ~{' '}
+                  {w.qaEndYmd ?? '?'} · {tag}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
       {/*
-        `qaThreadChannelId` 와 `planCollectHours` 를 안 보낸다.
+        `planCollectHours` 를 안 보낸다.
 
         API 는 **보낸 것만 바꾼다** (config/route.ts 주석 참고). 안 보내면
-        지금 값이 그대로 남으므로, 여기서 빠졌다고 채널이 비워지지 않는다.
-        수집 시각은 이제 ②("언제 도나")가 보낸다.
+        지금 값이 그대로 남는다. 수집 시각은 이제 ②("언제 도나")가 보낸다.
       */}
       <StageActions
         saving={saving}
+        disabled={!!ruleProblem}
         onCancel={onCancel}
         note={
-          rootChanged || kindsChanged
+          ruleProblem ||
+          (rootChanged || kindsChanged
             ? '배포대장을 바꾸면 이후 차수를 다시 읽어옵니다'
-            : undefined
+            : undefined)
         }
         onSave={() =>
           void onSave({
@@ -2656,6 +2734,7 @@ function CycleEditor({
             devIssueTypeId: dev.id,
             devIssueTypeName: dev.name,
             deployKinds,
+            qaScheduleRule: draftRule,
           })
         }
       />
@@ -3170,12 +3249,32 @@ function RuleDetail({
           options={SHIFT_OPTIONS}
           label="주말 처리"
         />
+        {/*
+          전에는 여기서 `운영 배포일 이후라 울리지 않습니다` 라고 했다.
+          Task 3 이후로 **틀린 말**이다 — 마감선은 대장의 운영 배포일이
+          아니라 **켜져 있는 첫 `prod` 앵커 규칙이 울리는 날**이다. 양수
+          오프셋을 넣은 prod 규칙은 막히는 쪽이 아니라 **선을 정하는 쪽**이고,
+          "기록된 날짜보다 N일 늦게 실제로 나갔다" 를 적는 데 쓰라고 만든
+          패턴이다(`milestoneFrom` 주석과 마감선 테스트가 고정한다). 낡은
+          안내를 그대로 두면 사람이 제 일을 하고 있는 규칙을 지운다.
+
+          그래서 경고가 아니라 설명이고, 색도 경고색을 쓰지 않는다. 선을
+          정하지 못한 채 선 뒤로 밀린 규칙(먼저 나온 prod 규칙이 따로 있는
+          경우)은 바로 아래 상세 칸이 `pastCutoff` 로 정확히 말하므로,
+          여기서는 그 경우를 비워 두 문장이 서로 반대로 말하지 않게 한다.
+        */}
+        {r.anchor === 'prod' && r.offset > 0 && !row.pastCutoff && (
+          <span className="text-muted-foreground">
+            차수 마감선이 이 날로 옮겨집니다 — 이 규칙도, 그때까지의 QA 알림도
+            울립니다
+          </span>
+        )}
       </div>
 
       <div
         className={cn(
           'mt-3 rounded-md border px-3 py-2 text-[12.5px]',
-          row.shadowed
+          row.shadowed || row.pastCutoff
             ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300'
             : 'bg-muted/30'
         )}
@@ -3184,6 +3283,12 @@ function RuleDetail({
           '꺼져 있어 안 울립니다'
         ) : !row.day ? (
           '이번 차수 날짜를 아직 못 읽어 언제 울릴지 계산할 수 없습니다'
+        ) : row.pastCutoff ? (
+          /*
+            날짜는 잡혔는데 차수 마감선 뒤다. 09:10 배치가 여기서 끊으므로
+            화면도 끊어 말한다 — `며칠에 걸린다` 만 적으면 나가는 줄 안다.
+          */
+          `${ymdDow(row.day)} 에 걸리는데, 운영 배포일이 지난 뒤라 이 차수엔 안 나갑니다`
         ) : row.shadowed ? (
           /*
             겹침은 고쳐야 할 문제다. 무엇과 겹쳤는지 이름을 대고, 푸는

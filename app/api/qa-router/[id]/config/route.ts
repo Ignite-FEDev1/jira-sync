@@ -59,13 +59,17 @@ interface Body {
    */
   coAssigneeField?: unknown;
   slackOpsChannelId?: unknown;
-  qaThreadChannelId?: unknown;
   planIssueTypeId?: unknown;
   devIssueTypeId?: unknown;
   confluenceDeployRootId?: unknown;
   planCollectHours?: unknown;
   /** 차수로 잡을 배포 종류(정기·adhoc·hotfix). 기본 ['regular']. */
   deployKinds?: unknown;
+  /**
+   * 대장에 QA 기간이 없을 때 쓸 기본 규칙. null 이면 규칙을 지운다.
+   * `{ startOffset, endOffset, businessDays }` — 운영 배포일 기준 영업일.
+   */
+  qaScheduleRule?: unknown;
   alerts?: unknown;
   alertRules?: unknown;
   tickIntervalSeconds?: unknown;
@@ -78,8 +82,9 @@ interface Body {
     쓰이므로 여기서 update 에 넣지 않기만 하면 기존 값이 유지된다.
     받아 주면 화면 밖 경로로 다시 들어와 아무도 모르게 바뀔 수 있다.
 
-    qaThreadTitlePattern 은 받지 않는다 — 컬럼은 있지만 읽는 코드가 없다.
-    저장되는데 아무 일도 안 일어나는 값은 거짓말이다.
+    qa_thread_* 두 컬럼도 받지 않는다. QA 스레드에서 완료를 읽는 경로를
+    걷어내면서 읽는 코드가 사라졌다 — 저장되는데 아무 일도 안 일어나는
+    값은 거짓말이다.
 
     coAssigneeField 는 **이제 받는다.** judge/outcome/tick 이 전부 이 값을
     읽도록 바꿨다 (전에는 모듈 상수였다). 값은 사람이 고르는 게 아니라
@@ -129,12 +134,12 @@ export type ConfigField =
   | 'coAssigneeField'
   | 'slackChannelId'
   | 'slackOpsChannelId'
-  | 'qaThreadChannelId'
   | 'planIssueTypeId'
   | 'devIssueTypeId'
   | 'confluenceDeployRootId'
   | 'planCollectHours'
   | 'deployKinds'
+  | 'qaScheduleRule'
   | 'alerts'
   | 'alertRules'
   | 'tickIntervalSeconds'
@@ -339,10 +344,59 @@ function checkPipeline(
     row.deploy_kinds = kinds;
   }
 
-  // ── 채널 두 개. 비우면 폴백(알림 채널)을 쓰라는 뜻이라 null 로 저장한다. ──
+  /*
+    대장에 QA 기간이 없을 때 쓰는 기본 규칙. null 은 "규칙을 지운다" 다 —
+    화면이 두 칸을 다 비우면 이 값을 보낸다.
+
+    `resolveQaWindow`(qa-window.ts) 와 같은 조건으로 막는다 - 둘 다 0 이하,
+    시작이 종료보다 앞서야 한다. 여기서 안 막으면 저장은 되는데 그 규칙은
+    `usableRule` 이 조용히 버려서 "저장했는데 안 먹힌다" 가 된다.
+  */
+  if (b.qaScheduleRule !== undefined) {
+    const v = b.qaScheduleRule;
+    if (v === null) {
+      row.qa_schedule_rule = null;
+    } else if (
+      typeof v === 'object' &&
+      !Array.isArray(v) &&
+      v !== null &&
+      'startOffset' in v &&
+      'endOffset' in v
+    ) {
+      const startOffset = Number((v as Record<string, unknown>).startOffset);
+      const endOffset = Number((v as Record<string, unknown>).endOffset);
+      const businessDaysRaw = (v as Record<string, unknown>).businessDays;
+      if (
+        !Number.isInteger(startOffset) ||
+        !Number.isInteger(endOffset) ||
+        startOffset > 0 ||
+        endOffset > 0 ||
+        startOffset >= endOffset
+      ) {
+        return {
+          ok: false,
+          error:
+            'QA 기본 규칙이 올바르지 않습니다. 두 값 모두 0 이하여야 하고, 시작이 종료보다 앞서야 합니다.',
+          field: 'qaScheduleRule',
+        };
+      }
+      row.qa_schedule_rule = {
+        startOffset,
+        endOffset,
+        businessDays: businessDaysRaw !== false,
+      };
+    } else {
+      return {
+        ok: false,
+        error: 'QA 기본 규칙 형식이 잘못됐습니다.',
+        field: 'qaScheduleRule',
+      };
+    }
+  }
+
+  // ── 운영 채널. 비우면 폴백(알림 채널)을 쓰라는 뜻이라 null 로 저장한다. ──
   for (const [key, column, label] of [
     ['slackOpsChannelId', 'slack_ops_channel_id', '운영 채널'],
-    ['qaThreadChannelId', 'qa_thread_channel_id', 'QA 스레드 채널'],
   ] as const) {
     if (b[key] === undefined) continue;
     const v = typeof b[key] === 'string' ? (b[key] as string).trim() : '';

@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { Badge, StatusLed } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
 import { db } from '@/lib/db';
 import { toConfig, toState } from '@/lib/services/qa-router/rows';
 import {
@@ -15,11 +16,14 @@ import {
   kstYmdOf,
   type Health,
 } from '@/lib/services/qa-router/status';
+import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   QaRouterConfig,
   QaRouterState,
 } from '@/lib/services/qa-router/types';
 import { NewRoutingDialog } from './new-routing-dialog';
+import { planToggleEnabled } from './toggle-enabled-plan';
+import { writeEnabled } from './toggle-enabled';
 
 /** 이 화면은 브라우저에서 anon 키로 직접 읽는다 (settings/projects 와 같은 패턴). */
 interface Row {
@@ -28,6 +32,8 @@ interface Row {
   health: Health;
   todayCount: number;
   idleDays: number | null;
+  /** 앞으로 배포할 차수 중 QA 기간이 미정이거나 이상한 것의 수. */
+  unsetCount: number;
 }
 
 const TONE_ORDER = { bad: 0, warn: 1, ok: 2, off: 3 } as const;
@@ -52,7 +58,7 @@ export default function QaRouterListPage() {
     setLoading(true);
     const now = new Date();
     const todayYmd = kstYmdOf(now);
-    const [cfgRes, stRes, evRes, cycRes] = await Promise.all([
+    const [cfgRes, stRes, evRes, cycRes, scheduleCycRes] = await Promise.all([
       db.from('qa_router_configs').select('*').order('name'),
       db.from('qa_router_state').select('*'),
       // 오늘 판정 건수 + 마지막 판정 시각을 함께 쓰려고 최근 것만 읽는다.
@@ -71,6 +77,17 @@ export default function QaRouterListPage() {
         .select('config_id, qa_start_ymd')
         .gte('qa_start_ymd', todayYmd)
         .order('qa_start_ymd', { ascending: true }),
+      /*
+        "일정 미정" 배지용. 위 쿼리(`.gte('qa_start_ymd', todayYmd)`)는
+        재사용할 수 없다 — 그 필터가 **`qa_start_ymd` 가 null 인 행을
+        통째로 뺀다**, 그게 바로 이 배지가 세려는 차수다. 그래서 날짜
+        필터 없이 새로 읽고, `resolveQaWindow` 로 직접 판정한다.
+      */
+      db
+        .from('qa_router_cycles')
+        .select(
+          'config_id, deploy_ymd, prod_ymd, qa_start_ymd, qa_end_ymd, qa_start_ymd_manual, qa_end_ymd_manual'
+        ),
     ]);
 
     if (cfgRes.error) toast.error(`설정 조회 실패: ${cfgRes.error.message}`);
@@ -82,6 +99,23 @@ export default function QaRouterListPage() {
         nextQaStart.set(c.config_id as string, c.qa_start_ymd as string);
       }
     }
+
+    /*
+      배지용 차수. 지난 차수까지 세면 배지가 영영 안 꺼지므로, 운영
+      배포일이 오늘보다 이른 것은 여기서 먼저 뺀다.
+
+      운영 배포일은 `prodDayOf` - 제목과 본문 중 **늦은 쪽**이다. `본문이
+      있으면 본문` 으로 고르면 본문이 제목보다 이른 차수가 일찍 빠진다
+      (실측: `release_20260914` 는 제목 09-14 · 본문 09-10 이라 나흘 먼저
+      배지에서 사라졌다). 마감선·알림이 쓰는 정의와 같아야 한다.
+    */
+    const scheduleCycles = (scheduleCycRes.data ?? []).filter(
+      (r) =>
+        prodDayOf({
+          deployYmd: r.deploy_ymd as string,
+          prodYmd: (r.prod_ymd as string | null) ?? null,
+        }) >= todayYmd
+    );
 
     const stateByConfig = new Map(
       (stRes.data ?? []).map((s) => [s.config_id as string, toState(s)])
@@ -110,6 +144,22 @@ export default function QaRouterListPage() {
           )
         : null;
 
+      // 이 대상의 차수 중 QA 기간이 미정(none)이거나 앞뒤가 안 맞는(invalid) 것.
+      const unsetCount = scheduleCycles
+        .filter((r) => r.config_id === config.id)
+        .filter((r) => {
+          const w = resolveQaWindow({
+            manualStartYmd: r.qa_start_ymd_manual ?? null,
+            manualEndYmd: r.qa_end_ymd_manual ?? null,
+            ledgerStartYmd: r.qa_start_ymd ?? null,
+            ledgerEndYmd: r.qa_end_ymd ?? null,
+            prodYmd: r.prod_ymd ?? null,
+            deployYmd: r.deploy_ymd,
+            rule: config.qaScheduleRule,
+          });
+          return w.source === 'none' || w.source === 'invalid';
+        }).length;
+
       return {
         config,
         state,
@@ -122,6 +172,7 @@ export default function QaRouterListPage() {
         }),
         todayCount,
         idleDays,
+        unsetCount,
       };
     });
 
@@ -258,12 +309,13 @@ export default function QaRouterListPage() {
                     마지막 확인
                   </th>
                   <th className="px-3 py-2 text-right font-medium">오늘</th>
+                  <th className="px-3 py-2 text-right font-medium">사용</th>
                   <th className="w-8" />
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <ConfigRow key={r.config.id} row={r} />
+                  <ConfigRow key={r.config.id} row={r} onToggled={load} />
                 ))}
               </tbody>
             </table>
@@ -274,8 +326,51 @@ export default function QaRouterListPage() {
   );
 }
 
-function ConfigRow({ row }: { row: Row }) {
+function ConfigRow({
+  row,
+  onToggled,
+}: {
+  row: Row;
+  /** 켜고 끄기가 성공한 뒤 목록을 다시 읽는다. */
+  onToggled: () => void;
+}) {
   const { config: c, state, health } = row;
+  const [toggling, setToggling] = useState(false);
+
+  /*
+    켜고 끄기. 무엇을 확인·차단할지(`planToggleEnabled`)와 실제로 쓰는 법
+    (`writeEnabled`)은 설정 화면(app/admin/qa-router/[id]/settings/page.tsx)과
+    `./toggle-enabled-plan`·`./toggle-enabled` 두 곳을 같이 쓴다 — 예전엔 이 로직이 두 화면에
+    복붙돼 있었다.
+
+    실패하면 `c.enabled` 를 로컬로 미리 뒤집지 않으므로(스위치는 `row.config.enabled`
+    를 그대로 보여준다) 행은 실패 전 상태 그대로 남는다 — 성공했을 때만
+    `onToggled` 로 목록을 다시 읽어 실제 값으로 맞춘다.
+  */
+  const toggleEnabled = async (next: boolean) => {
+    const plan = planToggleEnabled(c, next);
+    if (!plan.allowed) {
+      toast.error(plan.blockedReason!.title, {
+        description: plan.blockedReason!.description,
+      });
+      return;
+    }
+    if (!window.confirm(plan.confirmMessage)) return;
+    setToggling(true);
+    try {
+      const errorMessage = await writeEnabled(c.id, next);
+      if (errorMessage) {
+        // DB 제약(채널 없이 켜기 등)에 걸리면 이 문구가 곧 그 이유다.
+        toast.error(`변경 실패: ${errorMessage}`);
+        return;
+      }
+      toast.success(next ? '켰습니다' : '껐습니다');
+      onToggled();
+    } finally {
+      setToggling(false);
+    }
+  };
+
   // 색만으로 구분하지 않는다 — 행 배경 + LED + 텍스트를 겹친다.
   const rowTint =
     health.tone === 'bad'
@@ -309,6 +404,16 @@ function ConfigRow({ row }: { row: Row }) {
           <span className="block text-xs text-muted-foreground">
             {health.detail}
           </span>
+        )}
+        {/*
+          "일정 미정" 은 health 와 다른 축이다 — health 는 봇이 살아서
+          도는지를 보고, 이건 **앞으로 올 차수의 QA 기간을 아직 아무도
+          안 넣었거나 앞뒤가 안 맞는지**를 본다. 판정이 멎는 건 아니라서
+          빨강이 아니라 노랑이다. 0개면 줄에서 아예 사라진다 — 배지가
+          영원히 켜져 있으면 곧 무시된다.
+        */}
+        {row.unsetCount > 0 && (
+          <Badge variant="warn">일정 미정 {row.unsetCount}개</Badge>
         )}
       </td>
       {/*
@@ -349,10 +454,39 @@ function ConfigRow({ row }: { row: Row }) {
         )}
       </td>
       {/*
-        스위치를 뺐다. 훑다가 스쳐 누르면 알림이 멈추는데 되돌려도 그 사이
-        티켓은 소급되지 않는다 — 그런 토글이 목록 행에 있을 자리가 아니다.
-        "알림만" 배지도 뺐다: 재배정을 없앤 뒤로 모든 행에 늘 붙어 무정보였다.
+        한때 여기서 스위치를 뺐었다 — 훑다가 스쳐 누르면 알림이 멈추는데
+        되돌려도 그 사이 티켓은 소급되지 않는다는 이유였다. "설정 화면을
+        열어야만 끌 수 있다"의 값이, 배지가 거짓말을 하던 시절에는 그나마
+        안전판이었다.
 
+        그런데 그 배지 자체가 문제였다 — 꺼놔도 필터가 가리키는 차수는
+        계속 초록 "알림 중" 이었다(cycleStage 참고). 그러니 목록에서 끄고
+        싶어도 그 사실을 확인할 방법도, 확인한 뒤 바로 끌 방법도 없었다.
+        배지를 고친 지금은 "스쳐 눌러도 괜찮은가" 만 남는데, 아래 스위치는
+        설정 화면과 똑같이 켜고 끄기 전에 확인을 받는다 — 그 확인 한 번이
+        스친 클릭을 막는다. "알림만" 배지는 그대로 뺀 채다: 재배정을 없앤
+        뒤로 모든 행에 늘 붙어 무정보였다.
+      */}
+      <td className="px-3 py-2.5 text-right">
+        {/*
+          relative: 이름 열의 스트레치드 링크(after:absolute after:inset-0,
+          tr 전체를 덮는다)보다 DOM 순서상 뒤에 있어 위에 그려진다 — 그래야
+          스위치를 눌렀을 때 행 이동이 아니라 스위치가 클릭을 받는다.
+          stopPropagation 은 혹시 모를 상위 클릭 핸들러에 대한 안전판이다.
+        */}
+        <span
+          className="relative inline-flex"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Switch
+            checked={c.enabled}
+            disabled={toggling}
+            onCheckedChange={(v) => void toggleEnabled(v)}
+            aria-label={`${c.name} 사용 여부`}
+          />
+        </span>
+      </td>
+      {/*
         아이콘은 ChevronRight 다. 전에 쓰던 ExternalLink 는 "이 앱을 떠난다"는
         뜻이라 Jira·Confluence 링크와 같은 기호가 두 뜻을 갖고 있었다.
         이 화살표는 표시일 뿐이고 누르는 것은 행 전체다.

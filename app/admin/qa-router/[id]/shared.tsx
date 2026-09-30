@@ -257,8 +257,8 @@ export const BAR_TONE = {
  * 파이 조각 색. 상태 배지(components/ui/badge)의 세 값을 그대로 쓴다.
  *
  * 배지가 바탕 50 · 테두리 200 · 글자 700 세 단으로 되어 있는데, 파이도
- * 같은 짝을 쓴다 — 표의 "QA 스레드" 칸에 뜬 `완료` 배지와 파이의 `완료`
- * 조각이 같은 색이어야 둘이 같은 것을 말한다는 걸 색으로 안다.
+ * 같은 짝을 쓴다 — 표의 Jira 칸에 뜬 `완료` 배지와 파이의 `완료` 조각이
+ * 같은 색이어야 둘이 같은 것을 말한다는 걸 색으로 안다.
  *
  * 클래스 이름을 문자열로 조립하지 않고 손으로 적는다. Tailwind 는 소스에
  * 적힌 문자열만 CSS 로 뽑으므로 런타임 조립은 색이 사라진다.
@@ -1223,15 +1223,15 @@ export function toCycle(r: Record<string, never>): DeployCycle {
     cycleLabel: r.cycle_label ?? null,
     qaStartYmd: r.qa_start_ymd ?? null,
     qaEndYmd: r.qa_end_ymd ?? null,
+    qaStartYmdManual: r.qa_start_ymd_manual ?? null,
+    qaEndYmdManual: r.qa_end_ymd_manual ?? null,
+    scheduleWarnedOn: r.schedule_warned_on ?? null,
     prodYmd: r.prod_ymd ?? null,
     deployPageId: r.deploy_page_id ?? null,
     deployPageTitle: r.deploy_page_title ?? null,
     jiraVersionExists: Boolean(r.jira_version_exists),
     collectedAt: r.collected_at,
     planProgress: r.plan_progress ?? null,
-    qaThreadTs: r.qa_thread_ts ?? null,
-    threadDeployYmd: r.thread_deploy_ymd ?? null,
-    threadQaEndYmd: r.thread_qa_end_ymd ?? null,
     qaLabel: r.qa_label ?? null,
     planCollectedAt: r.plan_collected_at ?? null,
     // null 이면 설정값(config.alertRules)을 쓴다. effectiveAlertRules 가 정한다.

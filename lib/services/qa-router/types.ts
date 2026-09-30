@@ -17,7 +17,11 @@ export type ReassignMode = 'off' | 'self_only' | 'all_members';
  */
 export type DeployKind = 'regular' | 'adhoc' | 'hotfix';
 
-export const DEPLOY_KINDS: readonly DeployKind[] = ['regular', 'adhoc', 'hotfix'];
+export const DEPLOY_KINDS: readonly DeployKind[] = [
+  'regular',
+  'adhoc',
+  'hotfix',
+];
 
 export interface QuietHours {
   startHour: number;
@@ -34,11 +38,28 @@ export interface QuietHours {
  */
 export type JudgeTier = 'assigned' | 'epic' | 'siblings' | 'ref_owner';
 
+/**
+ * 기본 단계 순서. **`ref_owner` 는 뺐다.**
+ *
+ * 백테스트(2026-09-22, 표본 219건): `ref_owner` 는 29번 답해서 **3번 맞혔다**
+ * (10%). 그중 10건은 트리아지 본인을 지목했고 — 이미 트리아지가 쥔 티켓에
+ * "트리아지 담당" 이라고 답하는 메아리였다 — 나머지도 대부분 엉뚱한 팀원을
+ * 불렀다.
+ *
+ * 왜 나쁜지는 코드 주석에 이미 있었다. "레이블이 가리킨 기획티켓의 담당자는
+ * 기획자이고 실제 개발은 다른 사람이 했다". 그래서 에픽 자식을 먼저 보도록
+ * 고쳐졌는데, 그 경로가 통하면 **`epic` 이 이미 답한다**(순서가 앞). 남은
+ * 것은 "참조 티켓의 담당자" 하나뿐이고 그게 틀린 전제다.
+ *
+ * 원본 로컬 봇(`fe1-slackbot`)에도 이 단계가 **없었다**. 측정과 원래 설계가
+ * 같은 말을 한다.
+ *
+ * 타입에는 남겨 둔다 — 설정으로 켤 수 있고, 백테스트가 다시 잴 수 있어야 한다.
+ */
 export const JUDGE_TIERS: readonly JudgeTier[] = [
   'assigned',
   'epic',
   'siblings',
-  'ref_owner',
 ];
 
 /*
@@ -224,7 +245,6 @@ export const TEMPLATE_VARS = [
   { name: 'QA종료일', desc: '09-09(수)' },
   { name: '운영배포일', desc: '09-14(월)' },
   { name: '상세링크', desc: 'QA 라우터 상세 페이지' },
-  { name: '스레드링크', desc: 'QA 팀 정기배포 스레드' },
   { name: '배포대장링크', desc: 'Confluence 배포대장' },
   { name: 'fixVersion', desc: 'release_20260914' },
   { name: '기획건수', desc: '7' },
@@ -238,7 +258,7 @@ export const TEMPLATE_VAR_NAMES: readonly string[] = TEMPLATE_VARS.map(
 /**
  * 템플릿 한 줄의 규칙: **값이 빈 변수가 있으면 줄째로 빠진다.**
  *
- * `• QA 스레드 : {스레드링크}` 에서 링크가 없으면 `• QA 스레드 : ` 만 남는데,
+ * `• 배포대장 : {배포대장링크}` 에서 링크가 없으면 `• 배포대장 : ` 만 남는데,
  * 그 꼴로 채널에 나가면 안 된다. SQL 의 qa_router_render() 가 같은 규칙으로
  * 돈다 — 화면이 미리 보여줄 때도 같아야 한다.
  */
@@ -250,9 +270,7 @@ export function renderTemplate(
   for (const line of template.split('\n')) {
     const used = [...line.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1]);
     if (used.some((k) => !vars[k])) continue;
-    out.push(
-      line.replace(/\{([^{}]+)\}/g, (_, k: string) => vars[k] ?? '')
-    );
+    out.push(line.replace(/\{([^{}]+)\}/g, (_, k: string) => vars[k] ?? ''));
   }
   return out.join('\n');
 }
@@ -295,7 +313,6 @@ export const DEFAULT_TEMPLATE = [
   '• 운영 배포일 : {운영배포일}',
   '*참고*',
   '• QA 라우터 상세 : {상세링크}',
-  '• QA 스레드 : {스레드링크}',
   '• 배포대장 : {배포대장링크}',
   '• fixVersion : `{fixVersion}`',
 ].join('\n');
@@ -416,6 +433,14 @@ export interface QaRouterConfig {
   confluenceDeployRootId: string | null;
   /** null 이면 버전 목록에서 자동 감지 */
   fixVersionPattern: string | null;
+  /**
+   * 대장에 QA 기간이 없을 때 쓸 기본 규칙. null 이면 규칙이 없다.
+   *
+   * 이 라우터의 모든 차수에 적용되고, 차수별로는 `qaStartYmdManual` 로
+   * 덮어쓴다. 알림 규칙이 `alertRules` + `alertRulesOverride` 로 이미
+   * 그렇게 돈다 - 같은 모양으로 맞춘 것이다.
+   */
+  qaScheduleRule: QaScheduleRule | null;
 
   slackChannelId: string;
   slackFallbackChannelId: string | null;
@@ -426,22 +451,6 @@ export interface QaRouterConfig {
    * 컬럼은 남겨 두었으니 나중에 분리가 필요해지면 UI 만 붙이면 된다.
    */
   slackOpsChannelId: string | null;
-
-  /**
-   * QA 팀이 정기배포 QA 스레드를 여는 채널. **우리 알림 채널이 아니다.**
-   * 프로젝트가 바뀌면 반드시 같이 바뀌는 값이라 설정으로 뺐다.
-   */
-  qaThreadChannelId: string | null;
-  /**
-   * 스레드 제목 규칙. '%s' 자리에 'M/D(요일)' 이 들어간다.
-   *
-   * **아직 아무도 안 읽는다.** 제목을 찾는 쪽(qa-thread.ts 의 parseThreadTitle)은
-   * 정규식으로 파싱하는데, 그 정규식을 이 문자열에서 만들어 내려면 패턴 언어를
-   * 하나 더 들이는 셈이 된다. 컬럼은 SQL 쪽 문구가 쓰려고 만들어 뒀고,
-   * **설정 화면에는 올리지 않는다** — 눌러도 아무 일도 안 하는 손잡이는
-   * 손잡이가 없는 것보다 나쁘다.
-   */
-  qaThreadTitlePattern: string;
 
   quietHours: QuietHours;
   /**
@@ -500,8 +509,6 @@ export type QaRouterConfigInput = Pick<
       | 'fixVersionPattern'
       | 'slackFallbackChannelId'
       | 'slackOpsChannelId'
-      | 'qaThreadChannelId'
-      | 'qaThreadTitlePattern'
       | 'quietHours'
       | 'tickIntervalSeconds'
       | 'judgeTiers'
@@ -612,6 +619,17 @@ export interface QaRouterState {
   lockedBy: string | null;
   staleAlertedAt: string | null;
   /**
+   * 연속 실패 알림을 올린 Slack 글의 ts.
+   *
+   * 복구 알림을 **그 글의 댓글로** 달기 위한 것이다. 7분짜리 일시 장애에
+   * 최상위 글이 둘 생기면, 채널을 나중에 훑는 사람은 둘을 짝지어 읽어야
+   * 비로소 "이미 끝난 일" 임을 안다.
+   *
+   * 복구를 보낸 뒤 비운다. 비어 있으면 최상위로 보낸다 - 직전 실패가 이
+   * 코드 이전이거나 실패 알림 자체가 실패한 경우다.
+   */
+  failAlertTs: string | null;
+  /**
    * 부수 작업의 마지막 시도 결과. `{키: {at, error}}`.
    *
    * 알림을 막지 않는 실패(차수 목록·기획티켓 진행·판정 결과 확인)는 던지지
@@ -640,11 +658,49 @@ export interface SideEffectResult {
 export interface DeployCycle {
   /** 배포대장 페이지 제목의 날짜. 차수를 식별한다. */
   deployYmd: string;
-  /** release_YYYYMMDD. Jira 에 아직 없어도 채운다. */
+  /** 이 차수의 Jira 버전 이름. Jira 에 아직 없어도 채운다. */
   fixVersion: string;
+  /**
+   * 그 이름을 어디서 얻었나.
+   *
+   *   ledgerJql  배포대장 본문의 JQL 에 적혀 있던 것. **확정값이다.**
+   *   title      대장 제목에서 조립한 것. **추측이다** — 제목이 배포 종류를
+   *              말하지 않으면 정기로 떨어진다. 실측 GW 09-17 이 그 경우다.
+   *
+   * 화면이 둘을 갈라 보여줘야 "왜 빈 차수인가" 를 사람이 알 수 있다.
+   * 컬럼이 아직 없는 DB 에 새 코드가 붙는 창이 있어 선택으로 둔다.
+   */
+  fixVersionSource?: 'ledgerJql' | 'title';
+  /**
+   * 이 차수의 **개발 프로젝트**. 배포대장 본문 JQL 에서 읽는다.
+   *
+   * QA 버그가 쌓이는 프로젝트와 다를 수 있다. 실측 GW 는 버그가
+   * ICTQMSCHE, 개발이 AUTOWAY 다. 진행률은 개발 쪽을 봐야 하는데
+   * 전에는 필터(=QA 큐)의 프로젝트를 써서 늘 0건이었다.
+   *
+   * null 이면 필터의 프로젝트로 떨어진다 — KQ 처럼 둘이 같으면 그게 맞다.
+   */
+  devProjectKey?: string | null;
   cycleLabel: string | null;
   qaStartYmd: string | null;
   qaEndYmd: string | null;
+  /**
+   * 사람이 이 차수에 직접 넣은 QA 기간. **대장 파싱값과 다른 칸이다.**
+   *
+   * 같은 칸에 넣으면 다음 배치가 지운다 - `collectCycles` 는 매번 대장을
+   * 다시 읽어 `qaStartYmd` 를 덮어쓴다. 사람이 넣은 값이 하루 만에
+   * 사라지면 그 기능은 없는 것과 같다. `threadQaEndYmd` 가 같은 이유로
+   * 이미 따로 있다.
+   */
+  qaStartYmdManual?: string | null;
+  qaEndYmdManual?: string | null;
+  /**
+   * 이 차수에 대해 "일정 미정" 경고를 마지막으로 보낸 날.
+   *
+   * `collectedAt` 은 못 쓴다. 수집할 때마다 덮어써서 "마지막으로 본 날" 이지
+   * "처음 본 날" 이 아니다.
+   */
+  scheduleWarnedOn?: string | null;
   /** 배포대장이 말하는 운영 배포일. 제목 날짜와 다를 수 있다. */
   prodYmd: string | null;
   deployPageId: string | null;
@@ -659,14 +715,6 @@ export interface DeployCycle {
    * 아직 수집하지 않았으면 null 이다 — 0건과 구분해야 한다.
    */
   planProgress?: PlanProgress | null;
-  /** QA 스레드 부모 ts. 채널의 "[M/D(요일) 정기배포 QA]" 스레드. */
-  qaThreadTs?: string | null;
-  /**
-   * QA 팀 Slack 스레드 제목에서 읽은 날짜들. 배포일 출처 중 1순위다.
-   * 스레드를 아직 못 읽어(channels:history 권한) 지금은 늘 null 이다.
-   */
-  threadDeployYmd?: string | null;
-  threadQaEndYmd?: string | null;
   /** 그 차수 QA 배치 티켓 키 (예: KQ-18292). */
   qaLabel?: string | null;
   planCollectedAt?: string | null;
@@ -895,4 +943,49 @@ export interface FilterGap {
    *   false 기능 일부만 빠진다 (차수가 없으면 차수 현황만 빠진다)
    */
   blocking: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────
+// QA 기간
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 대장에 QA 기간이 없을 때 쓰는 라우터 기본 규칙.
+ *
+ * 기준점은 **운영 배포일**이다. 배포일은 대장 제목에서 거의 항상 잡히므로
+ * 배포가 불규칙해도 규칙이 계산된다.
+ *
+ * 둘 다 0 이하여야 한다. QA 는 배포 전에 끝난다. 한때 `endOffset` 을 양수로
+ * 열어 둘까 했는데, 그 근거였던 CPO 10-07 차수가 대장의 오류였다
+ * (배포일만 10/12 → 10/7 로 당기고 QA 줄을 안 고침).
+ */
+export interface QaScheduleRule {
+  /** 운영 배포일 기준. 음수 또는 0. */
+  startOffset: number;
+  /** 운영 배포일 기준. 음수 또는 0. `startOffset` 보다 커야 한다. */
+  endOffset: number;
+  /** 주말을 세지 않는다. */
+  businessDays: boolean;
+}
+
+/**
+ * 이 QA 기간이 어디서 왔나.
+ *
+ *   manual   차수에 사람이 직접 넣었다 (1순위)
+ *   ledger   배포대장 본문에서 읽었다 (2순위)
+ *   rule     라우터 기본 규칙으로 계산했다 (3순위)
+ *   none     셋 다 비었다. **날짜를 지어내지 않는다**
+ *   invalid  값은 있는데 말이 안 된다 (QA 종료가 운영 배포일보다 뒤 등)
+ *
+ * `none` 과 `invalid` 를 가르는 이유는 사람이 할 일이 다르기 때문이다.
+ * `none` 은 **없는 값을 채우는 것**이고 `invalid` 는 **있는 값을 고치는 것**이다.
+ */
+export type QaWindowSource = 'manual' | 'ledger' | 'rule' | 'none' | 'invalid';
+
+export interface QaWindow {
+  qaStartYmd: string | null;
+  qaEndYmd: string | null;
+  source: QaWindowSource;
+  /** `invalid` 일 때 무엇이 이상한가. 화면과 알림 문구가 그대로 쓴다. */
+  why: string | null;
 }

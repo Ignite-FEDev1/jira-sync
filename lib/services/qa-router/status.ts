@@ -6,6 +6,7 @@
  */
 
 import { buildFixVersion, type FixVersionRule } from './derive';
+import { prodDayOf } from './qa-window';
 import { DEPLOY_KINDS } from './types';
 import type {
   AlertRule,
@@ -308,13 +309,45 @@ export function describeScope(derived: DerivedContext | null): string | null {
  *   ② Jira 버전이 생기고 필터가 그걸 가리킨다   → 보는 중
  * 사이에 "버전은 생겼는데 필터가 아직 이전 차수" 구간이 있고, 그때 사람이
  * 필터를 바꿔야 넘어간다. 그 구간을 전환 대기로 드러낸다.
+ *
+ * ── `enabled` 를 세 번째가 아니라 네 번째 인자로 받는 이유 ──
+ *
+ * 실측(2026-09-30): 대상 하나를 설정 화면에서 껐는데, 차수 목록은 09-30
+ * 차수에 여전히 초록 "알림 중" 을 띄우고 있었다. "알림 안 나가는 거
+ * 맞지?" 라는 질문에 SQL 함수 넷·TS 진입점·수동 실행 라우트를 다 확인해
+ * "맞다, 아무것도 안 나간다" 였는데, 화면은 반대로 말하고 있었다.
+ *
+ * 위 `deployed` 검사(2026-09-17 실측, 배포일이 지나면 "알림 중" 을 끊는
+ * 것)와 **같은 병**이다. "이 라벨이 지금 뭘 약속하는가" 를 안 보고
+ * 필터 포인터 하나만 보고 라벨을 정해서 생긴다. 그때는 원인이 "배포일이
+ * 지났는데 필터를 안 옮김" 이었고, 이번은 원인이 "봇 자체가 꺼짐" 이다.
+ * 병은 같아도 원인이 다르므로 이 함수 안에서 따로 검사해야 한다 — 호출부
+ * 셋(목록·상세 정렬·상세 배지·차수 상세) 각각이 매번 `config.enabled` 를
+ * 기억해서 라벨을 덮어써야 한다면, 하나라도 빠뜨리는 순간 같은 거짓말이
+ * 되돌아온다. 그래서 계산 자체를 이 함수 안으로 넣는다 — 목록과 상세가
+ * 같은 규칙을 써야 한다는 이 파일 맨 위 원칙 그대로다.
+ *
+ * `stage` 를 `'watching'` 그대로 두고 `label`/`tone` 만 바꾸는 방법도
+ * 있었다. 그러지 않는다 — 이 필드 이름 자체가 `CycleStage` 고, 값
+ * `'watching'` 은 "지금 이 차수를 보고 있다(=알릴 수 있다)" 는 뜻이다.
+ * 꺼진 봇은 그 뜻을 채우지 못하므로 값 자체를 `'disabled'` 로 갈라
+ * `.stage === 'watching'` 을 보는 호출부가 거짓을 물려받지 않게 한다.
+ * 대신 "이게 필터가 가리키는 차수다" 라는 구조 정보(정렬 1순위, 행
+ * 강조)까지 잃지 않도록 호출부에서 `'watching' || 'disabled'` 로 같이
+ * 묶는다 — 아래 세 호출부의 주석 참고.
  */
-export type CycleStage = 'watching' | 'pending_switch' | 'planned' | 'past';
+export type CycleStage =
+  | 'watching'
+  | 'pending_switch'
+  | 'planned'
+  | 'past'
+  | 'disabled';
 
 export function cycleStage(
   cycle: DeployCycle,
   activeFixVersion: string | null,
-  todayYmd: string
+  todayYmd: string,
+  enabled: boolean
 ): { stage: CycleStage; label: string; tone: HealthTone } {
   /*
     ── 배포가 끝났으면 무엇보다 먼저 끝난 것이다 ──
@@ -329,11 +362,10 @@ export function cycleStage(
     며칠 동안은 봇이 할 일이 남아 있다 (운영 배포 알림). 그 구간은 여전히
     "알림 중" 이 맞다.
 
-    배포일은 출처가 여럿이라(스레드 > 배포대장 본문 > 페이지 제목) 가장
-    늦은 것을 쓴다. 일정이 밀렸는데 옛 날짜로 끝났다고 접으면, 정작 알려야
-    할 배포 당일에 조용해진다.
+    배포일은 배포대장 제목과 본문 중 **늦은 것**을 쓴다. 일정이 밀렸는데
+    옛 날짜로 끝났다고 접으면, 정작 알려야 할 배포 당일에 조용해진다.
   */
-  const deployed = [cycle.threadDeployYmd, cycle.prodYmd, cycle.deployYmd]
+  const deployed = [cycle.prodYmd, cycle.deployYmd]
     .filter((d): d is string => Boolean(d))
     .sort()
     .pop();
@@ -354,6 +386,14 @@ export function cycleStage(
   }
 
   if (cycle.fixVersion === activeFixVersion) {
+    /*
+      필터는 이 차수를 가리키지만, 대상 자체가 꺼져 있으면 아무도 못 받는다.
+      실측(2026-09-30): 설정에서 껐는데 이 줄만 초록 "알림 중" 이었다 — 위
+      `deployed` 분기와 같은 병, 다른 원인이라 여기서도 먼저 끊는다.
+    */
+    if (!enabled) {
+      return { stage: 'disabled', label: '라우팅 꺼짐', tone: 'off' };
+    }
     // "보는 중"은 주체가 모호하고 옆 라벨(예정·전환 대기)과 성격이 어긋났다.
     // 실제 동작은 이 차수 티켓을 찾아 담당자에게 알리는 것이다.
     return { stage: 'watching', label: '알림 중', tone: 'ok' };
@@ -486,13 +526,11 @@ export function staleFilterCycle(
 
 /** 날짜를 말하는 출처. 신뢰 순서대로다. */
 export type ScheduleSource =
-  | 'thread'
   | 'ledgerTitle'
   | 'fixVersion'
   | 'ledgerBody';
 
 export const SOURCE_LABEL: Record<ScheduleSource, string> = {
-  thread: 'QA 스레드',
   ledgerTitle: '배포대장 제목',
   fixVersion: 'Jira 릴리스',
   ledgerBody: '배포대장 본문',
@@ -503,19 +541,18 @@ export interface ResolvedYmd {
   /** 이 값을 준 출처 */
   source: ScheduleSource | null;
   /**
-   * 1순위(QA 스레드)를 못 읽어 아래 순위로 정한 값인가.
-   * 화면에 "추정"이라고 적어야 하는 경우다.
+   * 더 믿을 출처를 못 읽어 아래 순위로 정한 값인가.
+   *
+   * **지금은 항상 false 다.** 배포대장 하나만 보기 때문에 그걸 읽었으면
+   * 확정이고, 못 읽었으면 값 자체가 없다. 전에는 QA 스레드가 1순위였고
+   * 스레드가 없는 대상(GW)은 "추정" 배지가 영구히 붙어 있었다.
+   *
+   * 자리를 남겨 둔다 — 출처가 다시 둘 이상이 되면 쓸 곳이 여기다.
    */
   estimated: boolean;
   /** 값이 다른 나머지 출처. 배포대장이 어긋나 있다는 신호라 숨기지 않는다. */
   others: { source: ScheduleSource; ymd: string }[];
-  /**
-   * 말해야 하는데 아직 값이 없는 출처.
-   *
-   * "추정"이라고만 적으면 무엇을 못 읽어서 추정인지 알 수 없다. QA 종료는
-   * 규칙상 **배포대장 종료 AND 스레드 종료 공유** 둘 다 만족해야 하는데,
-   * 한쪽만 보고 정한 값이라는 사실이 화면에 있어야 한다.
-   */
+  /** 말해야 하는데 아직 값이 없는 출처. `estimated` 와 같은 이유로 지금은 늘 빈 배열이다. */
   pending: ScheduleSource[];
 }
 
@@ -545,49 +582,73 @@ export function fixVersionYmd(fixVersion: string): string | null {
 /**
  * 운영 배포일.
  *
- * 신뢰 1·2위(QA 스레드 제목 · 배포대장 제목)끼리만 늦은 쪽을 고른다.
- * 3위(fixVersion)와 4위(배포대장 본문)는 표시용이다 — 잘못 만들어진 버전
- * 하나가 전체를 끌고 가면 안 된다.
+ * **배포대장 제목과 본문 중 늦은 쪽**이다. 제목은 항상 있고(그걸로 차수를
+ * 찾는다) 본문은 없을 수 있으니 제목이 기준선이 된다. 일정이 밀리면 제목이
+ * 먼저 갱신되므로 늦은 쪽을 고르는 것이 맞다.
+ *
+ * 전에는 QA 스레드 제목이 1순위였다. 그 경로를 걷어냈다 — 개인 토큰이
+ * 필요하고 KQ 에만 있는 흐름이라 다른 프로젝트로 옮길 수 없었다. 게다가
+ * 스레드가 없는 대상(GW)은 `estimated` 가 늘 true 라 화면에 "추정" 배지가
+ * 영구히 붙어 있었다. 못 찾을 것을 기다리는 표시였다.
+ *
+ * `fixVersion` 은 표시용으로만 남긴다 — 잘못 만들어진 버전 하나가 전체를
+ * 끌고 가면 안 된다.
  */
 export function resolveDeployYmd(cycle: DeployCycle): ResolvedYmd {
-  const picked = latest([
-    { source: 'thread', ymd: cycle.threadDeployYmd },
+  const cands: { source: ScheduleSource; ymd: string | null }[] = [
     { source: 'ledgerTitle', ymd: cycle.deployYmd },
-  ]);
-  const extra: { source: ScheduleSource; ymd: string | null }[] = [
-    { source: 'fixVersion', ymd: fixVersionYmd(cycle.fixVersion) },
     { source: 'ledgerBody', ymd: cycle.prodYmd },
   ];
+  const picked = latest(cands);
+  /*
+    진 후보도 `others` 에 담는다.
+
+    여기 들어가는 값은 화면에서 "불일치" 로 표시된다. 제목과 본문이 서로
+    다른 날을 가리키는 것은 대장 자체가 어긋났다는 뜻이라, 늦은 쪽을 고른
+    뒤 조용히 버리면 사람이 고칠 기회를 잃는다 — 실측 release_20260914 가
+    제목 09-14, 본문 09-10 이었다.
+  */
+  const extra: { source: ScheduleSource; ymd: string | null }[] = [
+    ...cands,
+    { source: 'fixVersion', ymd: fixVersionYmd(cycle.fixVersion) },
+  ];
+  /*
+    같은 날짜는 한 번만 적는다. 화면이 `불일치 09-14 · 09-14` 를 내면 읽는
+    사람은 두 날이 다른 줄 알고 두 번 확인한다. 출처 이름은 먼저 오는 쪽,
+    즉 대장 쪽을 남긴다 — fixVersion 은 그 날짜를 보고 만든 파생값이다.
+  */
+  const seen = new Set<string>();
   const others = extra.filter(
-    (o): o is { source: ScheduleSource; ymd: string } =>
-      !!o.ymd && o.ymd !== picked?.ymd
+    (o): o is { source: ScheduleSource; ymd: string } => {
+      if (!o.ymd || o.ymd === picked?.ymd || seen.has(o.ymd)) return false;
+      seen.add(o.ymd);
+      return true;
+    }
   );
   return {
     ymd: picked?.ymd ?? null,
     source: picked?.source ?? null,
-    estimated: !cycle.threadDeployYmd,
+    // 배포대장에서 읽은 값이다. 기다릴 다른 출처가 없으므로 추정이 아니다.
+    estimated: false,
     others,
-    pending: cycle.threadDeployYmd ? [] : ['thread'],
+    pending: [],
   };
 }
 
 /**
- * QA 종료일.
+ * QA 종료일. 배포대장 본문에서 읽는다.
  *
- * 종료는 배포대장 일정과 QA 스레드 공유가 **둘 다** 만족해야 하므로
- * 늦은 쪽이 답이다. 대장 9/10 · 스레드 9/13 이면 9/13.
+ * 전에는 QA 스레드 공유와 늦은 쪽을 골랐는데, 스레드 경로를 걷어내면서
+ * 남은 출처가 배포대장 하나다. 본문에 일정이 없는 대상(GW)은 null 이고,
+ * 그 줄은 알림에서 저절로 빠진다.
  */
 export function resolveQaEndYmd(cycle: DeployCycle): ResolvedYmd {
-  const picked = latest([
-    { source: 'thread', ymd: cycle.threadQaEndYmd },
-    { source: 'ledgerBody', ymd: cycle.qaEndYmd },
-  ]);
   return {
-    ymd: picked?.ymd ?? null,
-    source: picked?.source ?? null,
-    estimated: !cycle.threadQaEndYmd,
+    ymd: cycle.qaEndYmd ?? null,
+    source: cycle.qaEndYmd ? 'ledgerBody' : null,
+    estimated: false,
     others: [],
-    pending: cycle.threadQaEndYmd ? [] : ['thread'],
+    pending: [],
   };
 }
 
@@ -648,17 +709,75 @@ export function milestoneFrom(
   s: {
     qaStartYmd: string | null;
     qaEndYmd: string | null;
+    /** 대장 본문이 말한 운영 배포일. 없을 수 있다. */
     prodYmd: string | null;
+    /** 대장 제목의 날짜. 넘기면 운영 배포일을 `prodDayOf` 로 정한다. */
+    deployYmd?: string;
   },
   todayYmd: string
 ): string | null {
+  /*
+    ── 운영 배포일은 제목과 본문 중 늦은 쪽 ──
+
+    SQL 쌍둥이 `qa_router_hit_rule` 은 `greatest(deploy_ymd,
+    coalesce(prod_ymd, deploy_ymd))` 를 받는다. 여기서 `s.prodYmd` 를 그대로
+    쓰면 **대장 본문에 운영일이 없는 차수에서 둘이 갈린다** - SQL 은 제목의
+    날짜로 마감선을 긋고 prod 앵커 규칙도 울리는데, 이쪽은 선을 안 긋고
+    아무것도 안 울린다. 쌍둥이의 값은 "돌고 있는 것을 고정하는 것" 뿐이라,
+    갈리면 고정하는 것이 없다.
+
+    `deployYmd` 를 안 넘긴 호출은 예전 그대로다 - 넘겨줄 값이 없는 자리에서
+    `prodDayOf` 를 흉내 내면 없는 날짜를 지어내게 된다.
+  */
+  const prod =
+    s.deployYmd === undefined
+      ? s.prodYmd
+      : prodDayOf({ deployYmd: s.deployYmd, prodYmd: s.prodYmd });
+
   const anchorOf = (a: AlertRule['anchor']) =>
-    a === 'qa_start' ? s.qaStartYmd : a === 'qa_end' ? s.qaEndYmd : s.prodYmd;
+    a === 'qa_start' ? s.qaStartYmd : a === 'qa_end' ? s.qaEndYmd : prod;
+
+  /*
+    ── 차수 마감선 ──
+
+    운영 배포일이 지나면 그 차수는 끝이다. 규칙이 무엇이든 울리지 않는다.
+
+    **운영 배포일을 그대로 쓰면 안 된다.** `prod` 앵커 규칙에 양수 오프셋을
+    넣어 배포일을 보정하는 패턴이 이미 있다 - 차수 덮어쓰기로
+    `{anchor:'prod', offset:4}` 를 넣으면 "브랜치를 자른 날보다 4일 뒤에
+    배포했다" 는 뜻이다. 그 규칙은 마감선에 **막히는 쪽이 아니라 정하는 쪽**이라,
+    선을 그 규칙이 울리는 날에 맞춘다.
+
+    그래도 "배포 다음날부터는 뭐든 안 울린다" 는 그대로 지켜진다. 보정된
+    배포일이 새 선이 될 뿐이다.
+  */
+  /*
+    `prod` 앵커 규칙이 여럿 켜져 있을 수도 있다 (`AlertRule[]` 은 유일성을
+    강제하지 않는다). 그런 경우 **배열 순서상 먼저 나오는 첫 규칙**이
+    이긴다 - 임의가 아니라 의도한 선택이다. SQL 쌍둥이
+    `qa_router_hit_rule` 도 같은 선택을 `order by ordinality limit 1` 로
+    표현한다. 여기서 고르는 방식을 바꾸면 그쪽도 같이 바꿔야 한다.
+  */
+  const prodRule = rules.find(
+    (r) => r.enabled !== false && r.anchor === 'prod'
+  );
+  const cutoff = prod
+    ? prodRule
+      ? ruleDay(prod, prodRule.offset, prodRule.shift)
+      : prod
+    : null;
 
   for (const r of rules) {
     if (r.enabled === false) continue;
     const anchor = anchorOf(r.anchor);
-    if (ruleDay(anchor, r.offset, r.shift) !== todayYmd) continue;
+    const day = ruleDay(anchor, r.offset, r.shift);
+    if (day !== todayYmd) continue;
+    /*
+      당일은 막지 않는다 - `오늘 운영 배포` 가 그날 울려야 한다.
+      배포일을 모르면 막지 않는다 - 모르는 것을 근거로 알림을 죽이면
+      대장 본문에 운영일이 없는 대상에서 QA 알림이 통째로 사라진다.
+    */
+    if (cutoff && day > cutoff) continue;
     const days = Math.round(
       (Date.parse(`${anchor}T00:00:00Z`) -
         Date.parse(`${todayYmd}T00:00:00Z`)) /

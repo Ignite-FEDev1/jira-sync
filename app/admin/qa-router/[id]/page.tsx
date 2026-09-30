@@ -17,6 +17,7 @@ import type {
   QaRouterEvent,
 } from '@/lib/services/qa-router/types';
 import { hasAlertOverride } from '@/lib/services/qa-router/types';
+import type { QaRouterConfig } from '@/lib/services/qa-router/types';
 
 import {
   Code,
@@ -30,6 +31,8 @@ import {
   useDemoMode,
   useRouterTarget,
 } from './shared';
+import { planToggleEnabled } from '../toggle-enabled-plan';
+import { writeEnabled } from '../toggle-enabled';
 
 /**
  * 라우팅 대상 상세.
@@ -123,6 +126,20 @@ export default function QaRouterDetailPage() {
     .toISOString()
     .slice(0, 10);
   const health = targetHealth(config, state, events, now, cycles);
+  /*
+    이 대상이 꺼져 있을 때, 켜면 어느 차수부터 다시 알림이 나가는지.
+
+    "필터가 지금 가리키는 차수"는 표 정렬이 이미 쓰는 기준과 같다
+    (`enabled` 를 늘 `true` 로 넘겨 구조적 위치만 본다 — 아래 CycleTable
+    주석 참고). 배너와 표가 다른 기준으로 "지금 차수"를 고르면 배너가
+    가리키는 차수와 표에서 굵게 강조된 차수가 어긋난다.
+  */
+  const activeFixVersion = state?.activeCycle?.fixVersion ?? null;
+  const watchingCycle =
+    cycles.find(
+      (c) =>
+        cycleStage(c, activeFixVersion, todayKst, true).stage === 'watching'
+    ) ?? null;
 
   return (
     <div className="space-y-5">
@@ -156,6 +173,19 @@ export default function QaRouterDetailPage() {
           <span className="font-semibold">{health.label}</span>
           <span className="text-muted-foreground"> · {health.detail}</span>
         </div>
+      )}
+
+      {/*
+        꺼져 있을 때만 나타난다. 아래 차수 표에서 매 행 "라우팅 꺼짐" 배지가
+        반복하는데, 어떻게 되돌리는지는 다섯 줄에 한 번씩이 아니라 표 전체에
+        한 번만 말하면 된다 — 그 한 번을 표 바로 위에 둔다.
+      */}
+      {!config.enabled && (
+        <DisabledBanner
+          config={config}
+          watchingCycle={watchingCycle}
+          onEnabled={t.reload}
+        />
       )}
 
       <section>
@@ -192,8 +222,91 @@ export default function QaRouterDetailPage() {
           todayYmd={todayKst}
           configId={id}
           demo={demo}
+          enabled={config.enabled}
         />
       </section>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// 꺼짐 배너
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 라우팅이 꺼져 있을 때 차수 표 위에 한 번만 뜨는 안내.
+ *
+ * 예전에는 배지 자체가 "꺼짐 · 알림 안 나감"으로 매 행 같은 말을 반복했다.
+ * 꺼졌으면 알림이 안 나가는 건 당연해 같은 말을 두 번 하는 셈이었고,
+ * 어떻게 되돌리는지는 어디에도 없었다. 배지는 원인(라우팅 꺼짐)만 짧게
+ * 말하고, 되돌리는 길은 표 전체를 대표해 여기 한 번만 적는다.
+ *
+ * 켜고 끄기는 목록 화면(../page.tsx `ConfigRow.toggleEnabled`)과 똑같은
+ * 절차를 그대로 따른다: `planToggleEnabled` 로 먼저 막힐 이유가 있는지
+ * 보고, 있으면 그 이유를 그대로 띄운다 — "저장 실패" 같은 뭉뚱그린 문구가
+ * 아니라 채널이 없다는 실제 DB 제약 사유다. 없으면 확인을 받고 나서만
+ * `writeEnabled` 로 실제로 쓴다. 여기서는 켜는 방향(next=true)만 다룬다 —
+ * 끄는 버튼은 각 행 스위치가 이미 하고 있고, 이 배너는 꺼져 있을 때만
+ * 나타나므로 끄기를 더 어렵게 만들 조건을 추가하지 않는다.
+ */
+function DisabledBanner({
+  config,
+  watchingCycle,
+  onEnabled,
+}: {
+  config: QaRouterConfig;
+  /** 필터가 지금 가리키는 차수 — 없으면(전부 지났거나 아직 예정만 있으면) null. */
+  watchingCycle: DeployCycle | null;
+  /** 켜기가 성공한 뒤 화면을 다시 읽는다. */
+  onEnabled: () => void;
+}) {
+  const [enabling, setEnabling] = useState(false);
+
+  const enableNow = async () => {
+    const plan = planToggleEnabled(config, true);
+    if (!plan.allowed) {
+      // 채널 없이는 못 켠다 — DB 제약에 걸리기 전에 여기서 실제 이유로 막는다.
+      toast.error(plan.blockedReason!.title, {
+        description: plan.blockedReason!.description,
+      });
+      return;
+    }
+    if (!window.confirm(plan.confirmMessage)) return;
+    setEnabling(true);
+    try {
+      const errorMessage = await writeEnabled(config.id, true);
+      if (errorMessage) {
+        // 확인을 통과해도 DB 쪽에서 막힐 수 있다 — 그 원문 메시지를 그대로 보여준다.
+        toast.error(`변경 실패: ${errorMessage}`);
+        return;
+      }
+      toast.success('켰습니다');
+      onEnabled();
+    } finally {
+      setEnabling(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm dark:border-blue-900 dark:bg-blue-950">
+      <p className="min-w-0 flex-1 text-blue-900 dark:text-blue-200">
+        <span className="font-semibold">라우팅이 꺼져 있습니다.</span>{' '}
+        {watchingCycle ? (
+          <span>
+            켜면 {watchingCycle.deployYmd.slice(5)} 차수부터 다시 알립니다.
+          </span>
+        ) : (
+          // 필터가 지금 가리키는 차수가 없다 — 전부 지났거나 아직 예정만 있다.
+          // 빈 날짜를 적는 대신, 그래도 참인 사실만 말한다.
+          <span>
+            지금 필터가 가리키는 차수가 없어 켜도 바로 나가는 알림은 없습니다.
+            다음 차수가 시작되면 그때부터 알립니다.
+          </span>
+        )}
+      </p>
+      <Button size="sm" disabled={enabling} onClick={() => void enableNow()}>
+        {enabling ? '켜는 중' : '라우팅 켜기'}
+      </Button>
     </div>
   );
 }
@@ -222,6 +335,7 @@ function CycleTable({
   todayYmd,
   configId,
   demo,
+  enabled,
 }: {
   cycles: DeployCycle[];
   activeFixVersion: string | null;
@@ -237,6 +351,8 @@ function CycleTable({
    * 켠 모드가 한 번 클릭에 꺼지면 그건 모드가 아니다.
    */
   demo: boolean;
+  /** 이 대상이 켜져 있나. 꺼져 있으면 "알림 중" 배지를 못 띄운다. */
+  enabled: boolean;
 }) {
   const [page, setPage] = useState(0);
 
@@ -284,10 +400,20 @@ function CycleTable({
     그게 위로 올라가 정작 지금 보는 차수가 아래로 밀린다.
     매일 확인하러 오는 대상은 "알림 중" 하나다.
     끝나면 고정이 풀려 원래 순서로 돌아간다.
+
+    대상이 꺼져 있어도 고정한다. 여기서 뽑는 것은 "필터가 지금 가리키는
+    차수가 어디냐"는 구조적 위치이지 "알림이 나가고 있냐"가 아니다 — 후자는
+    아래 표시용 `cycleStage` 호출(`enabled` 를 실제 값으로 넘기는 쪽)이
+    배지로 이미 정직하게 말한다. 꺼졌다고 정렬까지 풀면 매일 이 화면에
+    오는 사람이 "지금 보는 차수"를 표 아래에서 다시 찾아야 한다 — 꺼둔
+    이유를 확인하러 온 사람에게 그건 불필요한 방해다. 그래서 `enabled` 를
+    늘 `true` 로 고정해 부른다.
   */
   const ordered = [...cycles].sort((a, b) => {
     const rank = (c: DeployCycle) =>
-      cycleStage(c, activeFixVersion, todayYmd).stage === 'watching' ? 0 : 1;
+      cycleStage(c, activeFixVersion, todayYmd, true).stage === 'watching'
+        ? 0
+        : 1;
     return rank(a) - rank(b);
   });
 
@@ -335,8 +461,23 @@ function CycleTable({
         */}
             <tbody>
               {shown.map((c) => {
-                const st = cycleStage(c, activeFixVersion, todayYmd);
-                const active = st.stage === 'watching';
+                const st = cycleStage(c, activeFixVersion, todayYmd, enabled);
+                /*
+                  꺼져 있어도 "지금 보는 차수" 강조(굵게·배경·QA 진행률)는
+                  유지한다 — 그건 배포 일정상 위치를 말할 뿐 알림 여부를
+                  말하지 않는다. 알림 여부는 아래 배지(`st.tone`·`st.label`)가
+                  따로, 정직하게 말한다.
+
+                  이 둘을 하나의 boolean 으로 묶으면 안 된다 — 실제로 한 번
+                  묶었다가 LED 점멸(`StatusLed pulse`)까지 같이 켜졌다.
+                  점멸은 "지금 살아서 돈다"는 뜻이고 꺼진 대상에는 거짓말이다.
+                  그래서 이름부터 갈라 각자 뜻대로만 쓴다.
+                */
+                // "이 차수가 필터가 가리키는, 화면이 초점을 두는 차수인가" — 배경·굵게·QA 진행률.
+                const isCurrentCycle =
+                  st.stage === 'watching' || st.stage === 'disabled';
+                // "지금 실제로 알림이 도는가" — LED 점멸에만 쓴다. 꺼졌으면 절대 점멸하지 않는다.
+                const isWatching = st.stage === 'watching';
                 const n = ambiguous(c)
                   ? undefined
                   : (counted.get(c.fixVersion) ?? 0);
@@ -344,7 +485,7 @@ function CycleTable({
                   <tr
                     key={c.deployYmd}
                     // relative: RowLink 의 덮개가 이 행 안에 갇히게 한다.
-                    className={`relative cursor-pointer border-b last:border-0 hover:bg-muted/60 ${active ? 'bg-muted/40' : ''}`}
+                    className={`relative cursor-pointer border-b last:border-0 hover:bg-muted/60 ${isCurrentCycle ? 'bg-muted/40' : ''}`}
                   >
                     <td className="px-3 py-2.5 align-baseline">
                       {/*
@@ -364,7 +505,7 @@ function CycleTable({
                   */}
                       <RowLink
                         href={`/admin/qa-router/${configId}/cycles/${c.deployYmd}${demo ? '?demo=1' : ''}`}
-                        className={`rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${active ? 'font-medium' : ''}`}
+                        className={`rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${isCurrentCycle ? 'font-medium' : ''}`}
                       >
                         {c.deployPageTitle ?? c.deployYmd}
                       </RowLink>
@@ -380,7 +521,7 @@ function CycleTable({
                             {c.qaEndYmd?.slice(5) ?? '?'}
                           </span>
                           {/* 진행 상태는 QA 기간 정보라 이 열에 둔다. */}
-                          {active && (
+                          {isCurrentCycle && (
                             <span className="whitespace-nowrap text-xs text-muted-foreground">
                               {describeQaProgress(
                                 c.qaStartYmd,
@@ -399,8 +540,8 @@ function CycleTable({
                     </td>
                     <td className="px-3 py-2.5 align-baseline">
                       <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                        <StatusLed tone={st.tone} pulse={active} />
-                        <span className={active ? 'font-medium' : ''}>
+                        <StatusLed tone={st.tone} pulse={isWatching} />
+                        <span className={isCurrentCycle ? 'font-medium' : ''}>
                           {st.label}
                         </span>
                         {/*

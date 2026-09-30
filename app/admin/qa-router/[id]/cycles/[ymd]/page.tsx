@@ -31,8 +31,9 @@ import {
 import { demoPlanProgress } from '@/lib/services/qa-router/demo';
 import type {
   PlanProgress,
-  PlanTicket,
+  StatusCategory,
 } from '@/lib/services/qa-router/plan-tickets';
+import { STATUS_CATEGORY_ORDER } from '@/lib/services/qa-router/plan-tickets';
 import type { JudgeEvidence } from '@/lib/services/qa-router/judge';
 import {
   isMissed,
@@ -40,11 +41,15 @@ import {
   settlementBucket,
   type EventProblem,
 } from '@/lib/services/qa-router/outcome';
+import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   AlertAnchor,
   AlertRule,
   AlertShift,
+  DeployCycle,
+  QaScheduleRule,
   QaRouterEvent,
+  QaWindowSource,
 } from '@/lib/services/qa-router/types';
 import {
   effectiveAlertRules,
@@ -167,28 +172,26 @@ export default function CycleDetailPage() {
   const st = cycleStage(
     cycle,
     state?.activeCycle?.fixVersion ?? null,
-    todayKst
+    todayKst,
+    config.enabled
   );
   const jiraBase = jiraBaseUrl(config.jiraInstance);
   // 날짜 출처 판정. 화면과 배치(SQL)가 같은 규칙을 쓴다.
   const deploy = resolveDeployYmd(cycle);
   const qaEnd = resolveQaEndYmd(cycle);
   /*
-    스레드를 못 읽은 사유. 수집기가 남긴 문장을 그대로 쓴다 —
-    토큰이 없어서인지, 스코프가 모자라서인지, 스레드를 못 찾아서인지는
-    화면이 알 수 없고 추측하면 틀린 문장이 박힌다.
+    알림 기준 목록이 쓸 QA 기간. 아래 `QaScheduleSection` 이 보여주는 것과
+    같은 사다리다 — 09:10 배치가 이 값으로 울릴 날을 고르기 때문이다.
   */
-  /*
-    아직 확인 못 한 출처. **두 날짜가 같은 출처를 기다린다.**
-
-    전에는 QA 기간·운영 배포일 행이 각자 이 줄을 그렸다. 그래서 화면에
-    `QA 스레드 · 아직 확인 안 됨 → 확인되면 늦은 쪽으로 갱신` 이라는 같은
-    문장이 **글자 그대로 두 번** 찍혔다(실측). 원인이 하나면 한 번만 말해야
-    한다 — 어느 날짜가 추정인지는 각 행의 `추정` 배지가 이미 말한다.
-  */
-  const threadReason = demo
-    ? null
-    : (cycle.planProgress?.threadUnavailable ?? null);
+  const alertWindow = resolveQaWindow({
+    manualStartYmd: cycle.qaStartYmdManual ?? null,
+    manualEndYmd: cycle.qaEndYmdManual ?? null,
+    ledgerStartYmd: cycle.qaStartYmd,
+    ledgerEndYmd: cycle.qaEndYmd,
+    prodYmd: cycle.prodYmd,
+    deployYmd: cycle.deployYmd,
+    rule: config.qaScheduleRule,
+  });
   /*
     봇이 이 차수 알림을 모으는 스레드. permalink 는 ts 의 점을 빼고 p 를 붙인다.
     데모에서는 실제 ts 가 없으니 만들지 않는다.
@@ -197,18 +200,6 @@ export default function CycleDetailPage() {
     !demo && state?.activeCycle?.fixVersion === cycle.fixVersion
       ? state.activeCycle.threadTs
       : null;
-  /*
-    QA 스레드 주소. 삼항을 겹치지 않고 위에서 한 번 정한다 —
-    JSX 속성 안에서 2단으로 갈리면 그 줄이 무엇을 주는 속성인지가 안 보인다.
-  */
-  const qaThreadUrl = (() => {
-    if (demo) return DEMO_THREAD_URL;
-    // 채널은 설정에서 온다. 여기서 상수로 떨어지면 다른 프로젝트의 화면이
-    // CPO QA 팀 채널을 가리킨다 — 열리긴 하는데 남의 스레드다.
-    if (!cycle.qaThreadTs || !config.qaThreadChannelId) return null;
-    return `${SLACK_BASE}/archives/${config.qaThreadChannelId}/p${cycle.qaThreadTs.replace('.', '')}`;
-  })();
-
   const threadUrl = botThreadTs
     ? `${SLACK_BASE}/archives/${config.slackChannelId}/p${botThreadTs.replace('.', '')}`
     : null;
@@ -302,7 +293,7 @@ export default function CycleDetailPage() {
           값이 100px 도 안 됐다. 짝을 지을 때는 **성격이 같은 것끼리** 둔다.
             무엇인가   배포 버전 · 배포대장
             언제인가   QA 기간 · 운영 배포일
-            어디서 보나 QA 스레드 · 알림 스레드
+            어디서 보나 알림 스레드
         */}
         <DescRowPair
           left={{ label: '배포 버전', node: <>          <span className="flex flex-wrap items-baseline gap-x-2">
@@ -379,55 +370,52 @@ export default function CycleDetailPage() {
         </> }}
         />
         {/*
-          `미확인` 행을 걷어내고 그 자리에 QA 스레드를 둔다.
+          봇이 이 차수 알림을 모으는 스레드. 지금 보는 차수일 때만 나온다 —
+          스레드 ts 는 activeCycle 에만 있다.
 
-          전에 있던 문장은 `QA 스레드 · 아직 확인 안 됨 → 확인되면 위 [추정]
-          날짜를 늦은 쪽으로 갱신합니다` 였다. 이건 차수에 대한 사실이 아니라
-          **우리 수집 상태**에 대한 메타 정보고, 날짜가 미정이라는 것은 각
-          행의 `추정` 배지가 이미 말한다.
-
-          정작 누르고 싶은 QA 스레드 링크는 이 표에 아예 없었다 — QA 현황
-          열 제목에만 숨어 있었다. 못 읽은 경우에는 그 사실을 값으로 적는다.
+          전에는 여기 "QA 스레드" 행이 같이 있었다. QA 팀이 파는 Slack
+          스레드를 읽어 오던 기능인데 걷어냈다 — 개인 토큰이 필요하고 KQ
+          에만 있는 흐름이라 다른 프로젝트로 옮길 수 없었다. 그 행은 GW 에서
+          영원히 "아직 찾지 못했습니다" 였다.
         */}
-        <DescRowPair
-          left={{
-            label: 'QA 스레드',
-            node: qaThreadUrl ? (
-              <a
-                className="inline-flex items-baseline gap-1 text-blue-700 underline decoration-blue-700/40 underline-offset-2 dark:text-blue-300 dark:decoration-blue-300/40"
-                href={qaThreadUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                QA 팀 진행 스레드 <ExternalLinkIcon />
-              </a>
-            ) : (
-              <span className="text-muted-foreground">
-                {threadReason ?? '아직 찾지 못했습니다'}
-                <span className="text-muted-foreground/70">
-                  {' '}· 찾으면 위 <span className="rounded bg-muted px-1 text-foreground/75">추정</span> 날짜를 늦은 쪽으로 갱신합니다
-                </span>
-              </span>
-            ),
-          }}
-          right={
-            threadUrl
-              ? { label: '알림 스레드', node: <>            <a
-              className="inline-flex items-baseline gap-1 text-blue-700 underline decoration-blue-700/40 underline-offset-2 dark:text-blue-300 dark:decoration-blue-300/40"
-              href={threadUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              #{state?.derived?.channelNames?.[config.slackChannelId] ?? '알림'}{' '}
-              스레드 열기 <ExternalLinkIcon />
-            </a>
-            <Note>이 차수 판정 알림과 마감 요약이 쌓이는 곳</Note>
-          </> }
-              : null
-          }
-        />
+        {threadUrl && (
+          <DescRowPair
+            left={{
+              label: '알림 스레드',
+              node: (
+                <>
+                  <a
+                    className="inline-flex items-baseline gap-1 text-blue-700 underline decoration-blue-700/40 underline-offset-2 dark:text-blue-300 dark:decoration-blue-300/40"
+                    href={threadUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    #{state?.derived?.channelNames?.[config.slackChannelId] ?? '알림'}{' '}
+                    스레드 열기 <ExternalLinkIcon />
+                  </a>
+                  <Note>이 차수 판정 알림과 마감 요약이 쌓이는 곳</Note>
+                </>
+              ),
+            }}
+            right={null}
+          />
+        )}
       </Descriptions>
 
+      {/*
+        QA 기간을 정하는 사다리(직접 입력 → 배포대장 → 라우터 기본 규칙)의
+        결과를 여기서 보여준다. 위 Descriptions 의 "QA 기간" 행은 대장 값만
+        보므로, 대장이 비었거나 앞뒤가 안 맞을 때(직접 입력·규칙까지 본
+        진짜 판정)는 이 섹션이 답한다 — 차수 정보와 같은 층이라 선으로
+        가르지 않는다.
+      */}
+      <QaScheduleSection
+        configId={demo ? null : id}
+        cycle={cycle}
+        rule={config.qaScheduleRule}
+        jiraBase={jiraBase}
+        onSaved={t.reload}
+      />
 
       {/*
         여기부터 "지금 어떻게 되고 있나" 다. 위의 차수 정보와 층이 다르므로
@@ -445,7 +433,6 @@ export default function CycleDetailPage() {
         collectError={demo ? null : (state?.sideEffects?.plan?.error ?? null)}
         onRefreshed={t.reload}
         progress={demo ? demoPlanProgress(cycle) : (cycle.planProgress ?? null)}
-        threadUrl={qaThreadUrl}
       />
 
       <section className="!mt-7">
@@ -489,14 +476,186 @@ export default function CycleDetailPage() {
         configRules={config.alertRules}
         override={cycle.alertRulesOverride ?? null}
         deployYmd={cycle.deployYmd}
+        /*
+          09:10 배치가 쓰는 값과 같아야 한다. 대장 칸(`cycle.qaEndYmd`)을
+          넘기면 기간이 직접 입력이나 규칙에서 온 차수에서 **울리지도 않을
+          날짜가 목록에 적힌다.**
+        */
         schedule={{
-          qaStartYmd: cycle.qaStartYmd,
-          qaEndYmd: qaEnd.ymd,
-          prodYmd: deploy.ymd,
+          qaStartYmd: alertWindow.qaStartYmd,
+          qaEndYmd: alertWindow.qaEndYmd,
+          prodYmd: prodDayOf({
+            deployYmd: cycle.deployYmd,
+            prodYmd: cycle.prodYmd,
+          }),
         }}
         onSaved={t.reload}
       />
     </div>
+  );
+}
+
+/** `QaWindow.source` 를 사람 말로. `none` 은 채울 값, `invalid` 는 고칠 값이다. */
+const QA_WINDOW_SOURCE_LABEL: Record<QaWindowSource, string> = {
+  manual: '직접 입력한 값',
+  ledger: '배포대장 본문',
+  rule: '라우터 기본 규칙',
+  none: '정하지 못함',
+  invalid: '값이 앞뒤가 안 맞음',
+};
+
+/**
+ * QA 기간 — 어디서 왔고, 미정이거나 이상하면 무엇을 해야 하나.
+ *
+ * `resolveQaWindow` 가 직접 입력 → 배포대장 → 라우터 기본 규칙 순서로
+ * 값을 찾는다. **`none` 과 `invalid` 를 같은 문구로 묶지 않는다** — 전자는
+ * 아무도 값을 안 넣은 것이고("채워야 한다"), 후자는 값이 있는데 앞뒤가
+ * 안 맞는 것이다("고쳐야 한다", 보통 배포대장을). 둘을 한 문장으로
+ * 뭉치면 배포대장이 틀렸는데 사람이 직접 입력으로 덮어쓰고 끝내서,
+ * 다음 차수도 같은 자리에서 또 틀린다.
+ */
+function QaScheduleSection({
+  configId,
+  cycle,
+  rule,
+  jiraBase,
+  onSaved,
+}: {
+  /** 저장 대상. 데모에서는 null 이고 입력칸을 열지 않는다. */
+  configId: string | null;
+  cycle: DeployCycle;
+  rule: QaScheduleRule | null;
+  jiraBase: string;
+  onSaved: () => void;
+}) {
+  const win = resolveQaWindow({
+    manualStartYmd: cycle.qaStartYmdManual ?? null,
+    manualEndYmd: cycle.qaEndYmdManual ?? null,
+    ledgerStartYmd: cycle.qaStartYmd,
+    ledgerEndYmd: cycle.qaEndYmd,
+    prodYmd: cycle.prodYmd,
+    deployYmd: cycle.deployYmd,
+    rule,
+  });
+
+  const [manualStart, setManualStart] = useState(cycle.qaStartYmdManual ?? '');
+  const [manualEnd, setManualEnd] = useState(cycle.qaEndYmdManual ?? '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async (clear: boolean) => {
+    if (!configId) return;
+    setSaving(true);
+    try {
+      const res = await fetch(
+        `/api/qa-router/${configId}/cycles/${cycle.deployYmd}/schedule`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            qaStartYmd: clear ? null : manualStart || null,
+            qaEndYmd: clear ? null : manualEnd || null,
+          }),
+        }
+      );
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        toast.error(body.error ?? '저장하지 못했습니다.');
+        return;
+      }
+      if (clear) {
+        setManualStart('');
+        setManualEnd('');
+      }
+      toast.success(
+        clear ? '지우고 배포대장 값을 다시 씁니다' : '저장했습니다'
+      );
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section>
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-2">
+        <h3 className="text-base font-semibold">QA 기간</h3>
+        <span className="text-xs text-muted-foreground">
+          직접 입력 → 배포대장 → 라우터 기본 규칙 순서로 정합니다
+        </span>
+      </div>
+
+      {win.source === 'none' && (
+        <p className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
+          QA 기간이 미정입니다. QA 시작·종료 알림이 이 차수엔 나가지 않습니다.
+        </p>
+      )}
+      {win.source === 'invalid' && (
+        <div className="rounded-md border border-red-200 bg-red-50/60 px-2.5 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          <p>
+            {win.why} 배포일이 당겨질 때 QA 줄이 같이 안 고쳐진 경우가 많습니다.
+          </p>
+          <p className="mt-1 flex flex-wrap items-baseline gap-x-2">
+            <span>배포대장을 고치거나 아래에 직접 넣어 주세요.</span>
+            {cycle.deployPageId && (
+              <a
+                className="inline-flex items-baseline gap-1 underline decoration-current/40 underline-offset-2"
+                href={`${jiraBase}/wiki/spaces/CPO/pages/${cycle.deployPageId}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                배포대장 열기 <ExternalLinkIcon />
+              </a>
+            )}
+          </p>
+        </div>
+      )}
+      {win.source !== 'none' && win.source !== 'invalid' && (
+        <p className="text-sm text-muted-foreground">
+          <span className="font-mono tabular-nums text-foreground">
+            {win.qaStartYmd} ~ {win.qaEndYmd}
+          </span>{' '}
+          · {QA_WINDOW_SOURCE_LABEL[win.source]}
+        </p>
+      )}
+
+      {configId && (
+        <div className="mt-3 flex flex-wrap items-end gap-2">
+          <label className="text-xs text-muted-foreground">
+            QA 시작
+            <Input
+              type="date"
+              value={manualStart}
+              onChange={(e) => setManualStart(e.target.value)}
+              className="mt-1 h-8 w-[150px] text-xs"
+              aria-label="QA 시작"
+            />
+          </label>
+          <label className="text-xs text-muted-foreground">
+            QA 종료
+            <Input
+              type="date"
+              value={manualEnd}
+              onChange={(e) => setManualEnd(e.target.value)}
+              className="mt-1 h-8 w-[150px] text-xs"
+              aria-label="QA 종료"
+            />
+          </label>
+          <Button size="sm" disabled={saving} onClick={() => void save(false)}>
+            {saving ? '저장 중…' : '저장'}
+          </Button>
+          {(cycle.qaStartYmdManual || cycle.qaEndYmdManual) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={saving}
+              onClick={() => void save(true)}
+            >
+              지우고 대장 값 쓰기
+            </Button>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -930,7 +1089,9 @@ function CycleAssignments({
         ? 'Jira 릴리스가 만들어지고 필터가 이 차수를 가리키면 시작합니다.'
         : stage === 'past'
           ? '이 차수 동안 알릴 티켓이 없었습니다.'
-          : 'QA 팀이 티켓을 만들면 담당자를 찾아 Slack 으로 알립니다.';
+          : stage === 'disabled'
+            ? '라우터가 꺼져 있어 티켓이 쌓여도 알리지 않습니다.'
+            : 'QA 팀이 티켓을 만들면 담당자를 찾아 Slack 으로 알립니다.';
     return (
       <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
         아직 배정한 티켓이 없습니다.
@@ -1577,70 +1738,53 @@ function CycleAssignments({
 // ─────────────────────────────────────────────────────────────
 
 /**
- * 데모에서 보여줄 실제 QA 스레드. 배치가 찾아 저장하면 그 값을 쓴다.
- * 데모 전용이라 채널을 그대로 적는다 — 실제 화면은 설정값을 쓴다.
- */
-const DEMO_THREAD_URL = `${SLACK_BASE}/archives/C053GEE9A5R/p1787734379373189`;
-
-/**
- * 스레드 대응상태 배지.
- *
- * 색만으로 말하지 않는다 — 글자를 함께 둔다. 그리고 "이슈"는 눈에 띄어야
- * 한다. 나머지가 조용해야 그게 보인다.
- */
-function ThreadChip({ s }: { s: PlanTicket['threadStatus'] }) {
-  // 컬럼 이름이 "QA 스레드" 라 값에 QA 를 또 붙이지 않는다.
-  if (s === 'done') return <Badge variant="ok">완료</Badge>;
-  if (s === 'issue') return <Badge variant="bad">이슈</Badge>;
-  if (s === 'working') return <Badge variant="warn">대응중</Badge>;
-  if (s === 'waiting') return <Badge variant="muted">테스트 대기</Badge>;
-  return (
-    <span
-      className="text-xs text-muted-foreground"
-      title="스레드 표에 없는 티켓입니다"
-    >
-      -
-    </span>
-  );
-}
-
-/**
  * 이 차수의 기획건이 QA 를 어디까지 지났나.
  *
- * 축이 둘이다. Jira 기획티켓 상태와 QA 스레드의 대응상태.
- * 기획티켓의 "완료"는 개발 시작 전에도 나오고 QA 통과 후에도 나와서,
- * 상태 하나로는 앞뒤가 갈리지 않는다. 실측으로도 어긋나 있었다 —
- * KQ-17670 은 Jira 가 Verify in QA 인데 스레드에는 완료로 적혀 있었다.
+ * 축이 하나다 — 기획티켓의 **Jira 상태**.
+ *
+ * 전에는 축이 둘이었다. Jira 상태와, QA 팀이 Slack 스레드에 손으로 적는 표의
+ * 대응상태. 그 표는 KQ 에만 있는 관행이라 GW 를 붙이자마자 빈 열이 됐고,
+ * 읽으려면 개인 토큰이 필요했고, 프로덕션에서는 토큰이 없어 아예 안 걷히고
+ * 있었다 — 화면의 7/7 은 언제 값인지 모르는 이월값이었다.
+ * 실측으로 두 축이 7건 전부 같은 답을 냈으므로 Jira 쪽만 남긴다.
  *
  * 큰 숫자를 늘어놓지 않는다. 여기서 궁금한 것은 "몇 건이냐"가 아니라
- * "누구 것이 안 끝났나"라서, 막대 하나와 목록으로 답한다.
+ * "누구 것이 안 끝났나"라서, 파이 하나와 목록으로 답한다.
  */
-/** 스레드 대응상태 세그먼트. 순서가 진행 흐름이다. */
-/**
- * 스레드 대응상태. 순서가 진행 흐름이다.
- *
- * 'none' 은 QA 스레드 표에 아직 안 올라온 건이다 — "시작 안 함"에 가깝고,
- * 0 건으로 묻어 두면 분모와 합이 안 맞아 사람이 계산기를 두드리게 된다.
- */
-const SEGMENTS = [
-  { key: 'done', label: '완료', bg: BAR_TONE.ok, fill: PIE_FILL.ok, stroke: PIE_STROKE.ok },
-  { key: 'working', label: '대응중', bg: BAR_TONE.warn, fill: PIE_FILL.warn, stroke: PIE_STROKE.warn },
-  { key: 'issue', label: '이슈', bg: BAR_TONE.bad, fill: PIE_FILL.bad, stroke: PIE_STROKE.bad },
-  {
-    key: 'waiting',
-    label: '테스트 대기',
-    bg: BAR_TONE.muted,
-    fill: PIE_FILL.muted,
-    stroke: PIE_STROKE.muted,
-  },
-  { key: 'none', label: '미시작', bg: BAR_TONE.faint, fill: PIE_FILL.faint, stroke: PIE_STROKE.faint },
-] as const;
 
-type SegKey = (typeof SEGMENTS)[number]['key'];
+/**
+ * 상태 카테고리별 색. **조각은 여기서 만들지 않는다.**
+ *
+ * 상태 **이름**을 코드에 적으면 프로젝트가 늘 때마다 여기를 고쳐야 한다 —
+ * KQ 는 `완료`·`Verify in QA`, AUTOWAY 는 `Done`·`In Progress` 이고 워크플로를
+ * 새로 파면 또 달라진다. 이름은 데이터에서 읽고, 코드가 아는 것은
+ * Jira 가 워크플로 정의에서 주는 카테고리 셋뿐이다.
+ */
+const CATEGORY_TONE = {
+  done: { bg: BAR_TONE.ok, fill: PIE_FILL.ok, stroke: PIE_STROKE.ok },
+  indeterminate: {
+    bg: BAR_TONE.info,
+    fill: PIE_FILL.info,
+    stroke: PIE_STROKE.info,
+  },
+  new: { bg: BAR_TONE.faint, fill: PIE_FILL.faint, stroke: PIE_STROKE.faint },
+} as const satisfies Record<
+  StatusCategory,
+  { bg: string; fill: string; stroke: string }
+>;
+
+/** 같은 카테고리 판의 배지 쪽. 파이와 표가 한 티켓을 다른 색으로 칠하면 안 된다. */
+const CATEGORY_BADGE = {
+  done: 'ok',
+  indeterminate: 'info',
+  new: 'muted',
+} as const satisfies Record<StatusCategory, 'ok' | 'info' | 'muted'>;
+
+/** 조각 키는 상태 **이름**이다 — 표의 Jira 열에 보이는 값과 같아야 고른 게 읽힌다. */
+type SegKey = string;
 
 function PlanSection({
   progress,
-  threadUrl,
   configId,
   collectedAt,
   collectError,
@@ -1650,8 +1794,6 @@ function PlanSection({
 }: {
   progress: PlanProgress | null;
   instance: 'ignite' | 'hmg';
-  /** QA 스레드 permalink. 열 제목이 이 링크다. */
-  threadUrl: string | null;
   /** 갱신 API 를 부를 대상 id. 데모에서는 넘기지 않는다. */
   configId?: string;
   collectedAt?: string | null;
@@ -1699,15 +1841,8 @@ function PlanSection({
         toast.error(body.error ?? '갱신 실패');
         return;
       }
-      /*
-        스레드를 읽었는지 함께 말한다. Jira 만 읽고 온 것과 스레드까지
-        읽은 것은 진행률의 의미가 다른데, "다시 읽었습니다" 만 뜨면
-        둘을 구분할 수 없어 0% 를 보고 스레드 탓인지 실제인지 모른다.
-      */
       toast.success(`기획건 ${body.total}건 다시 읽었습니다`, {
-        description: body.threadRead
-          ? `QA 스레드 반영 · 완료 ${body.threadDone}건`
-          : `QA 스레드는 못 읽었습니다 — ${body.threadUnavailable}`,
+        description: `완료 ${body.ticketDone}건`,
       });
       onRefreshed?.();
     } finally {
@@ -1723,7 +1858,6 @@ function PlanSection({
     return (
       <section>
         <SectionHead
-          threadUrl={threadUrl}
           collectedAt={collectedAt}
           collectError={collectError}
           onRefresh={configId ? () => void refresh() : undefined}
@@ -1738,18 +1872,11 @@ function PlanSection({
     );
   }
 
-  /*
-    threadDone 은 받지 않는다. 서버가 계산해 주지만
-    (tickets.filter(threadStatus === 'done').length) 아래 counts 가 같은
-    배열에서 같은 값을 다시 센다. 띠와 칩이 서로 다른 출처를 쓰면 언젠가
-    어긋나므로, 화면에서는 counts 하나만 본다.
-  */
-  const { tickets, total, ticketDone, threadUnavailable } = progress;
+  const { tickets, total, ticketDone } = progress;
   if (total === 0) {
     return (
       <section>
         <SectionHead
-          threadUrl={threadUrl}
           collectedAt={collectedAt}
           collectError={collectError}
           onRefresh={configId ? () => void refresh() : undefined}
@@ -1770,85 +1897,73 @@ function PlanSection({
     6명이면 12바퀴였다. 세는 값이 늘 때마다 바퀴가 늘어나는 구조다.
   */
   const tally = (() => {
-    const status = new Map<string, number>();
+    /** 상태 이름 → 건수. 카테고리도 같이 들고 다닌다 (색과 정렬에 쓴다). */
+    const status = new Map<string, { count: number; cat: StatusCategory }>();
     const dev = new Map<string, number>();
     for (const t of tickets) {
-      const s = t.threadStatus ?? 'none';
-      status.set(s, (status.get(s) ?? 0) + 1);
+      const prev = status.get(t.status);
+      if (prev) prev.count += 1;
+      else status.set(t.status, { count: 1, cat: t.statusCategory });
       // 한 티켓에 개발자가 여럿일 수 있다. 사람마다 한 표씩 센다.
       for (const n of t.devNames) dev.set(n, (dev.get(n) ?? 0) + 1);
     }
     return { status, dev };
   })();
 
-  const counts = SEGMENTS.reduce<Record<SegKey, number>>(
-    (acc, seg) => {
-      acc[seg.key] = tally.status.get(seg.key) ?? 0;
-      return acc;
-    },
-    {} as Record<SegKey, number>
-  );
-  /** 파이에 넘길 조각. 값이 0 인 상태는 컴포넌트가 알아서 뺀다. */
-  const statusPie: Seg[] = SEGMENTS.map((seg) => ({
-    key: seg.key,
-    label: seg.label,
-    value: counts[seg.key],
-    bg: seg.bg,
-    fill: seg.fill,
-    stroke: seg.stroke,
-  }));
+  /*
+    조각을 **데이터에서** 만든다.
+
+    상태 이름을 코드에 적어 두면 프로젝트를 하나 붙일 때마다 여기를 고쳐야
+    하고, 빠뜨린 이름은 파이에서 통째로 사라져 합이 분모와 안 맞는다.
+    이 차수에 실제로 나온 이름만 그리고, 순서는 진행 흐름(new → 진행 → 완료),
+    같은 카테고리 안에서는 이름순으로 둔다 — 차수마다 순서가 흔들리면
+    옆 차수와 눈으로 비교가 안 된다.
+  */
+  const statusPie: Seg[] = [...tally.status.entries()]
+    .sort((a, b) => {
+      const d =
+        STATUS_CATEGORY_ORDER.indexOf(a[1].cat) -
+        STATUS_CATEGORY_ORDER.indexOf(b[1].cat);
+      return d !== 0 ? d : a[0].localeCompare(b[0]);
+    })
+    .map(([name, { count, cat }]) => ({
+      key: name,
+      label: name,
+      value: count,
+      ...CATEGORY_TONE[cat],
+    }));
   const live = statusPie.filter((x) => x.value > 0);
 
   // 개발 담당 목록. Jira 처럼 이름을 눌러 좁힐 수 있게 한다.
   const devs = [...tally.dev.keys()].sort();
   const rows = tickets.filter(
     (t) =>
-      /*
-        threadStatus 에는 SEGMENTS 에 없는 값('unknown')도 온다. 조각으로는
-        안 그리지만 거를 때 타입을 좁히면 컴파일이 막히므로 문자열로 본다.
-      */
-      (statuses.size === 0 ||
-        (statuses as ReadonlySet<string>).has(t.threadStatus ?? 'none')) &&
+      (statuses.size === 0 || statuses.has(t.status)) &&
       (!onlyDev || t.devNames.includes(onlyDev))
   );
 
   return (
     <section className={className}>
       <SectionHead
-        threadUrl={threadUrl}
         collectedAt={collectedAt}
         collectError={collectError}
         onRefresh={configId ? () => void refresh() : undefined}
         refreshing={refreshing}
       />
       {/*
-        두 축이 왜 다른지 설명한다.
+        한 줄만 둔다. 자리는 데이터 **앞**이다 — 아래에 두면 표를 다 읽고
+        나서야 기준을 알게 되고, 그때는 이미 "왜 아직 완료가 아니지" 를 한 번
+        갸웃한 뒤다. 그리고 섹션 맨 아래에 있으면 바로 다음 섹션(담당자
+        배정) 것으로도 읽힌다 — 경계가 없으니까.
 
-        전에는 네 문장짜리 줄글이었다. `Jira 기획티켓은 최종 기록이라 QA 팀이
-        차수를 닫을 때 한 번에 완료로 바꾸므로…` 처럼 원인과 결과가 한 문장에
-        엉켜 있어서, 정작 알고 싶은 **"두 열 중 뭘 믿나"** 에 답하려면 끝까지
-        읽고 머릿속에서 표로 정리해야 했다.
-
-        표는 그 정리를 대신한다. 열이 곧 질문이고 행이 곧 답이다.
-
-        자리는 데이터 **앞**이다. 아래에 두면 표를 다 읽고 나서야 "아 이건
-        스레드 기준이었구나" 를 알게 되고, 그때는 이미 Jira 열과 어긋난 값을
-        보고 한 번 갸웃한 뒤다. 그리고 섹션 맨 아래에 있으면 바로 다음
-        섹션(담당자 배정) 것으로도 읽힌다 — 경계가 없으니까.
-      */}
-      {/*
-        표를 걷고 한 줄만 남긴다.
-
-        세 줄 중 둘은 화면이 이미 말하고 있었다 —
-          `진행률 기준`  → 차트 카드의 `QA 스레드 완료 공유 기준`
-          `집계 대상`    → 같은 줄에 `FE1팀 기획건` 으로 붙였다
-        남은 하나만 어디에도 없는 사실이다: Jira 열이 아직 안 바뀐 것이
-        **정상**이라는 것. 그것만 적는다.
+        상태 **이름**은 적지 않는다. 전에는 `Verify in QA 가 정상` 이라고
+        박아 뒀는데 그건 KQ 워크플로의 이름이라, GW 를 붙이면 화면이 없는
+        상태를 가리키며 설명하게 된다.
       */}
       <p className="mb-2 text-xs text-muted-foreground">
-        <span className="text-foreground">Jira 열</span>은 차수 종료 시 일괄
-        변경됩니다 · 그전까지{' '}
-        <span className="font-medium">Verify in QA</span> 가 정상 (지금 완료{' '}
+        <span className="text-foreground">기획티켓의 Jira 상태</span> 기준입니다
+        · QA 팀이 차수를 닫을 때 한꺼번에 완료로 바꾸므로 그전까지 진행 중인
+        것이 정상 (지금 완료{' '}
         <span className="font-mono tabular-nums">{ticketDone}건</span>)
       </p>
 
@@ -1883,13 +1998,13 @@ function PlanSection({
       <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-stretch">
         <div className="relative flex shrink-0 flex-col rounded-lg border px-3 py-3 2xl:w-[17rem]">
             <p className="shrink-0 text-xs font-medium">
-              {counts.done}/{total}건 완료{' '}
+              {ticketDone}/{total}건 완료{' '}
               {/*
                 범위를 숫자 바로 옆에 적는다. 제목 옆에 두면 무엇을 한정하는
                 말인지 멀고, 표로 빼면 줄 하나를 위해 표가 생긴다.
               */}
               <span className="font-normal text-muted-foreground">
-                FE1팀 기획건 · QA 스레드 완료 공유 기준
+                FE1팀 기획건
               </span>
             </p>
             {/*
@@ -1924,9 +2039,6 @@ function PlanSection({
             flex + 고정폭으로 짜다가 좁은 화면에서 무너졌다 — "내용" 칸이
             "[." 만 남았다. 열이 다섯이면 폭 분배는 브라우저가 하는 게 맞다.
             table-layout 에 맡기고, 그래도 좁으면 표만 가로로 스크롤한다.
-
-            "QA 스레드" 열 제목 자체가 그 스레드로 가는 링크다 — 값이 어디서
-            온 것인지 한 번에 확인할 수 있어야 한다.
           */}
             <div className="flex h-full flex-col overflow-hidden rounded-lg border">
               {/*
@@ -1950,25 +2062,22 @@ function PlanSection({
               */}
                 {/*
                   열 폭은 **헤더 글자가 안 깨지는 최솟값** 에서 정한다.
-                  브라우저에서 각 칸의 자연 폭을 재서 맞췄다(여백 포함):
+                  table-fixed 라 colgroup 이 곧 실제 폭이고, 모자라면 늘어나지
+                  않고 접히므로 여기 숫자가 최솟값 역할을 한다.
 
-                    기획티켓 79 · 개발 담당 105 · Jira 109 · QA 스레드 110
+                  Jira 열만 128px 로 둔다. 헤더 글자("Jira")는 짧지만 값이
+                  상태 **이름**이라 길다 — `Verify in QA` 가 112px 에서 두 줄로
+                  쪼개졌고, 프로젝트마다 더 긴 이름이 나올 수 있다.
 
-                  전에 개발 담당·Jira 를 96, QA 스레드를 80 으로 깎았더니
-                  "QA 스레드" 가 두 줄로 쪼개졌다 — 그 글자에만 110px 이 든다.
-                  table-fixed 라 colgroup 이 곧 실제 폭이고 모자라면 늘어나지
-                  않고 접히므로, 여기 숫자가 최솟값 역할을 한다.
-
-                  고정 합 28+88+112*3 = 452. 최소폭은 "내용" 몫 200 을 더해 41rem.
+                  고정 합 28+88+112+128 = 356. 최소폭은 "내용" 몫 200 을 더해 35rem.
                 */}
-                <table className="w-full min-w-[41rem] table-fixed text-sm">
+                <table className="w-full min-w-[35rem] table-fixed text-sm">
                   <colgroup>
                     <col className="w-7" />
                     <col className="w-[5.5rem]" />
                     <col />
                     <col className="w-28" />
-                    <col className="w-28" />
-                    <col className="w-28" />
+                    <col className="w-32" />
                   </colgroup>
                   {/*
                     배경과 밑선을 th 에 건다. tr·thead 에 걸면 아래로 지나가는
@@ -2023,22 +2132,8 @@ function PlanSection({
                           ]}
                         />
                       </th>
-                      <th className="py-1.5 pr-2 text-right whitespace-nowrap">
-                        Jira
-                      </th>
                       <th className="py-1.5 pr-3 text-right whitespace-nowrap">
-                        {threadUrl ? (
-                          <a
-                            href={threadUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-baseline gap-1 hover:text-foreground hover:underline"
-                          >
-                            QA 스레드 <ExternalLinkIcon />
-                          </a>
-                        ) : (
-                          'QA 스레드'
-                        )}
+                        Jira
                       </th>
                     </tr>
                   </thead>
@@ -2110,22 +2205,18 @@ function PlanSection({
                                 )}
                               </span>
                             </td>
-                            <td className="py-2 pr-2 align-middle text-right">
-                              {/* Jira 에서 Verify in QA 가 파란 칩이다. 같은 색을 쓴다. */}
-                              <Badge
-                                variant={
-                                  t.status === '완료'
-                                    ? 'ok'
-                                    : t.status === 'Verify in QA'
-                                      ? 'info'
-                                      : 'muted'
-                                }
-                              >
+                            <td className="py-2 pr-3 align-middle text-right">
+                              {/*
+                                색은 상태 **카테고리**에서 온다. 이름으로 고르면
+                                (`=== 'Verify in QA'`) 프로젝트가 늘 때마다
+                                여기에 이름을 하나씩 더 적어야 하고, 안 적힌
+                                이름은 전부 회색이 되어 진행 중인 것과 아직
+                                시작 안 한 것이 같아 보인다.
+                                파이 조각과도 같은 판을 써야 색이 맞는다.
+                              */}
+                              <Badge variant={CATEGORY_BADGE[t.statusCategory]}>
                                 {t.status}
                               </Badge>
-                            </td>
-                            <td className="py-2 pr-3 align-middle text-right">
-                              <ThreadChip s={t.threadStatus} />
                             </td>
                           </tr>
 
@@ -2180,16 +2271,13 @@ function PlanSection({
                                 <td className="py-1.5 pr-2 align-middle text-right">
                                   {d.name && <PersonChip name={d.name} />}
                                 </td>
-                                <td className="py-1.5 pr-2 align-middle text-right">
+                                <td className="py-1.5 pr-3 align-middle text-right">
                                   <Badge
-                                    variant={
-                                      d.status === '완료' ? 'ok' : 'info'
-                                    }
+                                    variant={CATEGORY_BADGE[d.statusCategory]}
                                   >
                                     {d.status}
                                   </Badge>
                                 </td>
-                                <td />
                               </tr>
                             ))}
                         </Fragment>
@@ -2202,14 +2290,6 @@ function PlanSection({
         </div>
       </div>
 
-      {threadUnavailable && (
-        <p className="mt-1.5 text-xs">
-          <span className="font-medium text-amber-700 dark:text-amber-400">
-            QA 스레드를 못 읽어 완료 수가 0 으로 보입니다.
-          </span>{' '}
-          <span className="text-muted-foreground">{threadUnavailable}</span>
-        </p>
-      )}
     </section>
   );
 }
@@ -2637,20 +2717,13 @@ function LinkedReason({
   );
 }
 
-/**
- * 섹션 제목 + QA 스레드 링크.
- *
- * 스레드 링크를 목록 열 제목에만 두면 데이터가 없을 때 링크까지 같이
- * 사라진다. 정작 그때가 "스레드에 뭐라고 올라왔나"를 확인하고 싶은 때다.
- */
+/** 섹션 제목 + 수집 상태 + 갱신 버튼. */
 function SectionHead({
-  threadUrl,
   collectedAt,
   collectError,
   onRefresh,
   refreshing,
 }: {
-  threadUrl: string | null;
   collectedAt?: string | null;
   /** 마지막 수집 **시도**가 남긴 오류. null 이면 마지막 시도는 성공했다. */
   collectError?: string | null;
@@ -2731,23 +2804,6 @@ function SectionHead({
           </button>
         )}
       </div>
-      {threadUrl ? (
-        <a
-          href={threadUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-baseline gap-1 text-xs text-blue-700 hover:underline dark:text-blue-300"
-        >
-          QA 스레드 <ExternalLinkIcon />
-        </a>
-      ) : (
-        <span
-          className="text-xs text-muted-foreground"
-          title="배포대장에서 차수를 읽은 뒤 그 배포일로 #cpo-qa 에서 스레드를 찾습니다"
-        >
-          QA 스레드 못 찾음
-        </span>
-      )}
     </div>
   );
 }

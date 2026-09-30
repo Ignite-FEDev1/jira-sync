@@ -8,7 +8,6 @@
  */
 
 import type { JiraIssue, JiraPort } from './judge';
-import type { SlackMessage, SlackReader } from './qa-thread';
 import type { JiraFieldMeta, JqlClause } from './derive';
 import type { ChangelogEntry } from './triage';
 import type {
@@ -536,68 +535,3 @@ export function createSlackClient(opts: {
   };
 }
 
-/**
- * Slack 읽기 전용 클라이언트.
- *
- * 발송용 `createSlackClient` 와 토큰을 나눠 쓴다. 발송은 봇 토큰(`xoxb-`)으로
- * 되지만 읽기는 안 된다 — 실측으로 봇 토큰에 붙은 스코프가
- * `incoming-webhook, chat:write, usergroups:read, users:read` 뿐이고
- * `conversations.history` 는 `channels:history` 를 요구한다.
- * (스코프를 붙여도 봇은 채널 멤버여야 히스토리를 읽는다.)
- *
- * ── [배포 전 전환] ──────────────────────────────────────────────────────
- * 지금은 개인 사용자 토큰(`xoxp-`)을 받는다. 배포 직전에 할 일:
- *   1. 봇(FE1 Tool Alert)을 `#cpo-qa` 에 초대
- *   2. 봇 앱에 `channels:history` 스코프 추가 후 재설치
- *   3. `SLACK_READ_TOKEN` 값을 봇 토큰으로 교체
- * **이 함수는 고칠 것이 없다.** 토큰 종류를 가리지 않는다.
- * 같은 표시가 붙은 곳을 다 보려면: `rg "배포 전 전환"`
- * ──────────────────────────────────────────────────────────────────────
- */
-export function createSlackReader(opts: {
-  token: string;
-  log?: Logger;
-}): SlackReader {
-  const log = opts.log ?? (() => {});
-  const headers = { Authorization: `Bearer ${opts.token}` };
-
-  async function call(
-    path: string,
-    params: Record<string, string>
-  ): Promise<SlackMessage[]> {
-    const qs = new URLSearchParams(params).toString();
-    const r = await fetchRetry(
-      `https://slack.com/api/${path}?${qs}`,
-      { headers },
-      log
-    );
-    const j = (await r.json()) as {
-      ok: boolean;
-      error?: string;
-      needed?: string;
-      messages?: { ts: string; text?: string }[];
-    };
-    if (!j.ok) {
-      /*
-        스코프 부족은 설정 문제라 원인을 그대로 드러낸다. 조용히 빈 배열을
-        돌려주면 "스레드를 못 찾았다"로 읽혀서 며칠 뒤에야 알게 된다.
-      */
-      throw new Error(
-        `Slack ${path} 실패: ${j.error}${j.needed ? ` (필요 스코프 ${j.needed})` : ''}`
-      );
-    }
-    // 원본을 통째로 들고 간다 — 표가 블록·첨부에 실려 오는 경우가 있다.
-    return (j.messages ?? []).map((m) => ({
-      ts: m.ts,
-      text: m.text,
-      raw: m,
-    }));
-  }
-
-  return {
-    history: (channel, limit) =>
-      call('conversations.history', { channel, limit: String(limit) }),
-    replies: (channel, ts) =>
-      call('conversations.replies', { channel, ts, limit: '200' }),
-  };
-}

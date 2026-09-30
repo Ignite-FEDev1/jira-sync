@@ -15,6 +15,7 @@ import { dbServer } from '@/lib/db';
   **매핑 규칙은 같다** — 복제해 두었다가 컬럼을 더할 때 한쪽을 빠뜨린다.
 */
 import {
+  cycleUpsertRow,
   toConfig,
   toEvent,
   toState,
@@ -60,10 +61,6 @@ function fromConfigInput(i: QaRouterConfigInput): Partial<ConfigRow> {
     row.slack_fallback_channel_id = i.slackFallbackChannelId;
   if (i.slackOpsChannelId !== undefined)
     row.slack_ops_channel_id = i.slackOpsChannelId;
-  if (i.qaThreadChannelId !== undefined)
-    row.qa_thread_channel_id = i.qaThreadChannelId;
-  if (i.qaThreadTitlePattern !== undefined)
-    row.qa_thread_title_pattern = i.qaThreadTitlePattern;
   if (i.planIssueTypeId !== undefined)
     row.plan_issue_type_id = i.planIssueTypeId;
   if (i.devIssueTypeId !== undefined) row.dev_issue_type_id = i.devIssueTypeId;
@@ -363,6 +360,7 @@ export interface StatePatch {
   lastPollAt?: string | null;
   consecutiveFails?: number;
   staleAlertedAt?: string | null;
+  failAlertTs?: string | null;
 }
 
 export async function saveState(
@@ -381,6 +379,7 @@ export async function saveState(
     row.consecutive_fails = patch.consecutiveFails;
   if (patch.staleAlertedAt !== undefined)
     row.stale_alerted_at = patch.staleAlertedAt;
+  if (patch.failAlertTs !== undefined) row.fail_alert_ts = patch.failAlertTs;
   if (Object.keys(row).length === 0) return;
 
   const { error } = await dbServer
@@ -524,6 +523,9 @@ export async function listEvents(
  * 보낸 컬럼만 `on conflict do update set` 에 넣으므로, 사람이 그 차수에 걸어 둔
  * 알림 덮어쓰기는 하루 한 번 도는 이 수집에 지워지지 않는다 (실측으로 확인).
  * 새 컬럼을 payload 에 더할 때 이 칸을 같이 넣지 않도록 주의한다.
+ *
+ * 행을 만드는 `cycleUpsertRow` 는 `rows.ts` 에 있다 — I/O 없는 순수 변환이라
+ * `dbServer` 를 만드는 이 파일에 두지 않는다.
  */
 export async function upsertCycles(
   configId: string,
@@ -533,19 +535,7 @@ export async function upsertCycles(
   if (writesDisabled) return;
   if (cycles.length === 0) return;
   const { error } = await dbServer.from('qa_router_cycles').upsert(
-    cycles.map((c) => ({
-      config_id: configId,
-      deploy_ymd: c.deployYmd,
-      fix_version: c.fixVersion,
-      cycle_label: c.cycleLabel,
-      qa_start_ymd: c.qaStartYmd,
-      qa_end_ymd: c.qaEndYmd,
-      prod_ymd: c.prodYmd,
-      deploy_page_id: c.deployPageId,
-      deploy_page_title: c.deployPageTitle,
-      jira_version_exists: c.jiraVersionExists,
-      collected_at: new Date().toISOString(),
-    })),
+    cycles.map((c) => cycleUpsertRow(configId, c)),
     { onConflict: 'config_id,deploy_ymd' }
   );
   if (error) throw new Error(`upsertCycles: ${error.message}`);
@@ -567,18 +557,20 @@ export async function getCycle(
   return {
     deployYmd: data.deploy_ymd,
     fixVersion: data.fix_version,
+    fixVersionSource: data.fix_version_source ?? undefined,
+    devProjectKey: data.dev_project_key ?? null,
     cycleLabel: data.cycle_label ?? null,
     qaStartYmd: data.qa_start_ymd ?? null,
     qaEndYmd: data.qa_end_ymd ?? null,
+    qaStartYmdManual: data.qa_start_ymd_manual ?? null,
+    qaEndYmdManual: data.qa_end_ymd_manual ?? null,
+    scheduleWarnedOn: data.schedule_warned_on ?? null,
     prodYmd: data.prod_ymd ?? null,
     deployPageId: data.deploy_page_id ?? null,
     deployPageTitle: data.deploy_page_title ?? null,
     jiraVersionExists: Boolean(data.jira_version_exists),
     collectedAt: data.collected_at,
     planProgress: data.plan_progress ?? null,
-    qaThreadTs: data.qa_thread_ts ?? null,
-    threadDeployYmd: data.thread_deploy_ymd ?? null,
-    threadQaEndYmd: data.thread_qa_end_ymd ?? null,
     qaLabel: data.qa_label ?? null,
     planCollectedAt: data.plan_collected_at ?? null,
     alertRulesOverride: data.alert_rules_override ?? null,
@@ -623,7 +615,7 @@ export async function currentCycleFromLedger(
  * 한 차수의 기획티켓 진행 현황을 저장한다.
  *
  * 차수 자체(upsertCycles)와 분리한 이유: 차수 목록은 배포대장에서 오고
- * 진행 현황은 Jira·Slack 에서 온다. 한 번에 쓰면 한쪽이 실패할 때
+ * 진행 현황은 Jira 에서 온다. 한 번에 쓰면 한쪽이 실패할 때
  * 멀쩡한 다른 쪽까지 날아간다.
  */
 export async function savePlanProgress(
@@ -631,10 +623,7 @@ export async function savePlanProgress(
   deployYmd: string,
   progress: PlanProgress,
   meta: {
-    qaThreadTs?: string | null;
     qaLabel?: string | null;
-    /** 스레드 제목에서 읽은 배포일. 배포일 출처 1순위다. */
-    threadDeployYmd?: string | null;
   } = {}
 ): Promise<void> {
   // 리허설: 쓰지 않는다 (setWritesDisabled).
@@ -644,9 +633,7 @@ export async function savePlanProgress(
     plan_collected_at: new Date().toISOString(),
   };
   // 못 찾은 값으로 이미 찾아 둔 값을 덮지 않는다.
-  if (meta.qaThreadTs) patch.qa_thread_ts = meta.qaThreadTs;
   if (meta.qaLabel) patch.qa_label = meta.qaLabel;
-  if (meta.threadDeployYmd) patch.thread_deploy_ymd = meta.threadDeployYmd;
 
   const { error } = await dbServer
     .from('qa_router_cycles')
@@ -723,4 +710,32 @@ export async function saveOutcomes(
       .eq('issue_key', r.issueKey);
     if (error) throw new Error(`saveOutcomes(${r.issueKey}): ${error.message}`);
   }
+}
+
+/**
+ * 차수의 수동 QA 일정을 쓴다. 대장 파싱 칸은 건드리지 않는다.
+ *
+ * 둘 다 null 이면 지우는 것이고, 그러면 사다리가 2순위(대장)로 내려간다.
+ */
+export async function saveManualSchedule(
+  configId: string,
+  deployYmd: string,
+  startYmd: string | null,
+  endYmd: string | null
+): Promise<void> {
+  if (writesDisabled) return;
+  const { error } = await dbServer
+    .from('qa_router_cycles')
+    .update({
+      qa_start_ymd_manual: startYmd,
+      qa_end_ymd_manual: endYmd,
+      /*
+        사람이 값을 넣었으면 경고 기록을 지운다. 다음에 또 미정이 되면
+        (값을 지우거나 배포일이 바뀌면) 처음처럼 한 번 알려야 한다.
+      */
+      schedule_warned_on: null,
+    })
+    .eq('config_id', configId)
+    .eq('deploy_ymd', deployYmd);
+  if (error) throw new Error(`saveManualSchedule: ${error.message}`);
 }

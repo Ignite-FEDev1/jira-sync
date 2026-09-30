@@ -21,6 +21,7 @@
 import type { JudgeEvidence } from './judge';
 import type {
   ActiveCycle,
+  DeployCycle,
   DerivedContext,
   AlertRule,
   AlertSwitches,
@@ -29,6 +30,7 @@ import type {
   QaRouterConfig,
   QaRouterEvent,
   QaRouterState,
+  QaScheduleRule,
   QuietHours,
   SeenEntry,
   SideEffectResult,
@@ -45,11 +47,10 @@ export type ConfigRow = {
   jira_operator_account_id: string | null;
   confluence_deploy_root_id: string | null;
   fix_version_pattern: string | null;
+  qa_schedule_rule?: unknown;
   slack_channel_id: string;
   slack_fallback_channel_id: string | null;
   slack_ops_channel_id: string | null;
-  qa_thread_channel_id: string | null;
-  qa_thread_title_pattern: string | null;
   plan_issue_type_id: string | null;
   dev_issue_type_id: string | null;
   plan_issue_type_name: string | null;
@@ -80,6 +81,7 @@ export type StateRow = {
   locked_until: string | null;
   locked_by: string | null;
   stale_alerted_at: string | null;
+  fail_alert_ts: string | null;
   side_effects: Record<string, SideEffectResult> | null;
   updated_at: string;
 };
@@ -116,6 +118,7 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
     jiraOperatorAccountId: r.jira_operator_account_id,
     confluenceDeployRootId: r.confluence_deploy_root_id,
     fixVersionPattern: r.fix_version_pattern,
+    qaScheduleRule: (r.qa_schedule_rule as QaScheduleRule | null) ?? null,
     slackChannelId: r.slack_channel_id,
     slackFallbackChannelId: r.slack_fallback_channel_id,
     slackOpsChannelId: r.slack_ops_channel_id,
@@ -125,8 +128,6 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
       그때 undefined 가 흘러가면 JQL 이 `issuetype = undefined` 가 된다.
       폴백 값은 컬럼이 생기기 전에 코드에 박혀 있던 값과 똑같다.
     */
-    qaThreadChannelId: r.qa_thread_channel_id ?? null,
-    qaThreadTitlePattern: r.qa_thread_title_pattern ?? '%s 정기배포 QA',
     planIssueTypeId: r.plan_issue_type_id ?? '10001',
     devIssueTypeId: r.dev_issue_type_id ?? '10205',
     planIssueTypeName: r.plan_issue_type_name ?? '스토리',
@@ -163,6 +164,8 @@ export function toState(r: StateRow): QaRouterState {
     lockedUntil: r.locked_until,
     lockedBy: r.locked_by,
     staleAlertedAt: r.stale_alerted_at,
+    // 컬럼이 없던 시절에 쓰인 행도, 리허설이 만드는 빈 행도 null 이 답이다.
+    failAlertTs: r.fail_alert_ts ?? null,
     sideEffects: r.side_effects ?? {},
     updatedAt: r.updated_at,
   };
@@ -189,5 +192,41 @@ export function toEvent(r: EventRow): QaRouterEvent {
     error: r.error,
     fixVersion: r.fix_version,
     createdAt: r.created_at,
+  };
+}
+
+/**
+ * 배치가 쓸 한 행. **수동 입력 칸을 담지 않는다.**
+ *
+ * `upsert` 는 payload 에 있는 칸을 전부 덮어쓴다. 여기에 `qa_start_ymd_manual`
+ * 을 넣으면 사람이 넣은 값이 다음 수집에서 null 로 지워진다. 담지 않으면
+ * DB 의 값이 그대로 남는다.
+ *
+ * 테스트가 이 함수를 직접 부른다 - DB 없이 "무엇을 덮어쓰나" 를 고정한다.
+ *
+ * 이 함수가 `repository.ts` 가 아니라 여기 있는 이유: `DeployCycle → Record`
+ * 순수 변환일 뿐 I/O 가 없는데, `repository.ts` 는 맨 위에서 `dbServer`
+ * (Supabase 클라이언트)를 만든다. 거기 두면 이 함수 하나를 부르려고 테스트가
+ * `dbServer` 생성까지 모듈 그래프에 끌고 들어와, 환경변수 없이는 테스트
+ * 스위트 자체가 로드 시점에 죽는다 — 실제로 그렇게 깨진 적이 있다.
+ */
+export function cycleUpsertRow(
+  configId: string,
+  c: DeployCycle
+): Record<string, unknown> {
+  return {
+    config_id: configId,
+    deploy_ymd: c.deployYmd,
+    fix_version: c.fixVersion,
+    cycle_label: c.cycleLabel,
+    qa_start_ymd: c.qaStartYmd,
+    qa_end_ymd: c.qaEndYmd,
+    prod_ymd: c.prodYmd,
+    deploy_page_id: c.deployPageId,
+    deploy_page_title: c.deployPageTitle,
+    jira_version_exists: c.jiraVersionExists,
+    fix_version_source: c.fixVersionSource ?? null,
+    dev_project_key: c.devProjectKey ?? null,
+    collected_at: new Date().toISOString(),
   };
 }
