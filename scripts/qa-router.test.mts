@@ -46,8 +46,8 @@ import {
 import type { AlertRule, AlertWhen } from '@/lib/services/qa-router/types';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
-import { cycleUpsertRow, toState } from '@/lib/services/qa-router/rows';
-import type { StateRow } from '@/lib/services/qa-router/rows';
+import { cycleUpsertRow, toConfig, toState } from '@/lib/services/qa-router/rows';
+import type { ConfigRow, StateRow } from '@/lib/services/qa-router/rows';
 import {
   extractIssueKeys,
   extractJqlStrings,
@@ -63,8 +63,10 @@ import type { DeployCycle } from '../lib/services/qa-router/types';
 import {
   checkAlertRules,
   DEFAULT_ALERT_RULES,
+  DEFAULT_TEMPLATE,
   effectiveAlertRules,
   hasAlertOverride,
+  ruleProblem,
   varsFor,
 } from '../lib/services/qa-router/types';
 import {
@@ -5545,6 +5547,205 @@ test('상태 매핑 — alert_sent_on 이 읽힌다', () => {
 test('상태 매핑 — 칸이 없으면 빈 객체다', () => {
   const st = toState({ config_id: 'c1' } as never);
   assert.deepEqual(st.alertSentOn, {});
+});
+
+/*
+  ── 옛 모양을 만나도 화면이 살아 있나 ──
+
+  `toAlertRuleV2` 자체는 여러 번 단위 테스트돼 있다. 그런데 **언제 그것을
+  부를지 정하는 자리**(`toConfig`)는 지금까지 어느 테스트도 안 돌렸다.
+  타입 검사는 `typeof null === 'object'` 가 런타임에 무슨 일을 하는지
+  말해 주지 않는다.
+
+  이 길이 이 브랜치가 남긴 안전망이다 — 마이그레이션이 DB 를 새 모양으로
+  바꿨지만, 되돌린 백업이나 손으로 넣은 행이 옛 모양일 수 있고 그때 화면이
+  죽으면 안 된다. 그래서 여기서 직접 돌린다.
+*/
+
+/** `alert_rules` 만 바꿔 가며 `toConfig` 를 돌리기 위한 최소 행. */
+const CONFIG_ROW = {
+  id: 'cfg-1',
+  name: 'CPO BO QA',
+  enabled: true,
+  jira_instance: 'ignite',
+  jira_filter_id: '12571',
+  triage_account_id: 'triage',
+  jira_operator_account_id: null,
+  confluence_deploy_root_id: 'root',
+  fix_version_pattern: 'release_{ymd}',
+  qa_schedule_rule: null,
+  slack_channel_id: 'C1',
+  slack_fallback_channel_id: 'C1',
+  slack_ops_channel_id: null,
+  plan_issue_type_id: null,
+  dev_issue_type_id: null,
+  plan_issue_type_name: null,
+  dev_issue_type_name: null,
+  co_assignee_field: null,
+  plan_collect_hours: null,
+  judge_tiers: null,
+  alert_rules: null,
+  quiet_hours: { startHour: 9, endHour: 18, skipWeekend: true },
+  tick_interval_seconds: null,
+  reassign_mode: 'off',
+  self_account_id: null,
+  heartbeat_stale_minutes: 30,
+  created_at: '2026-09-01T00:00:00Z',
+  updated_at: '2026-09-01T00:00:00Z',
+} as unknown as ConfigRow;
+
+/** 그 행에 `alert_rules` 만 끼워 넣고 규칙 목록을 받는다. */
+const rulesFromRow = (alert_rules: unknown) =>
+  toConfig({ ...CONFIG_ROW, alert_rules } as ConfigRow).alertRules;
+
+test('설정 읽기 — 옛 모양과 새 모양이 섞여 와도 둘 다 산다', () => {
+  const legacy = {
+    id: 'qaEnd',
+    anchor: 'qa_end',
+    offset: 0,
+    shift: 'next_workday',
+    label: 'QA 종료',
+    enabled: true,
+    template: '본문',
+  };
+  const modern = {
+    id: 'dailySummary',
+    at: '18:00',
+    when: { kind: 'activeCycle' },
+    label: '마감 요약',
+    enabled: true,
+  };
+
+  const out = rulesFromRow([legacy, modern]);
+  assert.equal(out.length, 2);
+
+  // 옛 것은 감싼다 — 시각이 없던 규칙은 09:10 앵커 규칙이 된다.
+  assert.deepEqual(out[0], {
+    id: 'qaEnd',
+    at: '09:10',
+    when: {
+      kind: 'anchor',
+      anchor: 'qa_end',
+      offset: 0,
+      shift: 'next_workday',
+    },
+    label: 'QA 종료',
+    enabled: true,
+    template: '본문',
+  });
+  // 새 것은 **손대지 않는다.** 들어간 값이 그대로 나와야 한다.
+  assert.deepEqual(out[1], modern);
+});
+
+test('설정 읽기 — 새 모양만 있으면 아무것도 변환하지 않는다', () => {
+  const input = [
+    {
+      id: 'prodToday',
+      at: '09:10',
+      when: { kind: 'anchor', anchor: 'prod', offset: 0, shift: 'none' },
+      label: '오늘 운영 배포',
+      enabled: true,
+      template: DEFAULT_TEMPLATE,
+    },
+    {
+      id: 'scheduleWarning',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: false,
+    },
+  ];
+  // 글자 하나 안 바뀌어야 한다 — 읽기는 옮기는 일이지 고치는 일이 아니다.
+  assert.deepEqual(rulesFromRow(input), input);
+  assert.equal(JSON.stringify(rulesFromRow(input)), JSON.stringify(input));
+});
+
+test('설정 읽기 — 칸이 비면 기본 규칙 다섯으로 떨어진다', () => {
+  /*
+    빈 배열은 "알림을 다 껐다" 가 아니라 컬럼이 아직 없다는 뜻에 가깝다.
+    여기가 비면 화면은 "알림 없음" 을 그리는데 SQL 은 제 기본값으로 알림을
+    보내고 있어서 화면과 동작이 어긋난다.
+  */
+  for (const empty of [null, [], undefined]) {
+    assert.deepEqual(
+      rulesFromRow(empty),
+      [...DEFAULT_ALERT_RULES],
+      `${JSON.stringify(empty)} 에서 기본값으로 안 떨어졌다`
+    );
+  }
+  // 기본값 자체가 걸러지면 안 된다 — 다섯이 그대로 통과해야 한다.
+  assert.equal(rulesFromRow([]).length, 5);
+});
+
+/*
+  ── 쓰레기 한 줄이 화면을 못 죽이게 ──
+
+  전에는 "객체가 아니면 그대로 통과" 였다. 던지지는 않았지만 **터지는 자리를
+  화면으로 미뤘을 뿐**이다. 실측:
+
+    toConfig([null])  → [null]            (여기서는 조용하다)
+    milestoneFrom     → Cannot read properties of null (reading 'when')
+    ruleProblem       → Cannot read properties of null (reading 'label')
+
+  둘 다 알림 목록을 그리는 길목이라 화면이 통째로 하얘지고, 그러면 그 행을
+  고치러 들어갈 화면이 없어진다. 그래서 읽을 때 버린다.
+*/
+test('설정 읽기 — 규칙이 아닌 항목은 버리고 멀쩡한 것만 남긴다', () => {
+  const good = {
+    id: 'ok',
+    at: '09:10',
+    when: { kind: 'scheduleUnusable' },
+    label: '일정 경고',
+    enabled: true,
+  };
+
+  for (const junk of [null, undefined, 'nope', 7, true, {}, []]) {
+    const out = rulesFromRow([junk, good]);
+    const what = JSON.stringify(junk) ?? 'undefined';
+    // 던지지 않는다
+    assert.deepEqual(out, [good], `${what} 를 안 버렸다`);
+    // 그리고 칸이 빈 규칙으로 둔갑하지도 않는다
+    assert.equal(out.length, 1, `${what} 가 규칙 하나로 남았다`);
+  }
+});
+
+test('설정 읽기 — 버린 뒤 화면 코드가 실제로 안 던진다', () => {
+  /*
+    위 테스트는 "버렸다" 만 본다. 정작 확인해야 하는 것은 **그래서 화면이
+    사나** 이므로, 걸러진 목록을 알림 목록을 그리는 두 함수에 그대로 먹인다.
+    이 둘이 옛 코드에서 실제로 던지던 자리다.
+  */
+  const rules = rulesFromRow([
+    null,
+    {},
+    'nope',
+    {
+      id: 'qaEnd',
+      anchor: 'qa_end',
+      offset: 0,
+      shift: 'none',
+      label: 'QA 종료',
+      enabled: true,
+    },
+  ]);
+  const s = {
+    qaStartYmd: '2026-09-22',
+    qaEndYmd: '2026-09-29',
+    prodYmd: '2026-09-30',
+  };
+  assert.doesNotThrow(() => milestoneFrom(rules, s, '2026-09-29'));
+  assert.doesNotThrow(() => rules.map((r) => ruleProblem(r)));
+  // 살아남은 규칙은 제 일을 한다 — 버리기가 멀쩡한 줄까지 먹지 않았다.
+  assert.equal(milestoneFrom(rules, s, '2026-09-29'), 'QA 종료');
+});
+
+test('설정 읽기 — 쓰레기만 있으면 빈 목록이다 (기본값으로 안 되돌린다)', () => {
+  /*
+    `[]` 와 다르다. `[]` 는 "컬럼이 아직 없다" 로 읽어 기본값으로 떨어지지만,
+    여기는 행이 값을 들고 있었고 그게 전부 못 읽을 것이었다는 뜻이다.
+    기본값으로 되돌리면 **DB 에 없는 알림을 화면이 있다고 말하게 된다.**
+  */
+  assert.deepEqual(rulesFromRow([null, 'nope']), []);
 });
 
 test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {

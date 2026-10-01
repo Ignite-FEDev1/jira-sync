@@ -113,6 +113,30 @@ export type EventRow = {
   created_at: string;
 };
 
+/**
+ * 규칙으로 읽을 수 있는 모양인가. 아니면 **버린다.**
+ *
+ * ── 왜 버리나 ──
+ *
+ * 전에는 "객체가 아니면 그대로 통과" 였다. `'anchor' in null` 이 던지는 것만
+ * 막고 값은 흘려보냈는데, **그러면 터지는 자리가 화면으로 옮겨갈 뿐이다.**
+ * 실측으로 확인했다 — `alert_rules` 에 `null`·문자열·숫자·`{}` 가 하나라도
+ * 섞이면 `milestoneFrom` 과 `ruleProblem` 이 둘 다 던진다.
+ *
+ *   null  → Cannot read properties of null (reading 'when')
+ *   {}    → Cannot read properties of undefined (reading 'kind')
+ *
+ * 그 둘은 알림 목록을 그리는 길목이라 화면이 통째로 하얘진다. 그러면 **그
+ * 행을 고치러 들어갈 화면 자체가 없어진다.** 한 줄이 조용히 빠지는 쪽과
+ * 화면이 안 열리는 쪽 중에 고칠 수 있는 길이 남는 쪽을 택한다.
+ *
+ * 버리는 것은 "둘 중 어느 모양도 아닌 것" 뿐이다. 옛 모양(`anchor`)도
+ * 새 모양(`when`)도 그대로 살아서 아래 map 으로 간다.
+ */
+function isAlertRuleShaped(x: unknown): x is object {
+  return !!x && typeof x === 'object' && ('anchor' in x || 'when' in x);
+}
+
 export function toConfig(r: ConfigRow): QaRouterConfig {
   return {
     id: r.id,
@@ -152,11 +176,11 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
     alertRules: (r.alert_rules?.length
       ? (r.alert_rules as unknown[])
       : [...DEFAULT_ALERT_RULES]
-    ).map((x) =>
-      x && typeof x === 'object' && 'anchor' in x
-        ? toAlertRuleV2(x as LegacyAlertRule)
-        : (x as AlertRule)
-    ),
+    )
+      .filter(isAlertRuleShaped)
+      .map((x) =>
+        'anchor' in x ? toAlertRuleV2(x as LegacyAlertRule) : (x as AlertRule)
+      ),
     quietHours: r.quiet_hours,
     tickIntervalSeconds: r.tick_interval_seconds ?? 60,
     reassignMode: r.reassign_mode,
