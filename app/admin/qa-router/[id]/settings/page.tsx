@@ -3398,8 +3398,15 @@ function RuleDetail({
           /*
             조건형은 차수 날짜가 아니라 그날의 상태를 보고 나간다. 며칠에
             걸리는지 미리 적을 수 없고, 적으면 거짓말이 된다.
+
+            조건형끼리 같은 시각에 서면 앞엣것만 나간다 — 날짜가 없으니
+            어느 날이든 그렇다. 그 경우까지 `나갑니다` 로 적지 않는다.
           */
-          `${whenText(r.when)}마다 ${r.at} 에 나갑니다`
+          row.shadowed
+            ? `${whenText(r.when)}마다 ${r.at} 이지만, 같은 시각에 ${
+                row.shadowedBy ? ruleName(row.shadowedBy) : '다른 알림'
+              } 이 먼저 잡혀 이건 안 나갑니다`
+            : `${whenText(r.when)}마다 ${r.at} 에 나갑니다`
         ) : !row.day ? (
           '이번 차수 날짜를 아직 못 읽어 언제 울릴지 계산할 수 없습니다'
         ) : row.pastCutoff ? (

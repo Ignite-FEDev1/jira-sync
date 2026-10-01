@@ -1020,10 +1020,15 @@ export interface AlertRuleRow {
    * 안 울린다는 뜻이 아니다 — `groupAlertRows` 가 그 둘을 구분한다.
    */
   day: string | null;
-  /** 같은 시각·같은 날에 먼저 걸린 규칙이 있어서 이건 안 울린다. */
+  /**
+   * 같은 시각에 먼저 걸린 규칙이 있어서 이건 안 울린다.
+   *
+   * 앵커끼리는 **같은 날 같은 시각**일 때만 겹치고, 조건형이 앞에 있으면
+   * 날짜와 무관하게 그 시각 전체가 막힌다 (`alertRuleRows` 주석 참고).
+   */
   shadowed: boolean;
   /**
-   * 같은 날 먼저 걸려 이걸 막은 규칙. 가려졌을 때만 있다.
+   * 먼저 걸려 이걸 막은 규칙. 가려졌을 때만 있다.
    *
    * 누가 막았는지 같이 들고 다녀야 화면이 **이름을 댈 수 있다.**
    * `위 알림이 먼저 걸려` 라고만 하면 그 "위" 가 무엇인지 목록을 다시
@@ -1098,8 +1103,24 @@ export function alertRuleRows(
     고른다(`alert-rule.ts`). 그래서 같은 날이라도 시각이 다르면 둘 다 나간다 —
     화면도 같은 기준으로 세야 "안 나갑니다" 가 거짓말이 안 된다.
 
-    조건형(`activeCycle`·`scheduleUnusable`)은 여기 안 낀다. 그 둘이 그날
-    나갈지는 보내는 순간의 상태가 정하는 것이라 차수 날짜로는 못 센다.
+    ── 조건형도 자리를 차지한다 (날짜가 아니라 **시각 전체**를) ──
+
+    한동안 조건형(`activeCycle`·`scheduleUnusable`)을 이 셈에서 아예
+    뺐었다. 그 둘이 그날 나갈지는 보내는 순간의 상태가 정하는 것이라
+    차수 날짜로는 못 세기 때문이다. 그런데 `qa_router_due_rules` 는
+    **종류를 안 가린다** — 같은 `at` 에서 목록 앞엣것 하나만 남긴다.
+    마이그레이션이 `scheduleWarning@09:10` 을 목록 끝에 붙이고 `날짜 알림
+    추가` 가 그 뒤에 또 09:10 을 붙이므로, 새로 만든 날짜 알림은 조건형
+    뒤에 서게 된다. 조건이 맞는 날엔 조건형이 09:10 을 가져가고 뒤엣것은
+    굶는데, 화면만 `이번 차수 MM-DD 09:10 에 울립니다` 라고 적고 있었다.
+
+    날짜를 모른다는 것은 "안 걸린다" 가 아니라 **"어느 날이든 걸릴 수
+    있다"** 이므로, 조건형은 `*@시각` 한 칸을 잡는다. 그 뒤의 같은 시각
+    규칙은 날짜가 무엇이든 가려진 것으로 센다 — 못 재는 쪽으로 틀리는
+    편이 "울립니다" 라고 단언하고 안 울리는 것보다 낫다.
+
+    반대 방향은 안 센다. 앵커는 하루만 그 시각을 쓰므로, 그것 때문에
+    조건형을 `안 나갑니다` 라고 적으면 나머지 모든 날에 대해 거짓말이 된다.
   */
   const taken = new Map<string, AlertRule>();
   return rules.map((r) => {
@@ -1107,9 +1128,18 @@ export function alertRuleRows(
     const day =
       r.enabled && w ? ruleDay(anchorOf(w.anchor), w.offset, w.shift) : null;
     const pastCutoff = !!(day && cutoff && day > cutoff);
-    const slot = day ? `${day}@${r.at}` : null;
+    const slot = w
+      ? day
+        ? `${day}@${r.at}`
+        : null
+      : r.enabled
+        ? `*@${r.at}`
+        : null;
     // 안 나가는 줄은 다른 줄을 가리지도 않는다.
-    const blocker = slot && !pastCutoff ? (taken.get(slot) ?? null) : null;
+    const blocker =
+      slot && !pastCutoff
+        ? (taken.get(slot) ?? taken.get(`*@${r.at}`) ?? null)
+        : null;
     if (slot && !pastCutoff && !blocker) taken.set(slot, r);
     return {
       rule: r,
@@ -1205,7 +1235,7 @@ function ReadRow({
       )}
       {clash && (
         <span className="text-[10.5px] text-amber-700 dark:text-amber-400">
-          ⚠ 같은 날 겹쳐 안 나감
+          ⚠ 같은 시각 겹쳐 안 나감
         </span>
       )}
     </div>

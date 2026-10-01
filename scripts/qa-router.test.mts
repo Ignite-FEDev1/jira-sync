@@ -38,6 +38,14 @@ import {
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
 import { planToggleEnabled } from '@/app/admin/qa-router/toggle-enabled-plan';
+/*
+  화면 파일에서 가져오는 유일한 함수다. `alertRuleRows` 는 "이 규칙이
+  이번 차수 며칠에 울리나 · 누구에게 가려지나" 를 셈하는 순수 함수이고,
+  그 답이 `dueRules`(위)·`qa_router_due_rules`(SQL)와 갈리면 화면이
+  "울립니다" 라고 적은 날 알림이 안 나간다. React 를 안 쓰므로 환경변수
+  없이도 돈다.
+*/
+import { alertRuleRows } from '@/app/admin/qa-router/[id]/pipeline';
 import {
   dueRules,
   statusPhrase,
@@ -5144,6 +5152,71 @@ test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () =>
 });
 
 /*
+  ── statusPhrase 는 쌍둥이라고 적어 놓고 짝이 없었다 ──
+
+  `alert-rule.ts` 의 머리말에는 "이 파일의 함수들은 SQL 쌍둥이와 줄 단위로
+  대조해야 한다" 고 적혀 있다. 그런데 `statusPhrase` 는 **실행 코드에서
+  아무도 안 부른다** — 18시 요약의 머리말을 실제로 만드는 것은 디스패처의
+  `case head_kind` 뿐이다(20260930). 기존 테스트는 TS 리터럴을 테스트
+  파일에 적은 리터럴과 맞대므로, SQL 쪽 문장을 한 글자 고쳐도 275개가
+  전부 초록이다.
+
+  함수를 지우지는 않는다. 이 저장소는 **부르는 데가 없어도 핀으로 남기는**
+  쌍둥이를 일부러 둔다(`milestoneFrom` 이 그렇다) — 화면과 알림이 다른
+  말을 하기 시작하는 순간을 테스트가 먼저 알아채기 위해서다. 결함은 함수의
+  존재가 아니라 **핀이 없는 것**이었다. 그래서 여기서 원문을 맞댄다.
+
+  골든(`alert-messages.json`)이 못 덮는 자리이기도 하다. 14개는 `ok` 와
+  `failed` 머리말만 지나고 `stalled`(`확인이 멈춰 있습니다`)·`streak`
+  (`연속 실패 N회`)는 한 번도 안 나온다. 골든을 다시 걷어 늘리지 않는다 —
+  그것은 "옮기기 전 글자" 라 다시 걷으면 재는 의미가 사라진다. 문구만큼은
+  이 테스트가 막는다.
+
+  `%s`(SQL)와 `${...}`(TS)는 같은 구멍이므로 `%s` 로 맞춘 뒤 비교한다.
+*/
+test('18시 머리말 문구 — statusPhrase 와 SQL case 가 한 글자도 다르지 않다', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const ts = readFileSync(
+    new URL('../lib/services/qa-router/alert-rule.ts', import.meta.url),
+    'utf-8'
+  );
+
+  // SQL — `case head_kind … end` 안의 작은따옴표 리터럴에서 종류 이름 셋을 뺀다
+  const block = sql.match(/case head_kind([\s\S]*?)\bend\b/);
+  assert.ok(block, 'SQL 에서 case head_kind 블록을 못 찾았다');
+  const KINDS = ['stalled', 'failed', 'streak', 'ok'];
+  const fromSql = [...block![1].matchAll(/'([^']*)'/g)]
+    .map((m) => m[1])
+    .filter((s) => !KINDS.includes(s));
+
+  // TS — statusPhrase 본문의 return 리터럴을 순서대로
+  const body = ts.match(
+    /export function statusPhrase\(i: StatusInput\): string \{([\s\S]*?)\n\}/
+  );
+  assert.ok(body, 'alert-rule.ts 에서 statusPhrase 본문을 못 찾았다');
+  const fromTs = [...body![1].matchAll(/return\s+(?:'([^']*)'|`([^`]*)`)/g)]
+    .map((m) => m[1] ?? m[2])
+    .map((s) => s.replace(/\$\{[^}]*\}/g, '%s'));
+
+  assert.equal(fromSql.length, 4, `SQL 에서 네 문장을 못 골랐다: ${fromSql}`);
+  assert.equal(fromTs.length, 4, `TS 에서 네 문장을 못 골랐다: ${fromTs}`);
+  assert.deepEqual(
+    fromTs,
+    fromSql,
+    'statusPhrase 와 디스패처의 머리말 문구가 갈렸다'
+  );
+
+  // 빈 문자열끼리 맞아 통과하는 길을 막는다.
+  for (const s of fromSql) assert.ok(s.startsWith('오늘 마감'), s);
+});
+
+/*
   ── SAMPLE_VARS 도 손으로 맞추는 거울이다 ──
 
   `20261001` 미리보기가 **예시값**으로 채우는 변수 목록과, 설정 화면이
@@ -6075,6 +6148,141 @@ test('알림 고르기 — 주말엔 아무것도 안 나간다', () => {
   );
   assert.deepEqual(
     dueRules(rules, { ...BASE, todayYmd: '2026-10-11' }).map((r) => r.id),
+    []
+  );
+});
+
+/*
+  ── 화면도 같은 굶김을 알아야 한다 ──
+
+  `qa_router_due_rules` 는 같은 `at` 에서 목록 **앞엣것** 하나만 남기고,
+  종류를 안 가린다. 그래서 조건형(`activeCycle`·`scheduleUnusable`)이 앞에
+  있으면 조건이 맞는 날 같은 시각의 뒷 규칙이 통째로 굶는다.
+
+  마이그레이션이 `scheduleWarning@09:10` 을 목록 **끝에** 붙이고 설정 화면의
+  `날짜 알림 추가` 가 또 09:10 짜리를 그 뒤에 붙이므로, 사람이 새로 만든
+  날짜 알림이 정확히 그 자리에 선다. 그런데 `alertRuleRows` 는 조건형을
+  겹침 셈에서 아예 빼고 있어, 화면이 `이번 차수 MM-DD 09:10 에 울립니다`
+  라고 단언하고 실제로는 안 울리는 조합이 만들어졌다.
+
+  조건형은 날짜가 없으니 `*@시각` 한 칸을 잡는다 — "어느 날이든 걸릴 수
+  있다" 는 뜻이다. 반대 방향(앵커가 조건형을 가림)은 안 센다: 앵커는 하루만
+  그 시각을 쓰므로 나머지 모든 날에 대해 거짓말이 되기 때문이다.
+*/
+const ROWS_SCHEDULE = {
+  qaStartYmd: '2026-10-05',
+  qaEndYmd: '2026-10-06',
+  prodYmd: '2026-10-07',
+};
+const PROD_TODAY = {
+  kind: 'anchor',
+  anchor: 'prod',
+  offset: 0,
+  shift: 'none',
+} as const;
+
+test('겹침 셈 — 앞선 조건형이 같은 시각의 날짜 알림을 가린다', () => {
+  const rows = alertRuleRows(
+    [
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+      }),
+      R({ id: 'custom1', at: '09:10', when: PROD_TODAY }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.equal(rows[0].shadowed, false);
+  assert.equal(rows[1].day, '2026-10-07');
+  assert.equal(rows[1].shadowed, true, '09:10 을 조건형이 이미 가져갔다');
+  assert.equal(
+    rows[1].shadowedBy?.id,
+    'scheduleWarning',
+    '이름을 댈 수 있어야 한다'
+  );
+});
+
+test('겹침 셈 — 시각이 다르면 조건형은 아무도 안 가린다', () => {
+  const rows = alertRuleRows(
+    [
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+      }),
+      R({ id: 'custom1', at: '18:00', when: PROD_TODAY }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.deepEqual(
+    rows.map((r) => r.shadowed),
+    [false, false]
+  );
+});
+
+test('겹침 셈 — 꺼진 조건형은 자리를 안 잡는다', () => {
+  const rows = alertRuleRows(
+    [
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+        enabled: false,
+      }),
+      R({ id: 'custom1', at: '09:10', when: PROD_TODAY }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.equal(rows[1].shadowed, false, '안 나가는 줄은 다른 줄을 안 가린다');
+});
+
+test('겹침 셈 — 앵커는 조건형을 안 가린다 (하루치라 거짓말이 된다)', () => {
+  const rows = alertRuleRows(
+    [
+      R({ id: 'custom1', at: '09:10', when: PROD_TODAY }),
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+      }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.deepEqual(
+    rows.map((r) => r.shadowed),
+    [false, false]
+  );
+});
+
+test('겹침 셈 — 조건형 둘이 같은 시각이면 뒤엣것이 가려진다', () => {
+  const rows = alertRuleRows(
+    [
+      R({ id: 'dailySummary', at: '09:10', when: { kind: 'activeCycle' } }),
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+      }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.equal(rows[1].shadowed, true);
+  assert.equal(rows[1].shadowedBy?.id, 'dailySummary');
+});
+
+/*
+  마이그레이션이 깔아 두는 배치(18:00 요약 + 09:10 경고 + 09:10 날짜 알림
+  셋)에서는 **아무도 안 가려져야** 한다. 경고가 목록 끝에 붙기 때문이다.
+  이게 깨지면 새 대상이 열리자마자 화면이 겹침 경고를 띄운다.
+*/
+test('겹침 셈 — 기본 다섯 규칙 배치에서는 겹침이 없다', () => {
+  const rows = alertRuleRows(
+    DEFAULT_ALERT_RULES.map((r) => ({ ...r })),
+    ROWS_SCHEDULE
+  );
+  assert.deepEqual(
+    rows.filter((r) => r.shadowed).map((r) => r.rule.id),
     []
   );
 });

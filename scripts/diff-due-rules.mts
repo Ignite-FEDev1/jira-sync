@@ -61,6 +61,34 @@ const DAYS = [
 ];
 const HMS = ['08:00', '09:10', '09:40', '16:00', '17:59', '18:00', '23:59'];
 
+/*
+  ── `when` 이 **섞였을 때**가 진짜 물음이다 ──
+
+  처음엔 `whenOk` 를 전부 참 아니면 전부 거짓으로만 돌렸다. 그러면 "같은
+  시각에서 하나를 고르는" 규칙이 조건과 **어느 순서로** 맞물리는지를 한
+  번도 안 잰다 — 전부 참이면 늘 앞엣것(`a`)이 이기고, 전부 거짓이면 아무도
+  안 나간다.
+
+  실제로 알림이 사라진 자리가 거기였다. 조건이 거짓인 규칙이 09:10 자리를
+  **먼저 차지하고** 그 뒤에 조건을 보면, 같은 09:10 의 뒷 규칙이 통째로
+  굶는다. 양쪽 다 "고른 뒤가 아니라 고르기 전에" 걸러야 같은 답이 나온다.
+
+  그래서 09:10 을 나눠 쓰는 `a`·`b` 의 조건을 따로 켜고 끈다.
+
+    all   전부 참        — 09:10 은 앞엣것 `a`
+    none  전부 거짓      — 아무것도 안 나감
+    aOff  `a` 만 거짓    — 09:10 을 `b` 가 가져가야 한다
+    bOff  `b` 만 거짓    — 09:10 은 그대로 `a`
+    abOff 둘 다 거짓     — 09:10 은 비고 18:00 은 그대로 나감
+*/
+const WHEN_MODES: Record<string, Record<string, boolean>> = {
+  all: { a: true, b: true, c: true, d: true },
+  none: { a: false, b: false, c: false, d: false },
+  aOff: { a: false, b: true, c: true, d: true },
+  bOff: { a: true, b: false, c: true, d: true },
+  abOff: { a: false, b: false, c: true, d: true },
+};
+
 async function main() {
   const c = new Client({ connectionString: process.argv[2] });
   await c.connect();
@@ -69,7 +97,7 @@ async function main() {
   for (const today of DAYS)
     for (const nowHm of HMS)
       for (const sentShape of [0, 1, 2, 3])
-        for (const whenAll of [true, false]) {
+        for (const mode of Object.keys(WHEN_MODES)) {
           // sentOn 을 그날짜로 채운다 — '이미 보냄' 을 실제로 만든다
           const sentOn: Record<string, string> = {};
           if (sentShape === 1) sentOn.a = today;
@@ -78,7 +106,7 @@ async function main() {
             sentOn.a = today;
             sentOn.c = today;
           }
-          const whenOk = Object.fromEntries(RULES.map((r) => [r.id, whenAll]));
+          const whenOk = WHEN_MODES[mode];
 
           const ts = dueRules(RULES, {
             todayYmd: today,
@@ -102,7 +130,7 @@ async function main() {
           if (JSON.stringify(ts) !== JSON.stringify(sql.rows[0].ids)) {
             bad++;
             console.log(
-              `불일치 today=${today} now=${nowHm} sent=${JSON.stringify(sentOn)} when=${whenAll}`
+              `불일치 today=${today} now=${nowHm} sent=${JSON.stringify(sentOn)} when=${mode}`
             );
             console.log(`  TS =${JSON.stringify(ts)}`);
             console.log(`  SQL=${JSON.stringify(sql.rows[0].ids)}`);

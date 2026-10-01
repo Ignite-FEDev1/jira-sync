@@ -27,10 +27,16 @@
  *
  * ── 신선한 Postgres 에 마이그레이션을 복제할 때 ──
  *
+ * (정본은 `supabase/migrations/README.md` 의 "신선한 DB 에 처음부터 재생할 때"
+ * 다. 여기 적는 것은 이 스크립트를 돌리다 막히는 사람이 바로 읽게 하려는
+ * 사본이고, 고칠 일이 생기면 두 곳을 같이 고친다.)
+ *
  * `supabase/migrations/20260908_qa_router_cycle_title.sql` 이 파일명 정렬상
  * `supabase/migrations/20260908_qa_router_cycles.sql` (테이블을 만드는 파일)
  * 보다 먼저 돈다 — `cycle_title` 과 `cycles` 를 비교하면 다섯 번째 글자
- * 뒤에서 `_`(0x5f) 가 `s`(0x73) 보다 작아 `cycle_title` 이 앞선다. 그래서
+ * 뒤에서 `_` 가 `s` 보다 작아 `cycle_title` 이 앞선다. **로케일과
+ * 무관하다** — 기본 로케일 `sort` 와 `LC_ALL=C sort` 가 이 둘에 대해서는
+ * 같은 순서를 낸다(이 머신에서 실측). 그래서
  * 신선한 DB 에서는 `deploy_page_title` 컬럼을 추가하는 ALTER 가 테이블이
  * 생기기도 전에 실행돼 조용히 실패하고, 그 뒤 어떤 마이그레이션도 그
  * 컬럼을 다시 넣지 않는다. 전체 마이그레이션을 순서대로 다 올린 뒤에는

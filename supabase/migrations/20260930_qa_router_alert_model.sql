@@ -29,6 +29,22 @@
   앵커가 없다. 그래서 아래 ③⑤ 의 update 가 **한 줄도 안 들어간다.**
   검사 함수를 먼저 갈아 끼운다.
 
+  ── 이 파일은 **한 번만** 적용된다 ──
+
+  ⑥ 의 `alter table ... drop column if exists alerts` 가 ③④⑤ 의
+  `alerts->>'morningBrief'` · `alerts->>'dailySummary'` 읽기보다 **뒤에**
+  있다. 그래야 옛 스위치를 새 규칙으로 옮길 수 있기 때문이고, 그 대가로
+  두 번째 적용은 `column "alerts" does not exist` 로 죽는다.
+
+  그래도 안전하다. `db-migrate.sh` 는 내용이 바뀐 파일만 다시 돌리고,
+  `drop column` 이 든 파일은 자동 재적용을 **거부하고 워크플로를
+  실패시킨다**(scripts/db-migrate.sh 의 파괴적 구문 가드). 조용히 반쯤
+  적용되는 길이 없다.
+
+  그러므로 **이 파일은 적용 뒤에 고치지 않는다.** 디스패처나 템플릿을
+  바꿔야 하면 `create or replace` 만 든 새 마이그레이션을 만든다.
+  리허설은 버리는 로컬 Postgres 에 처음부터 재생해서 한다.
+
   ── 트랜잭션은 이 파일이 잡지 않는다 ──
 
   `db-migrate.sh` 가 `--single-transaction` 으로 이 파일 전체를 이미 감싸서
@@ -54,7 +70,7 @@
 --    `create or replace` 는 이미 있는 행을 다시 검사하지 않는다. 제약은
 --    이후 쓰기부터 새 함수를 쓰므로, ③⑤ 의 update 결과가 이 함수로 검사된다.
 --
---    **일부러 TS 의 `checkAlertRulesV2` 보다 느슨하게 둔다.** 이 함수는 화면
+--    **일부러 TS 의 `checkAlertRules` 보다 느슨하게 둔다.** 이 함수는 화면
 --    밖 경로(직접 update)를 막는 마지막 문이고, 화면 쪽 검사와 글자까지 같게
 --    만들면 쌍둥이가 셋이 된다. 이 레포는 같은 질문에 세 답이 나와 아무도
 --    어느 게 맞는지 모르던 적이 있다 (route.ts:535 주석). 모양만 본다.
@@ -72,6 +88,30 @@ as $$
            or coalesce(r->>'id', '') = ''
            or coalesce(r->>'label', '') = ''
            or coalesce(r->>'at', '') !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+           /*
+             `enabled` 가 없는 규칙은 **받지 않는다.**
+
+             없을 때 무엇으로 읽을지 다섯 자리가 서로 다르게 답한다:
+             `qa_router_due_rules` 는 꺼짐((r->>'enabled')::boolean 이
+             null → where 가 거짓), `qa_router_wants_qa_alerts` 와
+             `qa_router_hit_rule` 은 켜짐(coalesce(..., true)),
+             `status.ts` 는 켜짐, `pipeline.tsx` 는 꺼짐.
+
+             그래서 `hit_rule` 이 고른 그 규칙을 `due_rules` 가 걸러내는
+             조합이 가능하고, 그날 09:10 날짜 알림이 **통째로 사라진다.**
+             다섯 자리를 다 맞추는 대신 그런 행이 아예 못 들어오게 한다 -
+             화면은 늘 boolean 을 보내므로 막히는 것은 손으로 넣은 행뿐이다.
+
+             `coalesce` 가 **꼭 필요하다.** 키가 없으면 `r->'enabled'` 가
+             SQL NULL 이고 `jsonb_typeof(NULL)` 도 NULL 이라, 맨
+             `<> 'boolean'` 은 참이 아니라 NULL 이 된다. `where A or NULL`
+             은 행을 안 내놓으므로 `not exists` 가 참 - 즉 **막으려던
+             바로 그 행이 통과한다.** 실제로 그렇게 짰다가 로컬에서
+             `enabled` 없는 규칙이 CHECK 를 지나는 것을 보고 고쳤다.
+             (`when` 쪽 같은 모양은 바로 아래 `{when,kind}` 검사가
+             빈 문자열로 받아 내므로 구멍이 안 남는다.)
+           */
+           or coalesce(jsonb_typeof(r->'enabled'), '') <> 'boolean'
            or jsonb_typeof(r->'when') <> 'object'
            or coalesce(r#>>'{when,kind}', '') not in
                 ('anchor', 'activeCycle', 'scheduleUnusable')
@@ -174,7 +214,7 @@ comment on function public.qa_router_daily_summary_template() is
 
   ── {일정경고이유} 는 반드시 있어야 한다 ──
 
-  `checkAlertRulesV2` 의 필수 변수 검사는 `template` 을 덮어썼을 때만 돈다.
+  `checkAlertRules` 의 필수 변수 검사는 `template` 을 덮어썼을 때만 돈다.
   안 덮어쓴 대상은 이 기본 본문을 쓰므로, 여기에 이유가 없으면 "일정 문제"
   만 남고 무엇이 문제인지 사라진다. 저장 차단이 못 막는 자리다.
 */
@@ -573,7 +613,22 @@ begin
       · anchor          오늘 걸린 그 한 개인가
       · activeCycle     차수가 아직 안 지났나 (옛 `continue when
                         cyc.deploy_ymd < today_kst` 와 같다)
-      · scheduleUnusable 창이 없거나 어긋나고, QA 알림을 쓰는 대상인가
+      · scheduleUnusable 창이 없거나 어긋나고, QA 알림을 쓰는 대상이고,
+                        **오늘이 경고 차례인가**
+
+      ── 억제는 고른 **뒤**가 아니라 고르기 **전에** 봐야 한다 ──
+
+      `qa_router_due_rules` 는 같은 `at` 에서 목록 앞엣것 하나만 남긴다.
+      경고의 "처음 1회 + 그 뒤 월요일"(`qa_router_should_warn`)을 고른
+      뒤에 보면, 화요일의 09:10 은 **경고가 자리만 차지하고 아무것도 안
+      나가는** 시각이 된다 - 같은 09:10 에 있던 다른 규칙(마이그레이션이
+      경고를 목록 끝에 붙이므로 사람이 새로 만든 날짜 알림이 그 뒤에
+      온다)이 통째로 굶는다. `alert_sent_on` 도 안 적히니 10분 뒤에도
+      같은 판단을 반복해 그날은 조용하다.
+
+      그래서 억제를 `when` 쪽으로 올린다. 억제된 경고는 애초에 "지금 보낼
+      규칙" 이 아니므로 자리를 안 잡고, 뒤엣것이 그 시각을 가져간다.
+      `schedule_warned_on` 을 적는 자리는 실제로 보내는 아래 갈래 그대로다.
     */
     when_ok := (
       select coalesce(jsonb_object_agg(e.value->>'id',
@@ -583,6 +638,7 @@ begin
           when 'scheduleUnusable' then
             win.source in ('none', 'invalid')
             and public.qa_router_wants_qa_alerts(rules)
+            and public.qa_router_should_warn(cyc.schedule_warned_on, today_kst)
         end), '{}'::jsonb)
         from jsonb_array_elements(rules) e);
 
@@ -614,11 +670,12 @@ begin
         end if;
 
       elsif kind = 'scheduleUnusable' then
-        -- 처음 1회 + 그 뒤 월요일. `alert_sent_on` 보다 좁은 조건이라
-        -- 둘 다 통과해야 나간다.
-        continue when not public.qa_router_should_warn(
-                            cyc.schedule_warned_on, today_kst);
-
+        /*
+          "처음 1회 + 그 뒤 월요일"(`qa_router_should_warn`)은 위
+          `when_ok` 에서 이미 봤다. 여기서 한 번 더 `continue` 하면 그
+          09:10 자리를 차지만 하고 아무것도 안 보내 **뒤엣 규칙을
+          굶긴다** - 그래서 억제는 고르기 전에만 있다.
+        */
         vars := public.qa_router_vars(r.id, r.active_fv, null, today_kst,
                                       win.qa_start, win.qa_end, prod_day)
                 || jsonb_build_object(
