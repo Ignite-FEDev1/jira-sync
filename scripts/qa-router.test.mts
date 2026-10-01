@@ -2687,6 +2687,18 @@ test('변수 집합 — 종류마다 쓸 수 있는 것이 다르다', () => {
 
   assert.ok(warn.includes('일정경고이유'));
   assert.ok(!anchor.includes('일정경고이유'));
+
+  /*
+    `*일정*`·`*참고*` 는 18시 요약에서만 **변수**다. 그 알림만 스레드 안에서
+    블록을 통째로 빼기 때문이다 — 글자로 박아 두면 그 줄에 변수가 없어
+    renderTemplate 의 빈 변수 규칙이 안 걸리고 머리말 두 줄만 남는다.
+    날짜 알림에는 그 조건이 없어 블록이 늘 나간다.
+  */
+  for (const k of ['일정머리말', '참고머리말']) {
+    assert.ok(cycle.includes(k), `18시 요약이 ${k} 를 못 쓴다`);
+    assert.ok(!anchor.includes(k), `날짜 알림에 ${k} 가 새어 들어갔다`);
+    assert.ok(!warn.includes(k), `일정 경고에 ${k} 가 새어 들어갔다`);
+  }
 });
 
 test('검증 — 그 종류가 모르는 변수면 막는다', () => {
@@ -5405,6 +5417,20 @@ test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {
   없으면 `schedule_note` 조각 — 사다리가 깨졌을 때 나가는 경고 줄 — 이
   이 골든을 한 번도 안 지나서, 그 조각이 통째로 빠지거나 순서가 바뀌어도
   이 테스트가 못 잡는다.
+
+  ── 10 → 14 로 는 이유 ──
+
+  둘을 나중에 더했다. 둘 다 **운영에서 실제로 도는데 골든이 한 번도 안
+  지나던** 자리다. 처음 10개는 글자가 그대로다 — 재녹화가 아니라 빠져 있던
+  측정을 더한 것이다.
+
+  · `dailySummary.inThread` — 18시 요약은 스레드 안이면 일정·참고 블록을
+    통째로 뺀다(`detail_lines := null`). 활성 차수에는 늘 스레드가 있으므로
+    (`tick.ts` 가 차수를 열 때 머리글을 올리고 `threadTs` 를 적는다) 사람이
+    실제로 보는 것은 이쪽이다. 처음 10개는 전부 스레드 밖 모양이었다.
+  · `dailySummary.scheduleNone` — `{일정경고이유}` 는 `invalid` 와 `none`
+    중 **고른 문장 전체**를 담는데, 처음 10개는 `invalid` 만 지난다. GW 는
+    대장 33개 중 0개가 파싱되는 대상이라 늘 `none` 이다.
 */
 test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
   const raw = readFileSync(
@@ -5418,11 +5444,15 @@ test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
     'dailySummary.normal',
     'dailySummary.failed',
     'dailySummary.scheduleNote',
+    'dailySummary.inThread',
+    'dailySummary.scheduleNone',
     'dateAlert.prodToday.withProgress',
     'scheduleWarning.invalid.withProgress',
     'dailySummary.normal.withProgress',
     'dailySummary.failed.withProgress',
     'dailySummary.scheduleNote.withProgress',
+    'dailySummary.inThread.withProgress',
+    'dailySummary.scheduleNone.withProgress',
   ];
   for (const k of want) {
     assert.ok(f.messages[k], `${k} 이 픽스처에 없음`);
@@ -5504,6 +5534,24 @@ test('알림 모델 — 마이그레이션이 크론을 하나로 바꾼다 (SQL
   */
   assert.match(sql, /function public\.qa_router_wants_qa_alerts/);
   assert.match(sql, /update public\.qa_router_cycles/);
+
+  /*
+    스레드 안에서는 일정·참고 블록이 통째로 빠져야 한다. 활성 차수에는 늘
+    스레드가 있으므로(`tick.ts` 가 차수를 열 때 `threadTs` 를 적는다) 이쪽이
+    운영에서 **평소 모양**이고, 머리말을 글자로 박아 두면 그 두 줄만 남는다.
+  */
+  const sumTpl = sql.match(/qa_router_daily_summary_template[\s\S]*?\$\$;/);
+  assert.ok(sumTpl, '18시 요약 기본 문구 함수가 없다');
+  assert.match(sumTpl[0], /\{일정머리말\}/);
+  assert.match(sumTpl[0], /\{참고머리말\}/);
+  // 글자로 박혀 있으면 그 줄은 절대 안 사라진다
+  assert.doesNotMatch(sumTpl[0], /'\*일정\*'/);
+  assert.doesNotMatch(sumTpl[0], /'\*참고\*'/);
+  // 스레드 안에서는 내용 다섯 키를 지운다 — strip_nulls 로 덮으면 안 지워진다
+  assert.match(
+    sql,
+    /vars := vars - array\['QA종료일', '운영배포일', '상세링크',\s*'배포대장링크', 'fixVersion'\]/
+  );
   // 새 대상도 만들 수 있어야 한다 — 컬럼 기본값이 옛 모양이면 CHECK 에 걸려
   // insert 가 통째로 죽는다.
   assert.match(sql, /alter column alert_rules set default/);

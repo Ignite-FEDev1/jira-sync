@@ -119,6 +119,22 @@ comment on column public.qa_router_state.alert_sent_on is
   골랐다. 템플릿에는 조건이 없어서 고르기를 못 한다. 그래서 고른 결과를
   통째로 변수에 담는다. 일정 경고 알림 쪽의 같은 이름은 사다리가 준 이유
   한 조각만 담는다 — 그쪽은 문장이 하나뿐이라 고를 것이 없다.
+
+  ── {일정머리말}·{참고머리말} 이 왜 변수인가 ──
+
+  옛 함수는 **스레드 안이면 `detail_lines` 를 null 로 둬서** 일정·참고 블록을
+  통째로 뺐다 — 같은 내용이 스레드 루트 메시지에 이미 있기 때문이다. 활성
+  차수에는 늘 스레드가 있으므로(`tick.ts` 가 차수를 열 때 머리글을 올리고
+  `threadTs` 를 적는다) **그쪽이 평소 모양**이다.
+
+  `*일정*`·`*참고*` 를 글자로 박아 두면 그 줄에 변수가 하나도 없어
+  `qa_router_render` 의 "빈 변수가 있는 줄은 버린다" 규칙이 안 걸리고, 스레드
+  안에서 머리말 두 줄만 덩그러니 남는다. 변수로 두면 내용 줄들과 **같은
+  규칙으로 같이** 사라진다 — 새 장치를 만들지 않고 있는 규칙을 그대로 쓴다.
+  내용 줄은 전부 그대로 편집할 수 있다.
+
+  날짜 알림(anchor)에는 이 조건이 없어 블록이 늘 나간다. 그래서 이 둘은
+  activeCycle 전용 변수다 (`varsFor`, types.ts).
 */
 create or replace function public.qa_router_daily_summary_template()
 returns text
@@ -131,10 +147,10 @@ as $$
     '{진행률}',
     '오늘 알림 {알림건수} · 마지막 확인 {마지막확인}',
     '{일정경고이유}',
-    '*일정*',
+    '{일정머리말}',
     '• QA 종료일 : {QA종료일}',
     '• 운영 배포일 : {운영배포일}',
-    '*참고*',
+    '{참고머리말}',
     '• QA 라우터 상세 : {상세링크}',
     '• 배포대장 : {배포대장링크}',
     '• fixVersion : `{fixVersion}`');
@@ -700,6 +716,25 @@ begin
                               public.qa_router_esc(r.name),
                               public.qa_router_esc(coalesce(
                                 cyc.deploy_page_title, r.active_fv))) end));
+
+        /*
+          일정·참고 블록은 **스레드 밖일 때만** 싣는다. 스레드 안이면 같은
+          내용이 루트 메시지에 이미 있어 한 번 올려다보면 된다 — 옛 함수의
+          `if r.thread_ts is null then detail_lines := … else null end` 과
+          같은 판단이고, 활성 차수에는 늘 스레드가 있으므로 **이쪽이 평소**다.
+
+          머리말 둘은 안 넣는 것으로, 내용 다섯은 키를 **지우는 것**으로
+          비운다. `jsonb_strip_nulls` 로 덮으면 위 `qa_router_vars` 가 넣어 둔
+          값이 그대로 남으므로 지우는 쪽이어야 한다. 그러면 여섯 줄이
+          `qa_router_render` 의 빈 변수 규칙에 걸려 통째로 빠진다.
+        */
+        if r.thread_ts is null then
+          vars := vars || jsonb_build_object(
+            '일정머리말', '*일정*', '참고머리말', '*참고*');
+        else
+          vars := vars - array['QA종료일', '운영배포일', '상세링크',
+                               '배포대장링크', 'fixVersion'];
+        end if;
 
         body := public.qa_router_render(
           coalesce(rule->>'template',

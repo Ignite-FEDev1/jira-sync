@@ -70,6 +70,9 @@
  *     종료 10-08 > 운영 배포 10-07). `scheduleWarning.invalid` 와,
  *     새로 추가한 `dailySummary.scheduleNote`(+ `.withProgress`)를
  *     찍는다 — 이번엔 `schedule_note` 줄 자체가 지킬 대상이다.
+ *     `dailySummary.inThread` 도 이 차수에서 찍는다.
+ *   · 차수 C (`FIX_VERSION_C`) — 창이 **아무 층에도 없다**. 사다리가
+ *     `none` 을 낸다. `dailySummary.scheduleNone`(+ `.withProgress`).
  *
  * `deploy_ymd` 는 (config_id, deploy_ymd) 기본키라 차수 A·B 가 같은 값을
  * 못 쓴다. 차수 A 는 `deploy_ymd`(= 배포대장 페이지 제목의 날짜)를 운영
@@ -83,6 +86,25 @@
  * `20260929_qa_router_schedule_gap.sql:676` 의 `case` 문을 그대로 다시
  * 짜서 `win.why` 를 산 함수 결과에서 받는다 — 그래야 이 골든이 내 기억이
  * 아니라 코드를 지킨다.
+ *
+ * ── 왜 14개인가 ──
+ *
+ * 처음엔 10개였다. 둘을 나중에 더했고, 둘 다 "운영에서 실제로 도는데 골든이
+ * 한 번도 안 지나던" 자리다.
+ *
+ *   · `dailySummary.inThread` — 18시 요약은 **스레드 안이면 일정·참고
+ *     블록을 통째로 뺀다**(`detail_lines := null`). 활성 차수에는 늘
+ *     스레드가 있으므로(`tick.ts:1071` 이 차수를 열 때 머리글을 올리고
+ *     `threadTs` 를 적는다) 사람이 실제로 보는 것은 **이쪽**이다. 10개는
+ *     전부 스레드 밖 모양이라, 블록이 사라지는 규칙이 깨져도 못 잡았다.
+ *     차수 B 에서 찍는다 — 블록이 사라지는 것과 `schedule_note` 가 그
+ *     안에서도 남는 것을 한 통으로 같이 재려고.
+ *   · `dailySummary.scheduleNone` — `{일정경고이유}` 는 `invalid` 와
+ *     `none` 중 고른 **문장 전체**를 담는데 10개는 `invalid` 만 지난다.
+ *     GW 는 늘 `none` 인 대상이다.
+ *
+ * 이 넷(`.withProgress` 짝 포함)을 더하는 것은 **재녹화가 아니라 빠져 있던
+ * 측정을 더하는 것**이다. 먼저 있던 10개는 글자가 그대로여야 한다.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { Client } from 'pg';
@@ -103,6 +125,8 @@ const TODAY = '2026-10-07';
 const FIX_VERSION_B = 'release_20261007';
 /** 차수 A — 멀쩡한 창. QA 종료(10-06)가 운영 배포일(10-07)보다 앞이다. */
 const FIX_VERSION_A = 'release_20260922';
+/** 차수 C — 창이 아예 없다. 사다리가 `none` 을 낸다 (GW 가 늘 이 상태다). */
+const FIX_VERSION_C = 'release_20261014';
 
 type WinRow = {
   qa_start: string | null;
@@ -154,6 +178,45 @@ async function main() {
       'Dev) 배포 - 2026-09-22(화)', true)
     on conflict (config_id, deploy_ymd) do nothing;`,
     [CONFIG_ID, FIX_VERSION_A]
+  );
+
+  /*
+    차수 C — 창이 **아무 층에도 없다**. 수동도 대장도 비었고 대상에
+    `qa_schedule_rule` 도 없으니 사다리가 `none` 을 낸다.
+
+    `{일정경고이유}` 는 18시 요약에서 `invalid` 와 `none` 중 **고른 문장**을
+    통째로 담는데, 차수 A·B 로는 `none` 쪽 문장을 한 번도 안 지난다. GW 는
+    대장 33개 중 0개가 파싱되는 대상이라 **늘 `none`** 이다 — 안 재면 실제로
+    매일 그 문장을 받는 대상이 검증 밖에 남는다.
+
+    `prod_ymd` 도 비워 둬서 `prod := greatest(deploy_ymd, coalesce(prod_ymd,
+    deploy_ymd))` 가 대장 제목의 날(10-14)로 떨어진다. `qa_end` 가 없으므로
+    일정 블록은 운영 배포일 한 줄만 남는다 — 블록이 반만 차는 갈래도 같이
+    재게 된다.
+  */
+  await c.query(
+    `
+    insert into public.qa_router_cycles (config_id, deploy_ymd, fix_version,
+      cycle_label, qa_start_ymd, qa_end_ymd, prod_ymd, deploy_page_id,
+      deploy_page_title, jira_version_exists)
+    values ($1, '2026-10-14', $2, '정기배포 261014',
+      null, null, null, '2866479300',
+      'Dev) 배포 - 2026-10-14(수)', true)
+    on conflict (config_id, deploy_ymd) do nothing;`,
+    [CONFIG_ID, FIX_VERSION_C]
+  );
+
+  /*
+    갈래 ① 은 "아직 안 걷은" 상태를 재므로 진행률 칸을 비우고 시작한다.
+    위 insert 들이 `on conflict do nothing` 이라, 같은 DB 에서 이 스크립트를
+    두 번째 돌리면 아래 갈래 ② 가 채워 둔 값이 남아 ① 이 ② 와 같아진다.
+    실제로 `--verify` 를 녹화 뒤 같은 DB 에서 돌렸다가 여섯 키가 어긋났다.
+  */
+  await c.query(
+    `update public.qa_router_cycles
+        set plan_progress = null, plan_collected_at = null
+      where config_id = $1`,
+    [CONFIG_ID]
   );
 
   /**
@@ -213,6 +276,14 @@ async function main() {
   if (winB.source !== 'invalid')
     throw new Error(`차수 B 가 깨진 창이어야 하는데 source=${winB.source}`);
 
+  const winC = await windowAndNote(FIX_VERSION_C);
+  if (winC.source !== 'none')
+    throw new Error(`차수 C 가 창 없음이어야 하는데 source=${winC.source}`);
+  if (winC.schedule_note === null)
+    throw new Error(
+      '차수 C 의 일정 경고 줄이 비었다 — wants_qa_alerts 를 확인하라'
+    );
+
   // 18시 요약이 쓰는 머리말·본문 두 벌. qa_router_daily_summary 안의
   // format() 호출을 그대로 복사해 같은 인자로 부른다.
   const headNormal = (
@@ -246,7 +317,16 @@ async function main() {
     fixVersion: string,
     win: WinRow,
     head: string,
-    bodyText: string
+    bodyText: string,
+    /*
+      스레드 안이면 옛 함수가 `detail_lines := null` 로 둔다 — 같은 내용이
+      스레드 루트 메시지에 이미 있기 때문이다
+      (`20260929_qa_router_schedule_gap.sql:647`). 활성 차수에는 늘 스레드가
+      있으므로(`tick.ts` 가 차수를 열 때 머리글을 올리고 `threadTs` 를 적는다)
+      **이쪽이 운영에서 평소 모양**이다. 호출 쪽에서 `detail_lines` 를
+      건너뛰는 것이 옛 함수의 분기를 그대로 재현하는 길이다.
+    */
+    inThread = false
   ): Promise<string> {
     const prog = await c.query(
       `select public.qa_router_progress_line(
@@ -259,20 +339,23 @@ async function main() {
     );
     const progressLine = prog.rows[0].t as string | null;
 
-    const dl = await c.query(
-      `select public.qa_router_detail_lines(
-          $1, '골든 대상', $2, $3::date, $4, $5::date, $6::date, $7) as t`,
-      [
-        CONFIG_ID,
-        fixVersion,
-        win.deploy_ymd,
-        win.deploy_page_title,
-        win.qa_end,
-        win.prod_day,
-        win.deploy_page_id,
-      ]
-    );
-    const detailLines = dl.rows[0].t as string | null;
+    let detailLines: string | null = null;
+    if (!inThread) {
+      const dl = await c.query(
+        `select public.qa_router_detail_lines(
+            $1, '골든 대상', $2, $3::date, $4, $5::date, $6::date, $7) as t`,
+        [
+          CONFIG_ID,
+          fixVersion,
+          win.deploy_ymd,
+          win.deploy_page_title,
+          win.qa_end,
+          win.prod_day,
+          win.deploy_page_id,
+        ]
+      );
+      detailLines = dl.rows[0].t as string | null;
+    }
 
     return [head, progressLine, bodyText, win.schedule_note, detailLines]
       .filter((x): x is string => x !== null && x !== undefined)
@@ -331,6 +414,30 @@ async function main() {
       headNormal,
       bodyNormal
     );
+
+    /*
+      ⑥ 18시 요약 · **스레드 안** (차수 B).
+
+      운영에서 평소 모양이다 — 활성 차수에는 늘 스레드가 있다. 일정·참고
+      블록이 통째로 빠지고, `schedule_note` 는 **그 안에서도 나간다**
+      (블록 밖에 따로 싣는 이유가 그것이다). 차수 B 를 쓰는 이유도 그래서다:
+      블록이 사라지는 것과 경고 줄이 남는 것을 한 통으로 같이 잰다.
+    */
+    out[`dailySummary.inThread${suffix}`] = await dailySummaryText(
+      FIX_VERSION_B,
+      winB,
+      headNormal,
+      bodyNormal,
+      true
+    );
+
+    // ⑦ 18시 요약 · 창이 아예 없음 (차수 C — `none` 쪽 문장)
+    out[`dailySummary.scheduleNone${suffix}`] = await dailySummaryText(
+      FIX_VERSION_C,
+      winC,
+      headNormal,
+      bodyNormal
+    );
   }
 
   /**
@@ -351,11 +458,19 @@ async function main() {
     win: WinRow,
     headKind: 'ok' | 'failed',
     judged: number,
-    reassigned: number
+    reassigned: number,
+    /*
+      스레드 안이면 머리말 둘을 안 넣고 내용 다섯 키를 **지운다**. 디스패처의
+      `if r.thread_ts is null then … else vars := vars - array[…] end if` 와
+      같다. `jsonb_strip_nulls` 로 덮으면 `qa_router_vars` 가 넣은 값이 그대로
+      남으므로 지우는 쪽이어야 한다.
+    */
+    inThread = false
   ): Promise<string> {
     const r = await c.query(
       `select public.qa_router_render(
          public.qa_router_daily_summary_template(),
+         (
          public.qa_router_vars($1, $2, null, $3::date,
                                $4::date, $5::date, $6::date)
          || jsonb_strip_nulls(jsonb_build_object(
@@ -375,6 +490,13 @@ async function main() {
                        public.qa_router_admin_base(), $1, $11::date,
                        public.qa_router_esc('골든 대상'),
                        public.qa_router_esc(coalesce($12::text, $2))) end))
+         || case when $13::boolean then '{}'::jsonb
+                 else jsonb_build_object('일정머리말', '*일정*',
+                                         '참고머리말', '*참고*') end
+         ) - case when $13::boolean
+                  then array['QA종료일', '운영배포일', '상세링크',
+                             '배포대장링크', 'fixVersion']
+                  else array[]::text[] end
        ) as t`,
       [
         CONFIG_ID,
@@ -389,6 +511,7 @@ async function main() {
         win.schedule_note,
         win.deploy_ymd,
         win.deploy_page_title,
+        inThread,
       ]
     );
     return r.rows[0].t as string;
@@ -459,6 +582,23 @@ async function main() {
       0,
       0
     );
+    // 스레드 안 — 일정·참고 블록이 통째로 빠지고 경고 줄은 남는다
+    out[`dailySummary.inThread${suffix}`] = await summaryTextV2(
+      FIX_VERSION_B,
+      winB,
+      'ok',
+      0,
+      0,
+      true
+    );
+    // 창이 아예 없음 — `{일정경고이유}` 의 `none` 쪽 문장
+    out[`dailySummary.scheduleNone${suffix}`] = await summaryTextV2(
+      FIX_VERSION_C,
+      winC,
+      'ok',
+      0,
+      0
+    );
   }
 
   const capture = VERIFY ? captureAllV2 : captureAll;
@@ -470,7 +610,7 @@ async function main() {
   // `plan_collected_at` 은 TODAY 의 KST 정오로 둬서 "묵은 값" 꼬리표가
   // 안 붙게 한다. 두 차수 다 채운다 — 어느 쪽이 쓰이든 진행률이 보여야
   // 한다.
-  for (const fv of [FIX_VERSION_A, FIX_VERSION_B]) {
+  for (const fv of [FIX_VERSION_A, FIX_VERSION_B, FIX_VERSION_C]) {
     await c.query(
       `update public.qa_router_cycles
           set plan_progress = $1::jsonb,
