@@ -809,6 +809,14 @@ export interface QaRouterState {
    * 던지지 않는 것과 남기지 않는 것은 다른 결정이다.
    */
   sideEffects: Record<string, SideEffectResult>;
+  /**
+   * 규칙 id → 마지막으로 보낸 날.
+   *
+   * 크론이 10분마다 도므로 "오늘 이 규칙을 보냈나" 를 여기서 본다.
+   * 시각마다 크론이 있던 때는 "깨어났다" 가 곧 "보낼 때다" 였는데,
+   * 하나로 합치면서 그 등식이 깨졌다.
+   */
+  alertSentOn: Record<string, string>;
   updatedAt: string;
 }
 

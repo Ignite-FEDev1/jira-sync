@@ -83,6 +83,7 @@ export type StateRow = {
   stale_alerted_at: string | null;
   fail_alert_ts: string | null;
   side_effects: Record<string, SideEffectResult> | null;
+  alert_sent_on: Record<string, string> | null;
   updated_at: string;
 };
 
@@ -167,6 +168,7 @@ export function toState(r: StateRow): QaRouterState {
     // 컬럼이 없던 시절에 쓰인 행도, 리허설이 만드는 빈 행도 null 이 답이다.
     failAlertTs: r.fail_alert_ts ?? null,
     sideEffects: r.side_effects ?? {},
+    alertSentOn: (r.alert_sent_on as Record<string, string> | null) ?? {},
     updatedAt: r.updated_at,
   };
 }

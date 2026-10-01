@@ -5373,6 +5373,7 @@ test('상태 행 — 실패 알림 ts 를 도메인 값으로 옮긴다', () => 
     stale_alerted_at: null,
     fail_alert_ts: '1727500000.123456',
     side_effects: null,
+    alert_sent_on: null,
     updated_at: '2026-09-29T09:00:00Z',
   } satisfies StateRow;
   assert.equal(toState(row).failAlertTs, '1727500000.123456');
@@ -5382,6 +5383,19 @@ test('상태 행 — 실패 알림 ts 를 도메인 값으로 옮긴다', () => 
     toState({ config_id: 'cfg-2' } as unknown as StateRow).failAlertTs,
     null
   );
+});
+
+test('상태 매핑 — alert_sent_on 이 읽힌다', () => {
+  const st = toState({
+    config_id: 'c1',
+    alert_sent_on: { qaEnd: '2026-10-07' },
+  } as never);
+  assert.deepEqual(st.alertSentOn, { qaEnd: '2026-10-07' });
+});
+
+test('상태 매핑 — 칸이 없으면 빈 객체다', () => {
+  const st = toState({ config_id: 'c1' } as never);
+  assert.deepEqual(st.alertSentOn, {});
 });
 
 test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {
