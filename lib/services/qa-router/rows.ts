@@ -24,7 +24,7 @@ import type {
   DeployCycle,
   DerivedContext,
   AlertRule,
-  AlertSwitches,
+  AlertRuleV2,
   DeployKind,
   JudgeTier,
   QaRouterConfig,
@@ -36,6 +36,7 @@ import type {
   SideEffectResult,
 } from './types';
 import { DEFAULT_ALERT_RULES, JUDGE_TIERS } from './types';
+import { toAlertRuleV2 } from './alert-rule';
 
 export type ConfigRow = {
   id: string;
@@ -59,8 +60,12 @@ export type ConfigRow = {
   plan_collect_hours: number[] | null;
   deploy_kinds?: DeployKind[] | null;
   judge_tiers: JudgeTier[] | null;
-  alerts: AlertSwitches | null;
-  alert_rules: AlertRule[] | null;
+  /**
+   * 새 모양(`AlertRuleV2`)으로 저장된다. 그런데 **옛 모양이 섞여 올 수 있다** —
+   * 20260930 마이그레이션 이전 백업을 되돌렸거나 손으로 넣은 행이다.
+   * 그래서 읽을 때 한 번 더 가른다 (`toConfig`).
+   */
+  alert_rules: (AlertRuleV2 | AlertRule)[] | null;
   quiet_hours: QuietHours;
   tick_interval_seconds: number | null;
   reassign_mode: QaRouterConfig['reassignMode'];
@@ -137,11 +142,17 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
     planCollectHours: r.plan_collect_hours ?? [9, 17],
     deployKinds: r.deploy_kinds?.length ? r.deploy_kinds : ['regular'],
     judgeTiers: r.judge_tiers ?? [...JUDGE_TIERS],
-    alerts: r.alerts ?? {},
-    // 빈 배열은 "알림을 다 껐다" 가 아니라 컬럼이 아직 없다는 뜻에 가깝다.
-    alertRules: r.alert_rules?.length
+    /*
+      빈 배열은 "알림을 다 껐다" 가 아니라 컬럼이 아직 없다는 뜻에 가깝다.
+
+      옛 모양(`anchor` 를 직접 들고 있는 행)은 여기서 새 모양으로 감싼다.
+      화면이 `at` 과 `when` 만 읽으므로, 안 감싸면 되돌린 백업 하나에
+      알림 목록이 통째로 빈칸이 된다.
+    */
+    alertRules: (r.alert_rules?.length
       ? r.alert_rules
-      : [...DEFAULT_ALERT_RULES],
+      : [...DEFAULT_ALERT_RULES]
+    ).map((x) => ('anchor' in x ? toAlertRuleV2(x) : x)),
     quietHours: r.quiet_hours,
     tickIntervalSeconds: r.tick_interval_seconds ?? 60,
     reassignMode: r.reassign_mode,

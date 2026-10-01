@@ -27,6 +27,7 @@ import type {
   QaRouterState,
 } from './types';
 import { DEFAULT_ALERT_RULES, JUDGE_TIERS } from './types';
+import { toAlertRuleV2 } from './alert-rule';
 
 /** 정기배포 주기. 실제로 2주에 한 번이다. */
 const CYCLE_DAYS = 14;
@@ -681,8 +682,7 @@ export function demoConfig(
     planCollectHours: [9, 17],
     deployKinds: ['regular'],
     judgeTiers: [...JUDGE_TIERS],
-    alerts: {},
-    alertRules: [...DEFAULT_ALERT_RULES],
+    alertRules: DEFAULT_ALERT_RULES.map(toAlertRuleV2),
     quietHours: { startHour: 9, endHour: 18, skipWeekend: true },
     tickIntervalSeconds: 60,
     reassignMode: 'off',

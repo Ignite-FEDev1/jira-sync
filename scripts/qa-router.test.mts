@@ -2429,7 +2429,7 @@ test('차수 덮어쓰기 — null 이면 설정값을 쓴다 (한 날도 다르
     qaEndYmd: '2026-09-09',
     prodYmd: '2026-09-14',
   };
-  const configRules = [...DEFAULT_ALERT_RULES];
+  const configRules = DEFAULT_ALERT_RULES.map(toAlertRuleV2);
 
   // 같은 배열을 그대로 돌려줘야 한다 (복사도 변형도 없다).
   assert.equal(effectiveAlertRules(null, configRules), configRules);
@@ -2442,12 +2442,8 @@ test('차수 덮어쓰기 — null 이면 설정값을 쓴다 (한 날도 다르
       .toISOString()
       .slice(0, 10);
     assert.equal(
-      milestoneFrom(
-        effectiveAlertRules(null, configRules).map(toAlertRuleV2),
-        s,
-        day
-      ),
-      milestoneFrom(configRules.map(toAlertRuleV2), s, day),
+      milestoneFrom(effectiveAlertRules(null, configRules), s, day),
+      milestoneFrom(configRules, s, day),
       `${day} 에서 갈림`
     );
   }
@@ -2463,9 +2459,9 @@ test('차수 덮어쓰기 — 값이 있으면 그것을 쓴다', () => {
     qaEndYmd: '2026-09-09',
     prodYmd: '2026-09-10',
   };
-  const configRules = [...DEFAULT_ALERT_RULES];
+  const configRules = DEFAULT_ALERT_RULES.map(toAlertRuleV2);
   const override = [
-    {
+    toAlertRuleV2({
       id: 'prodToday',
       anchor: 'prod' as const,
       // 브랜치를 자른 날(09-10)보다 4일 뒤에 배포했다.
@@ -2473,22 +2469,16 @@ test('차수 덮어쓰기 — 값이 있으면 그것을 쓴다', () => {
       shift: 'none' as const,
       label: '오늘 운영 배포',
       enabled: true,
-    },
+    }),
   ];
 
   const used = effectiveAlertRules(override, configRules);
   assert.equal(used, override);
 
   // 설정값은 09-10 에 울리고, 덮어쓴 차수는 09-14 에 울린다.
-  assert.equal(
-    milestoneFrom(configRules.map(toAlertRuleV2), s, '2026-09-10'),
-    '오늘 운영 배포'
-  );
-  assert.equal(milestoneFrom(used.map(toAlertRuleV2), s, '2026-09-10'), null);
-  assert.equal(
-    milestoneFrom(used.map(toAlertRuleV2), s, '2026-09-14'),
-    '오늘 운영 배포'
-  );
+  assert.equal(milestoneFrom(configRules, s, '2026-09-10'), '오늘 운영 배포');
+  assert.equal(milestoneFrom(used, s, '2026-09-10'), null);
+  assert.equal(milestoneFrom(used, s, '2026-09-14'), '오늘 운영 배포');
 });
 
 test('차수 덮어쓰기 — 덮어쓴 차수인지 화면이 알 수 있다', () => {
@@ -2496,7 +2486,9 @@ test('차수 덮어쓰기 — 덮어쓴 차수인지 화면이 알 수 있다', 
   assert.equal(hasAlertOverride({}), false);
   assert.equal(hasAlertOverride({ alertRulesOverride: null }), false);
   assert.equal(
-    hasAlertOverride({ alertRulesOverride: [...DEFAULT_ALERT_RULES] }),
+    hasAlertOverride({
+      alertRulesOverride: DEFAULT_ALERT_RULES.map(toAlertRuleV2),
+    }),
     true
   );
 });

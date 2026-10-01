@@ -44,7 +44,7 @@ import {
 import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   AlertAnchor,
-  AlertRule,
+  AlertRuleV2,
   AlertShift,
   DeployCycle,
   QaScheduleRule,
@@ -111,10 +111,12 @@ import {
 */
 import {
   ANCHOR_OPTIONS,
+  anchorWhen,
   DayStepper,
   NativeSelect,
   RuleList,
   SHIFT_OPTIONS,
+  whenText,
 } from '../../pipeline';
 
 /**
@@ -685,9 +687,9 @@ function AlertRulesSection({
 }: {
   /** 저장 대상. 데모에서는 null 이고 편집을 열지 않는다. */
   configId: string | null;
-  configRules: AlertRule[];
+  configRules: AlertRuleV2[];
   /** null 이면 설정값을 쓴다. */
-  override: AlertRule[] | null;
+  override: AlertRuleV2[] | null;
   deployYmd: string;
   schedule: {
     qaStartYmd: string | null;
@@ -698,7 +700,7 @@ function AlertRulesSection({
   className?: string;
 }) {
   /** 편집 중인 규칙. null 이면 읽기 상태다. */
-  const [draft, setDraft] = useState<AlertRule[] | null>(null);
+  const [draft, setDraft] = useState<AlertRuleV2[] | null>(null);
   const [saving, setSaving] = useState(false);
 
   const live = effectiveAlertRules(override, configRules);
@@ -708,7 +710,7 @@ function AlertRulesSection({
     저장은 두 가지 뜻뿐이다 — "이 규칙을 쓴다"(배열) 와 "설정값으로
     되돌린다"(null). 한 함수로 두어 되돌리기가 별도 경로가 되지 않게 한다.
   */
-  const save = async (next: AlertRule[] | null) => {
+  const save = async (next: AlertRuleV2[] | null) => {
     if (!configId) return;
     setSaving(true);
     try {
@@ -829,8 +831,8 @@ function CycleRuleEditor({
   onCancel,
   onSave,
 }: {
-  draft: AlertRule[];
-  setDraft: (next: AlertRule[]) => void;
+  draft: AlertRuleV2[];
+  setDraft: (next: AlertRuleV2[]) => void;
   schedule: {
     qaStartYmd: string | null;
     qaEndYmd: string | null;
@@ -840,7 +842,7 @@ function CycleRuleEditor({
   onCancel: () => void;
   onSave: () => void;
 }) {
-  const patch = (i: number, next: AlertRule) =>
+  const patch = (i: number, next: AlertRuleV2) =>
     setDraft(draft.map((r, k) => (k === i ? next : r)));
   const move = (i: number, d: number) => {
     const j = i + d;
@@ -901,23 +903,60 @@ function CycleRuleEditor({
               </Button>
             </div>
             <div className="flex flex-wrap items-center gap-1.5 px-2 pb-2 pl-[30px] text-[11.5px]">
-              <NativeSelect
-                value={r.anchor}
-                onChange={(v) => patch(i, { ...r, anchor: v as AlertAnchor })}
-                options={ANCHOR_OPTIONS}
-                label={`${i + 1}번째 알림 기준일`}
+              {/*
+                시각도 이 차수만 다르게 둘 수 있다. 덮어쓰기는 설정값을
+                복사해 오므로, 시각 칸이 없으면 복사해 온 값을 못 보고
+                고치게 된다.
+              */}
+              <input
+                type="time"
+                value={r.at}
+                onChange={(e) => patch(i, { ...r, at: e.target.value })}
+                aria-label={`${i + 1}번째 알림 시각`}
+                className="h-7 rounded-md border bg-background px-2 text-[11.5px] tabular-nums"
               />
-              <DayStepper
-                value={r.offset}
-                onChange={(offset) => patch(i, { ...r, offset })}
-                label={`${i + 1}번째 알림 날짜 차이`}
-              />
-              <NativeSelect
-                value={r.shift}
-                onChange={(v) => patch(i, { ...r, shift: v as AlertShift })}
-                options={SHIFT_OPTIONS}
-                label={`${i + 1}번째 알림 주말 처리`}
-              />
+              {anchorWhen(r) ? (
+                <>
+                  <NativeSelect
+                    value={anchorWhen(r)!.anchor}
+                    onChange={(v) =>
+                      patch(i, {
+                        ...r,
+                        when: { ...anchorWhen(r)!, anchor: v as AlertAnchor },
+                      })
+                    }
+                    options={ANCHOR_OPTIONS}
+                    label={`${i + 1}번째 알림 기준일`}
+                  />
+                  <DayStepper
+                    value={anchorWhen(r)!.offset}
+                    onChange={(offset) =>
+                      patch(i, { ...r, when: { ...anchorWhen(r)!, offset } })
+                    }
+                    label={`${i + 1}번째 알림 날짜 차이`}
+                  />
+                  <NativeSelect
+                    value={anchorWhen(r)!.shift}
+                    onChange={(v) =>
+                      patch(i, {
+                        ...r,
+                        when: { ...anchorWhen(r)!, shift: v as AlertShift },
+                      })
+                    }
+                    options={SHIFT_OPTIONS}
+                    label={`${i + 1}번째 알림 주말 처리`}
+                  />
+                </>
+              ) : (
+                /*
+                  조건형(차수가 열려 있는 날 · QA 기간을 못 읽은 날)은
+                  날짜 칸이 없다. 이 차수만 끄거나 시각을 옮기는 것은
+                  되고, 조건 자체를 바꾸는 것은 설정 화면에서도 안 된다.
+                */
+                <span className="rounded border bg-muted/40 px-1.5 py-0.5 text-muted-foreground">
+                  {whenText(r.when)}
+                </span>
+              )}
               <label className="ml-auto flex items-center gap-1.5 text-muted-foreground">
                 <input
                   type="checkbox"
@@ -939,9 +978,13 @@ function CycleRuleEditor({
               ...draft,
               {
                 id: `cycle${draft.length + 1}_${draft.length}`,
-                anchor: 'prod',
-                offset: -3,
-                shift: 'prev_workday',
+                at: '09:10',
+                when: {
+                  kind: 'anchor',
+                  anchor: 'prod',
+                  offset: -3,
+                  shift: 'prev_workday',
+                },
                 label: '{days}일 뒤 운영 배포',
                 enabled: true,
               },

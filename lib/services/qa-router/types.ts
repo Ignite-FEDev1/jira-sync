@@ -171,32 +171,20 @@ export const JUDGE_TIER_KIND: Record<JudgeTier, '사실' | '추측'> = {
   ref_owner: '사실',
 };
 
-/**
- * 정기 보고 두 종. 날짜와 무관하게 시각에 맞춰 나간다.
- *
- * 날짜 알림 네 종은 여기 없다 — 그건 `AlertRule` 목록으로 옮겼다.
- * 둘을 한 목록에 두면 "추가" 가 무엇을 뜻하는지 흐려진다. 아침 브리핑을
- * 하나 더 만드는 것과 알림 날짜를 하나 더 만드는 것은 다른 일이다.
- */
-export type AlertKind = 'dailySummary' | 'morningBrief';
+/*
+  ── `AlertKind`·`ALERT_KINDS`·`AlertSwitches` 를 지웠다 ──
 
-export const ALERT_KINDS: readonly AlertKind[] = [
-  'dailySummary',
-  'morningBrief',
-];
+  18:00 마감 요약과 09:10 아침 브리핑을 `alerts` 컬럼의 on/off 두 칸으로
+  따로 들고 있었다. 그래서 그 둘만 **본문이 코드에 박혀 있었고** 화면이
+  "형태가 고정입니다" 라고 적어야 했다.
 
-export const ALERT_LABEL: Record<AlertKind, string> = {
-  dailySummary: '18시 마감 요약',
-  morningBrief: '09:10 아침 브리핑',
-};
-
-export const ALERT_DESC: Record<AlertKind, string> = {
-  dailySummary: '그날 몇 건을 알렸고 문제가 있었는지. 매일 18시.',
-  morningBrief: '아래 날짜 알림이 걸린 날 아침에 보냅니다. 평일 09:10.',
-};
+  지금은 둘 다 `alertRules` 안의 규칙 하나다 — `at`(몇 시) + `when`(무슨
+  조건) + `template`(무슨 글자). 종류를 가르던 타입이 사라지고, 날짜 알림과
+  같은 편집기가 그대로 붙는다. 조건의 종류는 `AlertWhen` 이 말한다.
+*/
 
 // ─────────────────────────────────────────────────────────────
-// 날짜 알림 규칙
+// 알림 규칙
 // ─────────────────────────────────────────────────────────────
 
 /** 무엇을 기준으로 세는가. */
@@ -315,6 +303,46 @@ export function varsFor(when: AlertWhen): readonly string[] {
 }
 
 /**
+ * `CYCLE_VARS` 밖 변수의 설명. 편집기의 변수 메뉴가 읽는다.
+ *
+ * `TEMPLATE_VARS` 는 차수 이야기 열한 개만 담는다 — 본문을 가진 알림이
+ * 날짜 알림뿐이던 때의 목록이다. 정기 보고가 같은 편집기로 오면서
+ * `varsFor` 가 내는 이름 **전부**에 설명이 있어야 한다. 설명 없는 이름이
+ * 메뉴에 뜨면 쓸지 말지를 코드를 읽어야 안다.
+ *
+ * 값의 예시는 SQL 의 `qa_router_vars` 가 실제로 넣는 것이다
+ * (`20260930_qa_router_alert_model.sql`).
+ */
+const EXTRA_VAR_DESC: Record<string, string> = {
+  대상이름: '이 라우터 대상의 이름 · GW',
+  상태문구: '머리말 전체 · 오늘 마감 · 실패 2건',
+  알림건수: '괄호까지 한 덩어리 · 3건 (Jira 변경 1건)',
+  재배정건수: '맨 숫자. 없는 날은 빈 값이라 그 줄이 빠진다 · 1',
+  마지막확인: '마지막으로 확인한 KST 시각 · 17:50',
+  일정경고이유: 'QA 기간을 왜 못 쓰는지 한 문장',
+  일정머리말: '*일정* · 스레드 안이면 비어 아래 줄들과 같이 사라진다',
+  참고머리말: '*참고* · 스레드 안이면 비어 아래 줄들과 같이 사라진다',
+};
+
+/**
+ * 이 종류의 변수 메뉴. **하드코딩한 목록을 쓰지 않는다.**
+ *
+ * 종류가 넷째로 늘면 `varsFor` 만 고쳐도 화면이 따라온다. 편집기가 제
+ * 목록을 따로 들면 그 자리만 조용히 옛 변수를 권한다.
+ */
+export function varPaletteFor(
+  when: AlertWhen
+): { name: string; desc: string }[] {
+  return varsFor(when).map((name) => ({
+    name,
+    desc:
+      TEMPLATE_VARS.find((v) => v.name === name)?.desc ??
+      EXTRA_VAR_DESC[name] ??
+      '',
+  }));
+}
+
+/**
  * 이 종류의 본문에 **반드시 있어야 하는** 변수.
  *
  * 경고 본문에서 `{일정경고이유}` 를 빼면 "일정 문제" 만 남고 무엇이
@@ -323,11 +351,12 @@ export function varsFor(when: AlertWhen): readonly string[] {
  * 특별 취급이 아니라 이미 있는 저장 차단 장치에 규칙 하나를 더하는 것이다.
  * 화면도 같고 빨간 문구도 같다.
  */
-function requiredVars(when: AlertWhen): readonly string[] {
+export function requiredVars(when: AlertWhen): readonly string[] {
   return when.kind === 'scheduleUnusable' ? ['일정경고이유'] : [];
 }
 
-const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** `09:10` 모양. 화면의 시각 칸도 이것으로 미리 막는다. */
+export const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /**
  * 새 모양(`AlertRuleV2`) 알림 규칙 검증. 문제가 없으면 null.
@@ -538,18 +567,6 @@ export const DEFAULT_ALERT_RULES: readonly AlertRule[] = [
   },
 ];
 
-/**
- * 키가 없으면 켜진 것으로 본다.
- *
- * 컬럼을 더한 날 이전 행에는 키가 없다. 없는 걸 "꺼짐" 으로 읽으면
- * 마이그레이션 하나로 알림이 통째로 멎는다 — 기본값은 늘 기존 동작이다.
- */
-export type AlertSwitches = Partial<Record<AlertKind, boolean>>;
-
-export function alertOn(alerts: AlertSwitches, kind: AlertKind): boolean {
-  return alerts[kind] !== false;
-}
-
 export interface QaRouterConfig {
   id: string;
   name: string;
@@ -634,10 +651,13 @@ export interface QaRouterConfig {
 
   /** 판정 단계 순서. 앞에서부터 부르고 처음 답이 나오면 멈춘다. */
   judgeTiers: JudgeTier[];
-  /** 정기 보고 두 종의 on/off. 키가 없으면 켜진 것으로 본다. */
-  alerts: AlertSwitches;
-  /** 날짜 알림 규칙. 위에서부터 보고 처음 맞는 것 하나만 알린다. */
-  alertRules: AlertRule[];
+  /**
+   * 알림 규칙 전부. 날짜 알림도 정기 보고도 여기 한 목록에 있다.
+   *
+   * 같은 `at` 에 여럿이 걸리면 목록 앞엣것 하나만 나간다 — 배열 순서가
+   * 곧 우선순위다 (`dueRules`, `qa_router_due_rules`).
+   */
+  alertRules: AlertRuleV2[];
 
   /**
    * 화면에서 편집할 수 없다. 이 봇은 알림만 보낸다 (항상 'off').
@@ -683,7 +703,6 @@ export type QaRouterConfigInput = Pick<
       | 'quietHours'
       | 'tickIntervalSeconds'
       | 'judgeTiers'
-      | 'alerts'
       | 'alertRules'
       | 'planIssueTypeId'
       | 'devIssueTypeId'
@@ -994,7 +1013,7 @@ export interface DeployCycle {
    * undefined 가 따로 있는 이유: 컬럼이 아직 없는 DB 에 새 코드가 붙는 창이
    * 실제로 있다. 그때도 "설정값을 쓴다" 로 읽혀야 한다.
    */
-  alertRulesOverride?: AlertRule[] | null;
+  alertRulesOverride?: AlertRuleV2[] | null;
 }
 
 /**
@@ -1008,15 +1027,15 @@ export interface DeployCycle {
  * `??` 를 흩뿌리면 한 곳이 빠져도 아무 말 없이 설정값으로 돈다.
  */
 export function effectiveAlertRules(
-  override: AlertRule[] | null | undefined,
-  configRules: AlertRule[]
-): AlertRule[] {
+  override: AlertRuleV2[] | null | undefined,
+  configRules: AlertRuleV2[]
+): AlertRuleV2[] {
   return override ?? configRules;
 }
 
 /** 이 차수가 설정값을 벗어났나. 화면이 그 사실을 표시해야 한다. */
 export function hasAlertOverride(cycle: {
-  alertRulesOverride?: AlertRule[] | null;
+  alertRulesOverride?: AlertRuleV2[] | null;
 }): boolean {
   return cycle.alertRulesOverride != null;
 }
