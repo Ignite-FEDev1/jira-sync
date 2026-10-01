@@ -5025,6 +5025,61 @@ test('알림 본문 — 사다리가 정한 날짜를 qa_router_vars 에 넘긴�
   assert.match(vars, /coalesce\(p_prod,\s+cyc\.deploy_ymd\)/);
 });
 
+/*
+  ── 미리보기가 종류를 안다 ──
+
+  `qa_router_preview_message`(20260914)는 `qa_router_vars` 하나만 불러
+  차수 변수 열한 개만 채웠다. 18:00 요약·09:10 경고가 쓰는 변수는 비어서
+  `qa_router_render` 의 "빈 변수가 있는 줄은 버린다" 규칙에 걸려 **미리보기
+  에서만** 그 줄이 사라졌다 (마감 요약 11줄 → 6줄, 일정 경고 3줄 → 1줄).
+
+  본문 편집기 오른쪽의 그 칸이 이 기능이 받아들여진 근거였으므로, 두 종류
+  에서만 거짓이 되면 안 된다.
+*/
+test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+
+  /*
+    인자를 뒤에 붙이면 옛 3인자 판과 둘 다 후보가 되어 호출이
+    `function ... is not unique` 로 죽는다. 이 저장소가 두 번 겪은 사고다.
+    **지우기가 만들기보다 앞서야** 한다.
+  */
+  const drop = sql.indexOf(
+    'drop function if exists public.qa_router_preview_message(uuid, text, text);'
+  );
+  const create = sql.indexOf(
+    'create or replace function public.qa_router_preview_message'
+  );
+  assert.ok(drop >= 0, '옛 3인자 판을 안 지웠다');
+  assert.ok(drop < create, '지우기가 만들기보다 뒤에 있다');
+
+  // 새 서명에 권한을 다시 준다 — drop 이 옛 grant 를 같이 가져간다
+  assert.match(
+    sql,
+    /grant execute on function public\.qa_router_preview_message\(uuid, text, text, jsonb\)/
+  );
+
+  // 종류를 읽고, 그 종류의 변수를 얹는다
+  assert.match(sql, /coalesce\(p_when->>'kind', 'anchor'\)/);
+  for (const v of ['알림건수', '상태문구', '마지막확인', '일정머리말', '참고머리말']) {
+    assert.match(sql, new RegExp(`'${v}'`), `${v} 를 안 채운다`);
+  }
+
+  /*
+    `{일정경고이유}` 만은 예시로 두지 않는다. 그 변수가 비면 줄이 통째로
+    사라지는데, 그 사라짐이 이 함수가 고치려는 바로 그 증상이다.
+    사다리를 실제로 불러 받아야 한다.
+  */
+  assert.match(sql, /qa_router_qa_window/);
+  assert.match(sql, /'일정경고이유'/);
+});
+
 test('수동 일정 — 둘 다 비우면 지우는 것이다', () => {
   assert.equal(checkManualSchedule(null, null), null);
 });

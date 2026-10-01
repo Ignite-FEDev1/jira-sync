@@ -43,6 +43,7 @@ import {
   type AlertAnchor,
   type AlertRuleV2,
   type AlertShift,
+  type AlertWhen,
   type DeployCycle,
   type DeployKind,
   type FilterGap,
@@ -3006,8 +3007,15 @@ function WhereEditor({
  * 또 쓰면 두 벌이 조용히 어긋난다 — 화면에서는 멀쩡한데 실제로 나간 건
  * 다른 상황이 가장 나쁘다.
  */
-function useMessagePreview(id: string, template: string, milestone: string) {
-  const key = `${template}|${milestone}`;
+function useMessagePreview(
+  id: string,
+  template: string,
+  milestone: string,
+  /** 고치는 중인 규칙의 조건. 종류마다 채워지는 변수가 다르다. */
+  when: AlertWhen
+) {
+  const whenJson = JSON.stringify(when);
+  const key = `${template}|${milestone}|${whenJson}`;
   const [res, setRes] = useState<{
     key: string;
     text: string | null;
@@ -3021,7 +3029,7 @@ function useMessagePreview(id: string, template: string, milestone: string) {
       fetch(`/api/qa-router/${id}/message-preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ template, milestone }),
+        body: JSON.stringify({ template, milestone, when: JSON.parse(whenJson) }),
       })
         .then(async (r) => {
           const b = await r.json();
@@ -3040,7 +3048,7 @@ function useMessagePreview(id: string, template: string, milestone: string) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [id, key, template, milestone]);
+  }, [id, key, template, milestone, whenJson]);
 
   /*
     **이전 결과를 지우지 않는다.** 타이핑할 때마다 미리보기가 비면 화면이
@@ -3160,17 +3168,21 @@ function NavGroup({ label }: { label: string }) {
 }
 
 /**
- * 날짜 알림이 쓰는 변수들. 미리보기 SQL(`qa_router_vars`)이 채우는 것과 같다.
+ * 미리보기가 **예시**로 채우는 변수. 보내는 순간에만 정해지는 값들이다.
  *
- * 정기 보고 전용 변수를 가려내는 데만 쓴다 — 그 변수들은 미리보기에서
- * 비어 보이므로 화면이 그 사실을 먼저 말해야 한다.
+ * `20261001_qa_router_preview_kinds.sql` 이 실제로 넣는 목록과 같아야 한다.
+ * SQL 에서 빠지면 그 줄이 미리보기에서 사라지고, 여기서 빠지면 화면이
+ * 예시를 진짜 값이라고 말한다.
+ *
+ * 나머지는 전부 실제 값이다 — `{일정경고이유}` 는 사다리를 실제로 불러
+ * 받는다. 그 변수가 비면 줄이 통째로 사라지는데, 그 사라짐이 바로 이
+ * 미리보기가 고치려는 증상이라 예시로 둘 수 없었다.
  */
-const PREVIEWABLE_VARS = varsFor({
-  kind: 'anchor',
-  anchor: 'prod',
-  offset: 0,
-  shift: 'none',
-});
+const SAMPLE_VARS: Record<AlertWhen['kind'], readonly string[]> = {
+  anchor: [],
+  activeCycle: ['기호', '상태문구', '알림건수', '재배정건수', '마지막확인'],
+  scheduleUnusable: [],
+};
 
 /** 본문에 쓰인 변수 이름들. `checkAlertRulesV2` 가 쓰는 정규식과 같다. */
 function usedVars(template: string): string[] {
@@ -3247,7 +3259,12 @@ function RuleDetail({
   const missing = requiredVars(r.when).filter((k) => !used.includes(k));
   const atBad = !HM_RE.test(r.at);
   // `{days}` 는 그날 정해진다. 미리보기에서는 3 으로 보여준다.
-  const preview = useMessagePreview(id, tpl, r.label.replace('{days}', '3'));
+  const preview = useMessagePreview(
+    id,
+    tpl,
+    r.label.replace('{days}', '3'),
+    r.when
+  );
   /*
     한 번에 하나만 보이므로 펼쳐 둬도 화면이 길어지지 않는다. 카드가 넷
     쌓이던 때와 다른 점이다. 그래도 접는 길은 남긴다 — 규칙만 고치러 온
@@ -3492,21 +3509,16 @@ function RuleDetail({
               문제인지 사라집니다. 저장되지 않습니다
             </p>
           )}
-          {!w && (
+          {SAMPLE_VARS[r.when.kind].length > 0 && (
             /*
-              미리보기는 SQL 의 `qa_router_preview_message` 가 그린다. 그
-              함수는 차수 변수(`qa_router_vars`)만 채우므로, 이 종류 전용
-              변수가 든 줄은 "빈 변수가 있는 줄은 버린다" 규칙에 걸려
-              미리보기에서만 빠진다. 실제 발송에서는 디스패처가 그 값들을
-              채운다. 안 적으면 사람이 본문을 지운 줄 안다.
+              예시임을 밝힌다. 안 밝히면 "오늘 3건이 나갔다" 로 읽힌다 —
+              미리보기가 답하는 질문은 건수가 아니라 **이 본문이 무슨
+              모양으로 나가나** 다.
             */
             <p className="mt-1.5 text-[11px] text-muted-foreground">
-              미리보기는 차수 변수만 채웁니다 — 이 종류 전용 변수(
-              {allowed
-                .filter((v) => !PREVIEWABLE_VARS.includes(v))
-                .map((v) => `{${v}}`)
-                .join(' ')}
-              )가 든 줄은 미리보기에서만 빠져 보입니다
+              미리보기에서{' '}
+              {SAMPLE_VARS[r.when.kind].map((v) => `{${v}}`).join(' ')} 는
+              예시값입니다 — 보내는 순간에 정해집니다. 나머지는 실제 값입니다
             </p>
           )}
         </div>
