@@ -5143,3 +5143,35 @@ test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {
     /if \(patch\.failAlertTs !== undefined\) row\.fail_alert_ts = patch\.failAlertTs;/
   );
 });
+
+/*
+  ── 옮기기 전 글자를 지킨다 ──
+
+  알림을 한 모양으로 모으는 작업의 유일한 합격 기준은 "채널에 나가는 글자가
+  한 자도 달라지지 않는다" 이다. 구조를 바꾸는 일이지 문구를 바꾸는 일이
+  아니다.
+
+  이 테스트는 지금은 픽스처가 **있다는 것만** 지킨다. 실제 대조는 Task 6 에서
+  새 함수가 생긴 뒤에 붙는다. 먼저 넣는 이유는, 픽스처가 사라지거나 빈 채로
+  커밋되는 것을 막기 위해서다.
+*/
+test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
+  const raw = readFileSync(
+    new URL('./fixtures/alert-messages.json', import.meta.url),
+    'utf-8'
+  );
+  const f = JSON.parse(raw) as { messages: Record<string, string> };
+  const want = [
+    'dateAlert.prodToday',
+    'scheduleWarning.invalid',
+    'dailySummary.normal',
+    'dailySummary.failed',
+  ];
+  for (const k of want) {
+    assert.ok(f.messages[k], `${k} 이 픽스처에 없음`);
+    assert.ok(
+      f.messages[k].trim().length > 20,
+      `${k} 이 너무 짧다 — 빈 채로 기록된 것 같다`
+    );
+  }
+});
