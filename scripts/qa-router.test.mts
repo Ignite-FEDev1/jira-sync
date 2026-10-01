@@ -38,6 +38,7 @@ import {
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
 import { planToggleEnabled } from '@/app/admin/qa-router/toggle-enabled-plan';
+import { toAlertRuleV2 } from '@/lib/services/qa-router/alert-rule';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
 import { cycleUpsertRow, toState } from '@/lib/services/qa-router/rows';
@@ -5191,4 +5192,45 @@ test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
       `${k} 이 너무 짧다 — 빈 채로 기록된 것 같다`
     );
   }
+});
+
+/*
+  옛 규칙은 앵커만 있었고 시각이 없었다. 09:10 크론이 그것들만 돌렸기
+  때문이다. 시각이 데이터가 되면서 그 사실을 값으로 적어 줘야 한다.
+*/
+test('알림 변환 — 옛 규칙은 09:10 앵커 규칙이 된다', () => {
+  const v2 = toAlertRuleV2({
+    id: 'qaEnd',
+    anchor: 'qa_end',
+    offset: 0,
+    shift: 'next_workday',
+    label: 'QA 종료',
+    enabled: true,
+    template: '본문',
+  });
+  assert.equal(v2.at, '09:10');
+  assert.deepEqual(v2.when, {
+    kind: 'anchor',
+    anchor: 'qa_end',
+    offset: 0,
+    shift: 'next_workday',
+  });
+  // 나머지는 그대로 넘어와야 한다 — 옮기는 일이지 바꾸는 일이 아니다
+  assert.equal(v2.id, 'qaEnd');
+  assert.equal(v2.label, 'QA 종료');
+  assert.equal(v2.enabled, true);
+  assert.equal(v2.template, '본문');
+});
+
+test('알림 변환 — 본문이 없으면 없는 채로 둔다', () => {
+  const v2 = toAlertRuleV2({
+    id: 'x',
+    anchor: 'prod',
+    offset: 0,
+    shift: 'none',
+    label: 'ㄱ',
+    enabled: false,
+  });
+  assert.equal(v2.template, undefined);
+  assert.equal(v2.enabled, false);
 });

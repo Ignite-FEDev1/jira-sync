@@ -301,6 +301,35 @@ export interface AlertRule {
 }
 
 /**
+ * 이 알림이 나갈 조건.
+ *
+ * 세 가지가 다른 것은 **언제 보느냐**뿐이다. 앵커와 오프셋은 조건의 한
+ * 종류일 뿐이고, 켜고 끄기와 문구는 셋이 같다.
+ */
+export type AlertWhen =
+  | {
+      kind: 'anchor';
+      anchor: AlertAnchor;
+      /** 기준일로부터 며칠. 음수가 미리 알리는 쪽이다. */
+      offset: number;
+      shift: AlertShift;
+    }
+  /** 활성 차수가 있으면. 18:00 마감 요약이 쓴다. */
+  | { kind: 'activeCycle' }
+  /** QA 기간을 못 쓸 때. 09:10 일정 경고가 쓴다. */
+  | { kind: 'scheduleUnusable' };
+
+export interface AlertRuleV2 {
+  id: string;
+  /** 몇 시에 보내나. KST `HH:MM`. */
+  at: string;
+  when: AlertWhen;
+  label: string;
+  enabled: boolean;
+  template?: string;
+}
+
+/**
  * 기본 템플릿. **SQL 의 qa_router_default_template() 과 같아야 한다.**
  *
  * 지금 나가는 메시지 그대로다 — 템플릿으로 바꾼다고 동작이 바뀌면 안 된다.
