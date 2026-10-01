@@ -38,7 +38,8 @@ import {
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
 import { planToggleEnabled } from '@/app/admin/qa-router/toggle-enabled-plan';
-import { toAlertRuleV2 } from '@/lib/services/qa-router/alert-rule';
+import { dueRules, toAlertRuleV2 } from '@/lib/services/qa-router/alert-rule';
+import type { AlertRuleV2 } from '@/lib/services/qa-router/types';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
 import { cycleUpsertRow, toState } from '@/lib/services/qa-router/rows';
@@ -5233,4 +5234,121 @@ test('알림 변환 — 본문이 없으면 없는 채로 둔다', () => {
   });
   assert.equal(v2.template, undefined);
   assert.equal(v2.enabled, false);
+});
+
+const R = (o: Partial<AlertRuleV2> & { id: string }): AlertRuleV2 => ({
+  at: '09:10',
+  when: { kind: 'activeCycle' },
+  label: o.id,
+  enabled: true,
+  ...o,
+});
+
+/** 2026-10-07 은 수요일, 10-10 은 토요일. */
+const BASE = {
+  todayYmd: '2026-10-07',
+  nowHm: '09:20',
+  sentOn: {} as Record<string, string>,
+  isDue: () => true,
+};
+
+test('알림 고르기 — 시각이 지나야 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' }), R({ id: 'b', at: '18:00' })];
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '09:20' }).map((r) => r.id),
+    ['a']
+  );
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '18:05' }).map((r) => r.id),
+    ['a', 'b']
+  );
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '08:00' }).map((r) => r.id),
+    []
+  );
+});
+
+/*
+  지금은 09:10 크론을 놓치면 그날 알림이 통째로 없다. "오늘 보냈나" 를
+  기록하면 늦게 깨어나도 그날 몫이 나간다. 그게 크론을 하나로 바꾸며
+  덤으로 얻는 것이다.
+*/
+test('알림 고르기 — 늦게 깨어나도 그날 몫이 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' })];
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '14:30' }).map((r) => r.id),
+    ['a']
+  );
+});
+
+test('알림 고르기 — 오늘 이미 보냈으면 안 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' })];
+  const sentOn = { a: '2026-10-07' };
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, sentOn }).map((r) => r.id),
+    []
+  );
+  // 어제 보낸 것은 오늘 다시 나간다
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, sentOn: { a: '2026-10-06' } }).map((r) => r.id),
+    ['a']
+  );
+});
+
+/*
+  옛 규칙은 "같은 날에 둘이 걸리면 위엣것만" 이었다. 이유는 "같은 차수
+  이야기가 두 번 오니까". 시각이 다른 규칙은 서로 다른 이야기라 둘 다
+  나가야 하므로, 그 규칙이 **같은 시각끼리**로 좁아진다.
+*/
+test('알림 고르기 — 같은 시각에 둘이면 위엣것만', () => {
+  const rules = [R({ id: 'a', at: '09:10' }), R({ id: 'b', at: '09:10' })];
+  assert.deepEqual(
+    dueRules(rules, BASE).map((r) => r.id),
+    ['a']
+  );
+});
+
+test('알림 고르기 — 시각이 다르면 둘 다 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' }), R({ id: 'b', at: '18:00' })];
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '18:05' }).map((r) => r.id),
+    ['a', 'b']
+  );
+});
+
+test('알림 고르기 — 꺼진 규칙은 세지도 않는다', () => {
+  // 꺼진 것이 위에 있어도 아래 것이 그 시각을 대표한다
+  const rules = [
+    R({ id: 'a', at: '09:10', enabled: false }),
+    R({ id: 'b', at: '09:10' }),
+  ];
+  assert.deepEqual(
+    dueRules(rules, BASE).map((r) => r.id),
+    ['b']
+  );
+});
+
+test('알림 고르기 — 조건이 거짓이면 안 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' })];
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, isDue: () => false }).map((r) => r.id),
+    []
+  );
+});
+
+/*
+  지금 두 크론이 `1-5` 라 평일만 돈다. 크론이 매일 도는 것으로 바뀌므로
+  그 제한을 여기로 옮긴다. 안 옮기면 토요일 아침에 알림이 나간다.
+*/
+test('알림 고르기 — 주말엔 아무것도 안 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' })];
+  // 2026-10-10 토요일, 10-11 일요일
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, todayYmd: '2026-10-10' }).map((r) => r.id),
+    []
+  );
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, todayYmd: '2026-10-11' }).map((r) => r.id),
+    []
+  );
 });
