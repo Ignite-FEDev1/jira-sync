@@ -5155,10 +5155,16 @@ test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {
   새 함수가 생긴 뒤에 붙는다. 먼저 넣는 이유는, 픽스처가 사라지거나 빈 채로
   커밋되는 것을 막기 위해서다.
 
-  8개인 이유: `{진행률}` 이 비어 있는 갈래(원래 4개)와 차 있는 갈래
-  (`.withProgress` 4개)를 둘 다 찍는다. 비어 있는 쪽만 있으면 이 골든은
+  10개인 이유: `{진행률}` 이 비어 있는 갈래(원래 5개)와 차 있는 갈래
+  (`.withProgress` 5개)를 둘 다 찍는다. 비어 있는 쪽만 있으면 이 골든은
   `{진행률}` 이 실제로 치환되는 경로를 한 번도 안 지나서, 나중에 그 변수
   연결이 잘못돼도 이 테스트가 못 잡는다.
+
+  5개인 이유: 18시 요약은 다섯 조각(head, progress_line, body_text,
+  schedule_note, detail_lines)을 잇는다. `dailySummary.scheduleNote` 가
+  없으면 `schedule_note` 조각 — 사다리가 깨졌을 때 나가는 경고 줄 — 이
+  이 골든을 한 번도 안 지나서, 그 조각이 통째로 빠지거나 순서가 바뀌어도
+  이 테스트가 못 잡는다.
 */
 test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
   const raw = readFileSync(
@@ -5171,10 +5177,12 @@ test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
     'scheduleWarning.invalid',
     'dailySummary.normal',
     'dailySummary.failed',
+    'dailySummary.scheduleNote',
     'dateAlert.prodToday.withProgress',
     'scheduleWarning.invalid.withProgress',
     'dailySummary.normal.withProgress',
     'dailySummary.failed.withProgress',
+    'dailySummary.scheduleNote.withProgress',
   ];
   for (const k of want) {
     assert.ok(f.messages[k], `${k} 이 픽스처에 없음`);
