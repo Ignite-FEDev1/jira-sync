@@ -5154,6 +5154,11 @@ test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {
   이 테스트는 지금은 픽스처가 **있다는 것만** 지킨다. 실제 대조는 Task 6 에서
   새 함수가 생긴 뒤에 붙는다. 먼저 넣는 이유는, 픽스처가 사라지거나 빈 채로
   커밋되는 것을 막기 위해서다.
+
+  8개인 이유: `{진행률}` 이 비어 있는 갈래(원래 4개)와 차 있는 갈래
+  (`.withProgress` 4개)를 둘 다 찍는다. 비어 있는 쪽만 있으면 이 골든은
+  `{진행률}` 이 실제로 치환되는 경로를 한 번도 안 지나서, 나중에 그 변수
+  연결이 잘못돼도 이 테스트가 못 잡는다.
 */
 test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
   const raw = readFileSync(
@@ -5166,6 +5171,10 @@ test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
     'scheduleWarning.invalid',
     'dailySummary.normal',
     'dailySummary.failed',
+    'dateAlert.prodToday.withProgress',
+    'scheduleWarning.invalid.withProgress',
+    'dailySummary.normal.withProgress',
+    'dailySummary.failed.withProgress',
   ];
   for (const k of want) {
     assert.ok(f.messages[k], `${k} 이 픽스처에 없음`);

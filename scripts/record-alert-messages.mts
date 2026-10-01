@@ -9,6 +9,20 @@
  * 올리고, 고정된 입력을 넣어 문자열만 받아 적는다.
  *
  *   npx tsx scripts/record-alert-messages.mts "postgresql://postgres@localhost:55440/postgres?host=/tmp/qapg-golden"
+ *
+ * ── 진행률 두 갈래를 다 찍는다 ──
+ *
+ * `{진행률}` 은 `qa_router_vars`·`qa_router_daily_summary` 둘 다 차수 행의
+ * `plan_progress`·`plan_collected_at` 을 읽어 만든다. 처음엔 이 값을
+ * 비워 둔 채로만(= 아직 못 걷은 상태) 네 메시지를 찍었는데, 그러면 이
+ * 골든은 `{진행률}` 이 실제로 찍히는 경로를 한 번도 안 지난다 — 나중에
+ * 누가 그 변수 연결을 잘못 바꿔도 이 파일은 그걸 못 잡는다.
+ *
+ * 그래서 같은 네 메시지를 두 번 찍는다: 차수 행을 비워 둔 채(원래 네 개,
+ * 키 그대로) 한 번, `plan_progress`·`plan_collected_at` 을 실제로 채운
+ * 뒤(`.withProgress` 네 개) 한 번. 리터럴을 함수 인자로 밀어 넣지 않고
+ * 차수 행의 컬럼을 실제로 갱신해서 읽게 한다 — 운영 코드가 읽는 경로
+ * 그대로를 통과시켜야 그 경로를 지킨다는 말이 성립한다.
  */
 import { writeFileSync } from 'node:fs';
 import { Client } from 'pg';
@@ -19,6 +33,7 @@ if (!url) throw new Error('DB 주소를 인자로 주세요');
 /** 고정 입력. 날짜를 박아 둬야 다시 돌려도 같은 답이 나온다. */
 const CONFIG_ID = '00000000-0000-0000-0000-0000000000aa';
 const TODAY = '2026-10-07';
+const FIX_VERSION = 'release_20261007';
 
 async function main() {
   const c = new Client({ connectionString: url });
@@ -34,68 +49,106 @@ async function main() {
     insert into public.qa_router_cycles (config_id, deploy_ymd, fix_version,
       cycle_label, qa_start_ymd, qa_end_ymd, prod_ymd, deploy_page_id,
       deploy_page_title, jira_version_exists)
-    values ($1, '2026-10-07', 'release_20261007', '정기배포 261007',
+    values ($1, '2026-10-07', $2, '정기배포 261007',
       '2026-09-29', '2026-10-08', '2026-10-07', '2866479114',
       'Dev) 배포 - 2026-10-07(수)', true)
-    on conflict (config_id, deploy_ymd) do nothing;`, [CONFIG_ID]);
+    on conflict (config_id, deploy_ymd) do nothing;`, [CONFIG_ID, FIX_VERSION]);
 
   const out: Record<string, string> = {};
 
-  // ① 날짜 알림 본문 (기본 템플릿 + 기본 변수)
-  const vars = await c.query(
-    `select public.qa_router_vars($1, 'release_20261007', '오늘 운영 배포', $2::date,
-       '2026-09-29'::date, '2026-10-08'::date, '2026-10-07'::date) as v`,
-    [CONFIG_ID, TODAY]);
-  const rendered = await c.query(
-    `select public.qa_router_render(public.qa_router_default_template(), $1::jsonb) as t`,
-    [vars.rows[0].v]);
-  out['dateAlert.prodToday'] = rendered.rows[0].t;
+  /**
+   * 네 메시지를 한 번 찍어 `out` 에 `suffix` 를 붙여 넣는다. `{진행률}` 은
+   * 항상 차수 행(`qa_router_cycles.plan_progress`·`plan_collected_at`)을
+   * 다시 읽어서 계산한다 — 호출 시점에 그 행에 무엇이 들어 있느냐로
+   * 갈린다.
+   */
+  async function captureFour(suffix: string) {
+    // ① 날짜 알림 본문 (기본 템플릿 + 기본 변수)
+    const vars = await c.query(
+      `select public.qa_router_vars($1, $3, '오늘 운영 배포', $2::date,
+         '2026-09-29'::date, '2026-10-08'::date, '2026-10-07'::date) as v`,
+      [CONFIG_ID, TODAY, FIX_VERSION]);
+    const rendered = await c.query(
+      `select public.qa_router_render(public.qa_router_default_template(), $1::jsonb) as t`,
+      [vars.rows[0].v]);
+    out[`dateAlert.prodToday${suffix}`] = rendered.rows[0].t;
 
-  // ② 일정 경고 (09:10 · 이상함)
-  //    지금은 qa_router_morning_brief 안에 format() 으로 박혀 있다.
-  //    그 format 을 그대로 복사해 같은 인자로 부른다. `why` 는 손으로 적지
-  //    않고 진짜 사다리에서 받는다 — 손으로 적으면 골든이 코드가 아니라
-  //    내 기억을 재게 된다.
-  const warn = await c.query(
-    `with win as (
-       select * from public.qa_router_qa_window(
-         null, null, '2026-09-29'::date, '2026-10-08'::date,
-         '2026-10-07'::date, '2026-10-07'::date, null)
-     )
-     select format(
-       ':warning: *%s · %s 차수의 QA 기간을 쓸 수 없습니다*%s%s',
-       '골든 대상', to_char('2026-10-07'::date, 'MM/DD'),
-       E'\\n' || coalesce(win.why, 'QA 시작·종료일을 어디에서도 못 읽었습니다'),
-       E'\\nQA 시작·종료 알림이 이 차수엔 나가지 않습니다. 차수 화면에서 직접 넣거나 배포대장을 고쳐 주세요.'
-     ) as t, win.source from win`);
-  // 사다리가 'invalid' 라고 답해야 경고가 나가는 상황이다
-  if (warn.rows[0].source !== 'invalid')
-    throw new Error(`경고 상황이 아니다: source=${warn.rows[0].source}`);
-  out['scheduleWarning.invalid'] = warn.rows[0].t;
+    // ② 일정 경고 (09:10 · 이상함)
+    //    지금은 qa_router_morning_brief 안에 format() 으로 박혀 있다.
+    //    그 format 을 그대로 복사해 같은 인자로 부른다. `why` 는 손으로 적지
+    //    않고 진짜 사다리에서 받는다 — 손으로 적으면 골든이 코드가 아니라
+    //    내 기억을 재게 된다.
+    //    이 알림은 `{진행률}` 을 쓰지 않는다 — 차수 행을 바꿔도 글자가
+    //    똑같아야 정상이다. 그 "안 바뀜"도 지킬 값어치가 있어 찍는다.
+    const warn = await c.query(
+      `with win as (
+         select * from public.qa_router_qa_window(
+           null, null, '2026-09-29'::date, '2026-10-08'::date,
+           '2026-10-07'::date, '2026-10-07'::date, null)
+       )
+       select format(
+         ':warning: *%s · %s 차수의 QA 기간을 쓸 수 없습니다*%s%s',
+         '골든 대상', to_char('2026-10-07'::date, 'MM/DD'),
+         E'\\n' || coalesce(win.why, 'QA 시작·종료일을 어디에서도 못 읽었습니다'),
+         E'\\nQA 시작·종료 알림이 이 차수엔 나가지 않습니다. 차수 화면에서 직접 넣거나 배포대장을 고쳐 주세요.'
+       ) as t, win.source from win`);
+    // 사다리가 'invalid' 라고 답해야 경고가 나가는 상황이다
+    if (warn.rows[0].source !== 'invalid')
+      throw new Error(`경고 상황이 아니다: source=${warn.rows[0].source}`);
+    out[`scheduleWarning.invalid${suffix}`] = warn.rows[0].t;
 
-  // ③ 18:00 마감 요약 · 평소
-  const sum = await c.query(
-    `select concat_ws(E'\\n',
-       format(':crescent_moon: *%s* 오늘 마감', '골든 대상'),
-       public.qa_router_progress_line(null, null, $1::date),
-       format('오늘 알림 %s건%s · 마지막 확인 %s', 0, '', '17:59'),
-       public.qa_router_detail_lines($2, '골든 대상', 'release_20261007',
-         '2026-10-07'::date, 'Dev) 배포 - 2026-10-07(수)',
-         '2026-10-08'::date, '2026-10-07'::date, '2866479114')
-     ) as t`, [TODAY, CONFIG_ID]);
-  out['dailySummary.normal'] = sum.rows[0].t;
+    // ③ 18:00 마감 요약 · 평소
+    //    진행률은 리터럴이 아니라 차수 행에서 직접 읽는다 — 운영 코드
+    //    (qa_router_daily_summary)가 읽는 경로 그대로.
+    const sum = await c.query(
+      `select concat_ws(E'\\n',
+         format(':crescent_moon: *%s* 오늘 마감', '골든 대상'),
+         public.qa_router_progress_line(
+           (select plan_progress from public.qa_router_cycles
+             where config_id = $2 and fix_version = $3),
+           (select plan_collected_at from public.qa_router_cycles
+             where config_id = $2 and fix_version = $3),
+           $1::date),
+         format('오늘 알림 %s건%s · 마지막 확인 %s', 0, '', '17:59'),
+         public.qa_router_detail_lines($2, '골든 대상', $3,
+           '2026-10-07'::date, 'Dev) 배포 - 2026-10-07(수)',
+           '2026-10-08'::date, '2026-10-07'::date, '2866479114')
+       ) as t`, [TODAY, CONFIG_ID, FIX_VERSION]);
+    out[`dailySummary.normal${suffix}`] = sum.rows[0].t;
 
-  // ④ 18:00 마감 요약 · 실패
-  const sumFail = await c.query(
-    `select concat_ws(E'\\n',
-       format(':warning: *%s* 오늘 마감 · 실패 %s건', '골든 대상', 3),
-       public.qa_router_progress_line(null, null, $1::date),
-       format('오늘 알림 %s건%s · 마지막 확인 %s', 5, ' (Jira 변경 2건)', '17:59'),
-       public.qa_router_detail_lines($2, '골든 대상', 'release_20261007',
-         '2026-10-07'::date, 'Dev) 배포 - 2026-10-07(수)',
-         '2026-10-08'::date, '2026-10-07'::date, '2866479114')
-     ) as t`, [TODAY, CONFIG_ID]);
-  out['dailySummary.failed'] = sumFail.rows[0].t;
+    // ④ 18:00 마감 요약 · 실패
+    const sumFail = await c.query(
+      `select concat_ws(E'\\n',
+         format(':warning: *%s* 오늘 마감 · 실패 %s건', '골든 대상', 3),
+         public.qa_router_progress_line(
+           (select plan_progress from public.qa_router_cycles
+             where config_id = $2 and fix_version = $3),
+           (select plan_collected_at from public.qa_router_cycles
+             where config_id = $2 and fix_version = $3),
+           $1::date),
+         format('오늘 알림 %s건%s · 마지막 확인 %s', 5, ' (Jira 변경 2건)', '17:59'),
+         public.qa_router_detail_lines($2, '골든 대상', $3,
+           '2026-10-07'::date, 'Dev) 배포 - 2026-10-07(수)',
+           '2026-10-08'::date, '2026-10-07'::date, '2866479114')
+       ) as t`, [TODAY, CONFIG_ID, FIX_VERSION]);
+    out[`dailySummary.failed${suffix}`] = sumFail.rows[0].t;
+  }
+
+  // 갈래 ① 비어 있는 진행률 (아직 못 걷음) — 차수 행을 만든 직후 그대로.
+  await captureFour('');
+
+  // 갈래 ② 채워진 진행률 — 운영이 매일 걷어 넣는 모양 그대로 채운다.
+  // `plan_collected_at` 은 TODAY 의 KST 정오로 둬서 "묵은 값" 꼬리표가
+  // 안 붙게 한다 (qa_router_progress_line 은 걷은 날짜가 p_today 보다
+  // 이르면 그 꼬리표를 붙인다).
+  await c.query(
+    `update public.qa_router_cycles
+        set plan_progress = $1::jsonb,
+            plan_collected_at = $2::timestamptz
+      where config_id = $3 and fix_version = $4`,
+    [JSON.stringify({ total: 2, ticketDone: 0 }), '2026-10-07 12:00:00+09',
+     CONFIG_ID, FIX_VERSION]);
+  await captureFour('.withProgress');
 
   writeFileSync(
     'scripts/fixtures/alert-messages.json',
