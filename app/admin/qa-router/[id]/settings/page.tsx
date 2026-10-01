@@ -38,6 +38,8 @@ import {
   HM_RE,
   JUDGE_TIERS,
   requiredVars,
+  ruleProblem,
+  usedVars,
   varPaletteFor,
   varsFor,
   type AlertAnchor,
@@ -3174,42 +3176,21 @@ function NavGroup({ label }: { label: string }) {
  * SQL 에서 빠지면 그 줄이 미리보기에서 사라지고, 여기서 빠지면 화면이
  * 예시를 진짜 값이라고 말한다.
  *
- * 나머지는 전부 실제 값이다 — `{일정경고이유}` 는 사다리를 실제로 불러
+ * 나머지는 실제 값에서 온다 — `{일정경고이유}` 는 사다리를 실제로 불러
  * 받는다. 그 변수가 비면 줄이 통째로 사라지는데, 그 사라짐이 바로 이
  * 미리보기가 고치려는 증상이라 예시로 둘 수 없었다.
+ *
+ * "실제 값" 이 아니라 "실제 값에서 온다" 인 이유: 미리보기는 사다리가 정한
+ * 날짜를 `qa_router_vars` 에 **일부러 안 넘긴다**(앵커 미리보기의 답을 안
+ * 바꾸려고). 그래서 수동 QA 일정이 걸린 차수에서는 `{QA종료일}` 이 실제
+ * 발송과 다를 수 있고, `{상세링크}` 도 앵커 쪽 문구를 쓴다. 둘 다 줄을
+ * 지우지는 않는다.
  */
 const SAMPLE_VARS: Record<AlertWhen['kind'], readonly string[]> = {
   anchor: [],
   activeCycle: ['기호', '상태문구', '알림건수', '재배정건수', '마지막확인'],
   scheduleUnusable: [],
 };
-
-/** 본문에 쓰인 변수 이름들. `checkAlertRulesV2` 가 쓰는 정규식과 같다. */
-function usedVars(template: string): string[] {
-  return [...new Set([...template.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1]))];
-}
-
-/**
- * 이 규칙 하나가 저장을 막는 이유. 없으면 null.
- *
- * **`checkAlertRulesV2` 와 같은 기준을 줄마다 미리 말하는 것뿐이다.**
- * 저장 차단의 판단은 그 함수가 하고(아래 `WhatEditor` 가 그대로 부른다),
- * 여기는 "어느 줄이 왜" 를 목록에서 보이게 한다. 기준을 따로 만들면
- * 화면은 통과시키는데 서버가 거절하는 짝이 생긴다.
- */
-function ruleProblem(r: AlertRuleV2): string | null {
-  if (!r.label.trim()) return '이름이 비었습니다';
-  if (!HM_RE.test(r.at)) return '시각은 09:10 처럼 두 자리씩 적어 주세요';
-  if (r.template === undefined) return null;
-  if (!r.template.trim()) return '본문이 비었습니다';
-  const used = usedVars(r.template);
-  const bad = used.filter((k) => !varsFor(r.when).includes(k));
-  if (bad.length) return `모르는 변수 · ${bad.map((x) => `{${x}}`).join(', ')}`;
-  const missing = requiredVars(r.when).filter((k) => !used.includes(k));
-  if (missing.length)
-    return `${missing.map((x) => `{${x}}`).join(', ')} 가 반드시 있어야 합니다`;
-  return null;
-}
 
 /**
  * 알림 하나를 고친다. **세 종류가 같은 부품을 쓴다.**
@@ -3286,16 +3267,40 @@ function RuleDetail({
           onCheckedChange={(v) => onChange({ ...r, enabled: v })}
           aria-label={`${r.label} 사용`}
         />
+        {/*
+          ── 조건형은 지울 수 없다 ──
+
+          `addRule` 은 날짜 알림만 만든다 (거기 주석 참고). 그래서 18:00
+          마감 요약이나 09:10 경고를 한 번 지우면 **화면에서 되돌릴 길이
+          없다** — DB 를 손으로 고쳐야 한다.
+
+          옛 모델에서 이 둘은 `alerts` 컬럼의 on/off 스위치였고 끄는 것은
+          늘 되돌릴 수 있었다. 모델을 합치면서 "끔" 이 "없앰" 이 되면 안
+          된다. 멈추는 길은 옆 스위치로 남기고 지우기만 막는다.
+        */}
         <Button
           variant="ghost"
           size="icon"
           className="size-7 shrink-0 text-muted-foreground"
           onClick={onRemove}
+          disabled={!w}
+          title={w ? undefined : '이 알림은 지울 수 없습니다'}
           aria-label={`${r.label} 삭제`}
         >
           <Trash2 />
         </Button>
       </div>
+
+      {!w && (
+        /*
+          왜 꺼져 있는지 글자로 말한다. 흐린 버튼만 두면 "왜 안 눌리지" 가
+          남고, 그 답은 코드에만 있다.
+        */
+        <p className="mt-1 px-1.5 text-[10.5px] text-muted-foreground">
+          지울 수 없는 알림입니다 · 대상마다 하나뿐이라 다시 만들 길이 없습니다
+          · 멈추려면 위 스위치를 끕니다
+        </p>
+      )}
 
       <div className="my-3 border-t" />
 
@@ -3518,7 +3523,8 @@ function RuleDetail({
             <p className="mt-1.5 text-[11px] text-muted-foreground">
               미리보기에서{' '}
               {SAMPLE_VARS[r.when.kind].map((v) => `{${v}}`).join(' ')} 는
-              예시값입니다 — 보내는 순간에 정해집니다. 나머지는 실제 값입니다
+              예시값입니다 — 보내는 순간에 정해집니다. 나머지는 실제 값에서
+              옵니다
             </p>
           )}
         </div>

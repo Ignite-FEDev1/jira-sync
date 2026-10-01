@@ -5080,6 +5080,71 @@ test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
   assert.match(sql, /'일정경고이유'/);
 });
 
+/*
+  ── 일정 경고 두 문장이 세 곳에 복제돼 있다 ──
+
+  `invalid`·`none` 중 **어느 문장을 고를지**는 PL/pgSQL 함수 본문 안에만 있어
+  바깥에서 부를 수가 없다. 그래서 같은 `case` 가 세 벌이다:
+
+    · 20260930 디스패처(activeCycle 갈래)   — 실제로 나가는 글자
+    · 20261001 미리보기                      — 화면이 보여주는 글자
+    · scripts/record-alert-messages.mts      — 골든을 녹화하는 글자
+
+  주석 셋은 알림 셋일 뿐 보증이 아니다. 이 저장소는 같은 질문에 **세 답**이
+  나와 어느 게 맞는지 아무도 모르던 사고를 겪었다(`config/route.ts` 의
+  검증 쌍둥이 주석). 디스패처 문구만 고치면 화면이 조용히 다른 말을 하게
+  되는데, 골든 테스트는 키 존재와 길이만 봐서 그걸 못 잡는다.
+
+  그래서 **세 파일의 글자를 직접 맞댄다.** `qa_router_vars` 오버로드 핀
+  테스트와 같은 수법이고, 적용된 마이그레이션을 건드리지 않는다.
+
+  ※ `20260929_qa_router_schedule_gap.sql` 에 네 번째 사본이 있다 —
+     20260930 이 대체한 옛 `qa_router_daily_summary` 의 것이라 더는 안 돈다.
+     여기서 안 센다. 나중에 문구를 바꿀 때는 디스패처를 `create or replace`
+     하는 **새 마이그레이션**이 생기므로, 아래 목록의 20260930 자리를 그
+     파일로 옮긴다.
+*/
+test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () => {
+  const files = {
+    '디스패처(20260930)': '../supabase/migrations/20260930_qa_router_alert_model.sql',
+    '미리보기(20261001)': '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
+    '녹화(record-alert-messages)': '../scripts/record-alert-messages.mts',
+  };
+
+  /** 작은따옴표 문자열 리터럴 안에 있으므로 따옴표·줄바꿈 앞에서 끊는다. */
+  const pick = (src: string, head: string, where: string) => {
+    const m = src.match(new RegExp(`${head}[^'\\n]*`));
+    assert.ok(m, `${where} 에서 "${head}" 로 시작하는 문장을 못 찾았다`);
+    return m![0];
+  };
+
+  const invalid: Record<string, string> = {};
+  const none: Record<string, string> = {};
+  for (const [where, rel] of Object.entries(files)) {
+    const src = readFileSync(new URL(rel, import.meta.url), 'utf-8');
+    invalid[where] = pick(src, ':warning: QA 일정이 서로 어긋납니다', where);
+    none[where] = pick(src, ':warning: 이 차수의 QA', where);
+  }
+
+  const [first, ...rest] = Object.keys(files);
+  for (const where of rest) {
+    assert.equal(
+      invalid[where],
+      invalid[first],
+      `invalid 문장이 ${first} 와 ${where} 에서 다르다`
+    );
+    assert.equal(
+      none[where],
+      none[first],
+      `none 문장이 ${first} 와 ${where} 에서 다르다`
+    );
+  }
+
+  // 빈 문자열을 세 곳에서 똑같이 못 찾아 통과하는 길을 막는다.
+  assert.ok(invalid[first].length > 20);
+  assert.ok(none[first].length > 20);
+});
+
 test('수동 일정 — 둘 다 비우면 지우는 것이다', () => {
   assert.equal(checkManualSchedule(null, null), null);
 });

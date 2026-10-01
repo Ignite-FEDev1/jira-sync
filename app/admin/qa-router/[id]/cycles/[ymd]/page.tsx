@@ -52,9 +52,13 @@ import type {
   QaWindowSource,
 } from '@/lib/services/qa-router/types';
 import {
+  checkAlertRulesV2,
   effectiveAlertRules,
   hasAlertOverride,
+  HM_RE,
+  ruleProblem,
 } from '@/lib/services/qa-router/types';
+import { cn } from '@/lib/utils';
 
 /*
   파이는 필요할 때 받는다.
@@ -855,7 +859,16 @@ function CycleRuleEditor({
   // 빈 목록은 저장할 수 없다. DB CHECK 도 같은 것을 막는다 — `[]` 는
   // "알림을 통째로 껐다" 가 되는데, 그 뜻은 규칙을 끈 채 남겨 말해야 한다.
   const empty = draft.length === 0;
-  const noLabel = draft.some((r) => !r.label.trim());
+  /*
+    ── 설정 화면과 **같은 함수**로 막는다 ──
+
+    전에는 여기만 빈 문구만 보고 나머지는 서버 토스트로 알았다. 같은 값이
+    한 화면에서는 빨갛고 다른 화면에서는 저장을 눌러야 아는 것은 같은 일을
+    두 가지로 가르치는 셈이다. `checkAlertRulesV2`(저장 차단)와
+    `ruleProblem`(어느 줄이 왜)을 그대로 가져다 쓴다 — 여기서 검사를 새로
+    쓰면 쌍둥이가 하나 더 생긴다.
+  */
+  const blocked = checkAlertRulesV2(draft);
 
   return (
     <div>
@@ -892,11 +905,17 @@ function CycleRuleEditor({
               >
                 <ChevronDown />
               </Button>
+              {/*
+                조건형은 지울 수 없다. 이 편집기도 날짜 알림만 만들 수 있어
+                한 번 지우면 되돌릴 길이 없다 — 설정 화면과 같은 이유다.
+              */}
               <Button
                 variant="ghost"
                 size="icon"
                 className="size-6 text-muted-foreground"
                 onClick={() => setDraft(draft.filter((_, k) => k !== i))}
+                disabled={!anchorWhen(r)}
+                title={anchorWhen(r) ? undefined : '이 알림은 지울 수 없습니다'}
                 aria-label={`${r.label} 삭제`}
               >
                 <Trash2 />
@@ -913,7 +932,11 @@ function CycleRuleEditor({
                 value={r.at}
                 onChange={(e) => patch(i, { ...r, at: e.target.value })}
                 aria-label={`${i + 1}번째 알림 시각`}
-                className="h-7 rounded-md border bg-background px-2 text-[11.5px] tabular-nums"
+                className={cn(
+                  'h-7 rounded-md border bg-background px-2 text-[11.5px] tabular-nums',
+                  !HM_RE.test(r.at) &&
+                    'border-red-500 text-red-700 dark:text-red-300'
+                )}
               />
               {anchorWhen(r) ? (
                 <>
@@ -967,6 +990,11 @@ function CycleRuleEditor({
                 사용
               </label>
             </div>
+            {ruleProblem(r) && (
+              <p className="px-2 pb-2 pl-[30px] text-[11px] text-red-700 dark:text-red-300">
+                {ruleProblem(r)} · 저장되지 않습니다
+              </p>
+            )}
           </div>
         ))}
         <Button
@@ -1009,17 +1037,25 @@ function CycleRuleEditor({
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={saving || empty || noLabel} onClick={onSave}>
+        <Button
+          size="sm"
+          disabled={saving || blocked !== null}
+          onClick={onSave}
+        >
           저장
         </Button>
         <Button variant="ghost" size="sm" disabled={saving} onClick={onCancel}>
           취소
         </Button>
-        {(empty || noLabel) && (
+        {blocked && (
           <span className="text-[11px] text-amber-700 dark:text-amber-400">
+            {/*
+              빈 목록만은 `checkAlertRulesV2` 보다 길게 말한다 — 여기서
+              답은 "하나 만들어라" 가 아니라 "끈 채 남겨라" 다.
+            */}
             {empty
               ? '규칙이 하나도 없습니다 · 안 알리려면 규칙을 남긴 채 사용을 끕니다'
-              : '문구가 빈 줄이 있습니다'}
+              : blocked}
           </span>
         )}
       </div>

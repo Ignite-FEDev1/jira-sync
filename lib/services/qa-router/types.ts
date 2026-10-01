@@ -365,6 +365,11 @@ export const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
  * 검증한다 — 그 함수는 손대지 않는다. 이쪽은 `at` + `when` + 종류별 변수
  * 집합을 검증하는 새 모양 전용이다.
  */
+/** 본문에 쓰인 변수 이름들. 중복은 한 번만 센다. */
+export function usedVars(template: string): string[] {
+  return [...new Set([...template.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1]))];
+}
+
 export function checkAlertRulesV2(v: unknown): string | null {
   if (!Array.isArray(v)) return '알림 규칙 형식이 잘못됐습니다.';
   if (v.length === 0) return '알림 규칙이 하나도 없습니다.';
@@ -411,9 +416,7 @@ export function checkAlertRulesV2(v: unknown): string | null {
       if (!r.template.trim()) return `${at}의 본문이 비었습니다.`;
 
       const allowed = varsFor(w);
-      const used = [
-        ...new Set([...r.template.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1])),
-      ];
+      const used = usedVars(r.template);
       const bad = used.filter((k) => !allowed.includes(k));
       if (bad.length)
         return `${at}에 모르는 변수가 있습니다: ${bad.map((x) => `{${x}}`).join(', ')}`;
@@ -423,6 +426,31 @@ export function checkAlertRulesV2(v: unknown): string | null {
         return `${at}에는 ${missing.map((x) => `{${x}}`).join(', ')} 가 반드시 있어야 합니다.`;
     }
   }
+  return null;
+}
+
+/**
+ * 이 규칙 하나가 저장을 막는 이유. 없으면 null.
+ *
+ * **`checkAlertRulesV2` 와 같은 기준을 줄마다 미리 말하는 것뿐이다.**
+ * 저장 차단의 판단은 그 함수가 하고(화면이 그대로 부른다), 여기는
+ * "어느 줄이 왜" 를 목록에서 보이게 한다. 기준을 따로 만들면 화면은
+ * 통과시키는데 서버가 거절하는 짝이 생긴다.
+ *
+ * 설정 화면과 차수 덮어쓰기 화면이 같이 쓴다 — 한쪽만 막으면 같은 값이
+ * 한 화면에서는 빨갛고 다른 화면에서는 저장을 눌러야 알게 된다.
+ */
+export function ruleProblem(r: AlertRuleV2): string | null {
+  if (!r.label.trim()) return '이름이 비었습니다';
+  if (!HM_RE.test(r.at)) return '시각은 09:10 처럼 두 자리씩 적어 주세요';
+  if (r.template === undefined) return null;
+  if (!r.template.trim()) return '본문이 비었습니다';
+  const used = usedVars(r.template);
+  const bad = used.filter((k) => !varsFor(r.when).includes(k));
+  if (bad.length) return `모르는 변수 · ${bad.map((x) => `{${x}}`).join(', ')}`;
+  const missing = requiredVars(r.when).filter((k) => !used.includes(k));
+  if (missing.length)
+    return `${missing.map((x) => `{${x}}`).join(', ')} 가 반드시 있어야 합니다`;
   return null;
 }
 

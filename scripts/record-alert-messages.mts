@@ -252,6 +252,18 @@ async function main() {
          cyc.deploy_page_id,
          greatest(cyc.deploy_ymd, coalesce(cyc.prod_ymd, cyc.deploy_ymd))::text
            as prod_day,
+         /*
+           ⚠ 이 case 는 **세 곳에 복제돼 있다.** 그 조립이 PL/pgSQL 함수
+              본문 안에만 있어 바깥에서 부를 수가 없다.
+
+                · 20260930_qa_router_alert_model.sql  디스패처(activeCycle 갈래)
+                · 20261001_qa_router_preview_kinds.sql  미리보기
+                · 여기 (녹화)
+
+              문장을 고치면 세 곳을 같이 고친다. qa-router.test.mts 의
+              "일정 경고 문장 — 세 곳이 한 글자도 다르지 않다" 가 글자 단위로
+              붙잡는다.
+         */
          case
            when not public.qa_router_wants_qa_alerts(
              public.qa_router_alert_rules_for(cyc.alert_rules_override, cfg.alert_rules)
