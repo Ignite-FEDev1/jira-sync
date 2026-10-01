@@ -10,6 +10,21 @@
  *
  *   npx tsx scripts/record-alert-messages.mts "postgresql://postgres@localhost:55440/postgres?host=/tmp/qapg-golden"
  *
+ * ── --verify · 옮긴 뒤 글자를 대조한다 ──
+ *
+ *   npx tsx scripts/record-alert-messages.mts "<주소>" --verify
+ *
+ * `--verify` 는 **골든을 다시 쓰지 않는다.** 같은 열 개를 새 모델
+ * (`qa_router_daily_summary_template`·`qa_router_schedule_warning_template`
+ * + `qa_router_render`)로 다시 만들어 픽스처와 글자 단위로 맞댄다. 하나라도
+ * 다르면 종료 코드 1 이다. 다시 걷으면 재는 의미가 사라지므로 이 모드에서는
+ * 파일을 안 건드린다.
+ *
+ * 새 모델 쪽 변수 묶음은 `qa_router_alerts()` 가 종류마다 만드는 것을 손으로
+ * 다시 적은 것이다 — 아래 `summaryTextV2`·`captureAllV2` 참고. `schedule_note`
+ * 의 `case` 를 여기 다시 적은 것과 같은 이유다: 그 조립이 PL/pgSQL 함수
+ * 본문 안에만 있어 바깥에서 부를 수가 없다.
+ *
  * ── 신선한 Postgres 에 마이그레이션을 복제할 때 ──
  *
  * `supabase/migrations/20260908_qa_router_cycle_title.sql` 이 파일명 정렬상
@@ -69,11 +84,16 @@
  * 짜서 `win.why` 를 산 함수 결과에서 받는다 — 그래야 이 골든이 내 기억이
  * 아니라 코드를 지킨다.
  */
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { Client } from 'pg';
 
-const url = process.argv[2];
+const args = process.argv.slice(2);
+/** 골든을 다시 쓰지 않고 지금 코드가 같은 글자를 내는지만 잰다. */
+const VERIFY = args.includes('--verify');
+const url = args.find((a) => !a.startsWith('--'));
 if (!url) throw new Error('DB 주소를 인자로 주세요');
+
+const FIXTURE = 'scripts/fixtures/alert-messages.json';
 
 /** 고정 입력. 날짜를 박아 둬야 다시 돌려도 같은 답이 나온다. */
 const CONFIG_ID = '00000000-0000-0000-0000-0000000000aa';
@@ -101,31 +121,40 @@ async function main() {
   await c.connect();
 
   // 이 스크립트가 만든 행만 쓴다. 남의 데이터에 기대지 않는다.
-  await c.query(`
+  await c.query(
+    `
     insert into public.qa_router_configs (id, name, enabled, jira_instance,
       jira_filter_id, triage_account_id, slack_channel_id)
     values ($1, '골든 대상', true, 'ignite', '1', 'u-triage', 'C_GOLDEN')
-    on conflict (id) do nothing;`, [CONFIG_ID]);
+    on conflict (id) do nothing;`,
+    [CONFIG_ID]
+  );
 
   // 차수 B — 깨진 창 (일정 경고·18시 schedule_note 를 몬다)
-  await c.query(`
+  await c.query(
+    `
     insert into public.qa_router_cycles (config_id, deploy_ymd, fix_version,
       cycle_label, qa_start_ymd, qa_end_ymd, prod_ymd, deploy_page_id,
       deploy_page_title, jira_version_exists)
     values ($1, '2026-10-07', $2, '정기배포 261007',
       '2026-09-29', '2026-10-08', '2026-10-07', '2866479114',
       'Dev) 배포 - 2026-10-07(수)', true)
-    on conflict (config_id, deploy_ymd) do nothing;`, [CONFIG_ID, FIX_VERSION_B]);
+    on conflict (config_id, deploy_ymd) do nothing;`,
+    [CONFIG_ID, FIX_VERSION_B]
+  );
 
   // 차수 A — 멀쩡한 창 (18시 normal·failed 를 몬다)
-  await c.query(`
+  await c.query(
+    `
     insert into public.qa_router_cycles (config_id, deploy_ymd, fix_version,
       cycle_label, qa_start_ymd, qa_end_ymd, prod_ymd, deploy_page_id,
       deploy_page_title, jira_version_exists)
     values ($1, '2026-09-22', $2, '정기배포 260922',
       '2026-09-29', '2026-10-06', '2026-10-07', '2866479200',
       'Dev) 배포 - 2026-09-22(화)', true)
-    on conflict (config_id, deploy_ymd) do nothing;`, [CONFIG_ID, FIX_VERSION_A]);
+    on conflict (config_id, deploy_ymd) do nothing;`,
+    [CONFIG_ID, FIX_VERSION_A]
+  );
 
   /**
    * 사다리(`qa_router_qa_window`)를 실제로 불러 그 결과와, 그 결과로
@@ -171,7 +200,8 @@ async function main() {
              ':warning: 이 차수의 QA 시작·종료일이 아직 없습니다 · 차수 화면에서 넣거나 배포대장에 적어 주세요'
          end as schedule_note
        from cyc, cfg, win`,
-      [CONFIG_ID, fixVersion]);
+      [CONFIG_ID, fixVersion]
+    );
     return r.rows[0] as WinRow;
   }
 
@@ -185,18 +215,26 @@ async function main() {
 
   // 18시 요약이 쓰는 머리말·본문 두 벌. qa_router_daily_summary 안의
   // format() 호출을 그대로 복사해 같은 인자로 부른다.
-  const headNormal = (await c.query(
-    `select format(':crescent_moon: *%s* 오늘 마감', '골든 대상') as t`
-  )).rows[0].t as string;
-  const headFailed = (await c.query(
-    `select format(':warning: *%s* 오늘 마감 · 실패 %s건', '골든 대상', 3) as t`
-  )).rows[0].t as string;
-  const bodyNormal = (await c.query(
-    `select format('오늘 알림 %s건%s · 마지막 확인 %s', 0, '', '17:59') as t`
-  )).rows[0].t as string;
-  const bodyFailed = (await c.query(
-    `select format('오늘 알림 %s건%s · 마지막 확인 %s', 5, ' (Jira 변경 2건)', '17:59') as t`
-  )).rows[0].t as string;
+  const headNormal = (
+    await c.query(
+      `select format(':crescent_moon: *%s* 오늘 마감', '골든 대상') as t`
+    )
+  ).rows[0].t as string;
+  const headFailed = (
+    await c.query(
+      `select format(':warning: *%s* 오늘 마감 · 실패 %s건', '골든 대상', 3) as t`
+    )
+  ).rows[0].t as string;
+  const bodyNormal = (
+    await c.query(
+      `select format('오늘 알림 %s건%s · 마지막 확인 %s', 0, '', '17:59') as t`
+    )
+  ).rows[0].t as string;
+  const bodyFailed = (
+    await c.query(
+      `select format('오늘 알림 %s건%s · 마지막 확인 %s', 5, ' (Jira 변경 2건)', '17:59') as t`
+    )
+  ).rows[0].t as string;
 
   /**
    * 18시 요약 한 통을 조립한다. 다섯 조각을 production 순서
@@ -217,14 +255,23 @@ async function main() {
           (select plan_collected_at from public.qa_router_cycles
             where config_id = $1 and fix_version = $2),
           $3::date) as t`,
-      [CONFIG_ID, fixVersion, TODAY]);
+      [CONFIG_ID, fixVersion, TODAY]
+    );
     const progressLine = prog.rows[0].t as string | null;
 
     const dl = await c.query(
       `select public.qa_router_detail_lines(
           $1, '골든 대상', $2, $3::date, $4, $5::date, $6::date, $7) as t`,
-      [CONFIG_ID, fixVersion, win.deploy_ymd, win.deploy_page_title,
-       win.qa_end, win.prod_day, win.deploy_page_id]);
+      [
+        CONFIG_ID,
+        fixVersion,
+        win.deploy_ymd,
+        win.deploy_page_title,
+        win.qa_end,
+        win.prod_day,
+        win.deploy_page_id,
+      ]
+    );
     const detailLines = dl.rows[0].t as string | null;
 
     return [head, progressLine, bodyText, win.schedule_note, detailLines]
@@ -239,10 +286,12 @@ async function main() {
     const vars = await c.query(
       `select public.qa_router_vars($1, $2, '오늘 운영 배포', $3::date,
          '2026-09-29'::date, '2026-10-08'::date, '2026-10-07'::date) as v`,
-      [CONFIG_ID, FIX_VERSION_B, TODAY]);
+      [CONFIG_ID, FIX_VERSION_B, TODAY]
+    );
     const rendered = await c.query(
       `select public.qa_router_render(public.qa_router_default_template(), $1::jsonb) as t`,
-      [vars.rows[0].v]);
+      [vars.rows[0].v]
+    );
     out[`dateAlert.prodToday${suffix}`] = rendered.rows[0].t;
 
     // ② 일정 경고 (09:10 · 이상함) — qa_router_morning_brief 안의 format()
@@ -254,24 +303,168 @@ async function main() {
          '골든 대상', to_char('2026-10-07'::date, 'MM/DD'),
          E'\\n' || coalesce($1::text, 'QA 시작·종료일을 어디에서도 못 읽었습니다'),
          E'\\nQA 시작·종료 알림이 이 차수엔 나가지 않습니다. 차수 화면에서 직접 넣거나 배포대장을 고쳐 주세요.'
-       ) as t`, [winB.why]);
+       ) as t`,
+      [winB.why]
+    );
     out[`scheduleWarning.invalid${suffix}`] = warn.rows[0].t;
 
     // ③ 18시 요약 · 평소 (차수 A — 멀쩡한 창, schedule_note 없음)
-    out[`dailySummary.normal${suffix}`] =
-      await dailySummaryText(FIX_VERSION_A, winA, headNormal, bodyNormal);
+    out[`dailySummary.normal${suffix}`] = await dailySummaryText(
+      FIX_VERSION_A,
+      winA,
+      headNormal,
+      bodyNormal
+    );
 
     // ④ 18시 요약 · 실패 (차수 A)
-    out[`dailySummary.failed${suffix}`] =
-      await dailySummaryText(FIX_VERSION_A, winA, headFailed, bodyFailed);
+    out[`dailySummary.failed${suffix}`] = await dailySummaryText(
+      FIX_VERSION_A,
+      winA,
+      headFailed,
+      bodyFailed
+    );
 
     // ⑤ 18시 요약 · 일정 어긋남 (차수 B — 깨진 창, schedule_note 가 실림)
-    out[`dailySummary.scheduleNote${suffix}`] =
-      await dailySummaryText(FIX_VERSION_B, winB, headNormal, bodyNormal);
+    out[`dailySummary.scheduleNote${suffix}`] = await dailySummaryText(
+      FIX_VERSION_B,
+      winB,
+      headNormal,
+      bodyNormal
+    );
   }
 
+  /**
+   * 새 모델이 만드는 18시 요약 한 통.
+   *
+   * `qa_router_alerts()` 의 `activeCycle` 갈래가 만드는 변수 묶음을 그대로
+   * 다시 적었다. 세 가지가 `qa_router_vars` 가 주는 값과 **다르다**:
+   *
+   *   · `{기호}`      진행률이 아니라 머리말 종류가 정한다
+   *                   (평소 `:crescent_moon:`, 문제 있으면 `:warning:`)
+   *   · `{알림건수}`  `(Jira 변경 N건)` 까지 한 변수에 담는다 — 따로 빼면
+   *                   재배정이 없는 날 그 줄이 통째로 사라진다
+   *   · `{상세링크}`  날짜 알림과 링크 글자가 다르다
+   *                   (`qa_router_detail_lines` 의 "대상 &gt; 차수")
+   */
+  async function summaryTextV2(
+    fixVersion: string,
+    win: WinRow,
+    headKind: 'ok' | 'failed',
+    judged: number,
+    reassigned: number
+  ): Promise<string> {
+    const r = await c.query(
+      `select public.qa_router_render(
+         public.qa_router_daily_summary_template(),
+         public.qa_router_vars($1, $2, null, $3::date,
+                               $4::date, $5::date, $6::date)
+         || jsonb_strip_nulls(jsonb_build_object(
+              '기호', case when $7::text = 'ok'
+                           then ':crescent_moon:' else ':warning:' end,
+              '대상이름', '골든 대상',
+              '상태문구', case when $7::text = 'ok' then '오늘 마감'
+                               else format('오늘 마감 · 실패 %s건', 3) end,
+              '알림건수', format('%s건%s', $8::int,
+                case when $9::int > 0
+                     then format(' (Jira 변경 %s건)', $9::int) else '' end),
+              '재배정건수', case when $9::int > 0 then ($9::int)::text end,
+              '마지막확인', '17:59',
+              '일정경고이유', $10::text,
+              '상세링크', case when $11::date is not null then
+                format('<%s/admin/qa-router/%s/cycles/%s|%s &gt; %s>',
+                       public.qa_router_admin_base(), $1, $11::date,
+                       public.qa_router_esc('골든 대상'),
+                       public.qa_router_esc(coalesce($12::text, $2))) end))
+       ) as t`,
+      [
+        CONFIG_ID,
+        fixVersion,
+        TODAY,
+        win.qa_start,
+        win.qa_end,
+        win.prod_day,
+        headKind,
+        judged,
+        reassigned,
+        win.schedule_note,
+        win.deploy_ymd,
+        win.deploy_page_title,
+      ]
+    );
+    return r.rows[0].t as string;
+  }
+
+  /**
+   * 새 모델이 만드는 열 개. 키는 옛 것과 같아야 대조가 된다.
+   *
+   * 날짜 알림(①)은 모델이 바뀌어도 가는 길이 같다 — 같은 기본 템플릿과
+   * 같은 `qa_router_vars` 다. 그래도 같이 찍어 길이 안 바뀌었음을 재운다.
+   */
+  async function captureAllV2(suffix: string) {
+    const vars = await c.query(
+      `select public.qa_router_vars($1, $2, '오늘 운영 배포', $3::date,
+         '2026-09-29'::date, '2026-10-08'::date, '2026-10-07'::date) as v`,
+      [CONFIG_ID, FIX_VERSION_B, TODAY]
+    );
+    const rendered = await c.query(
+      `select public.qa_router_render(public.qa_router_default_template(), $1::jsonb) as t`,
+      [vars.rows[0].v]
+    );
+    out[`dateAlert.prodToday${suffix}`] = rendered.rows[0].t;
+
+    // 일정 경고 — 이 종류에서 {차수} 는 대장 제목의 날짜(MM/DD)다.
+    const warn = await c.query(
+      `select public.qa_router_render(
+         public.qa_router_schedule_warning_template(),
+         public.qa_router_vars($1, $2, null, $3::date,
+                               $4::date, $5::date, $6::date)
+         || jsonb_build_object(
+              '기호', ':warning:',
+              '대상이름', '골든 대상',
+              '차수', to_char($7::date, 'MM/DD'),
+              '일정경고이유', coalesce($8::text,
+                'QA 시작·종료일을 어디에서도 못 읽었습니다'))
+       ) as t`,
+      [
+        CONFIG_ID,
+        FIX_VERSION_B,
+        TODAY,
+        winB.qa_start,
+        winB.qa_end,
+        winB.prod_day,
+        winB.deploy_ymd,
+        winB.why,
+      ]
+    );
+    out[`scheduleWarning.invalid${suffix}`] = warn.rows[0].t;
+
+    out[`dailySummary.normal${suffix}`] = await summaryTextV2(
+      FIX_VERSION_A,
+      winA,
+      'ok',
+      0,
+      0
+    );
+    out[`dailySummary.failed${suffix}`] = await summaryTextV2(
+      FIX_VERSION_A,
+      winA,
+      'failed',
+      5,
+      2
+    );
+    out[`dailySummary.scheduleNote${suffix}`] = await summaryTextV2(
+      FIX_VERSION_B,
+      winB,
+      'ok',
+      0,
+      0
+    );
+  }
+
+  const capture = VERIFY ? captureAllV2 : captureAll;
+
   // 갈래 ① 비어 있는 진행률 (아직 못 걷음) — 두 차수를 만든 직후 그대로.
-  await captureAll('');
+  await capture('');
 
   // 갈래 ② 채워진 진행률 — 운영이 매일 걷어 넣는 모양 그대로 채운다.
   // `plan_collected_at` 은 TODAY 의 KST 정오로 둬서 "묵은 값" 꼬리표가
@@ -283,17 +476,56 @@ async function main() {
           set plan_progress = $1::jsonb,
               plan_collected_at = $2::timestamptz
         where config_id = $3 and fix_version = $4`,
-      [JSON.stringify({ total: 2, ticketDone: 0 }), '2026-10-07 12:00:00+09',
-       CONFIG_ID, fv]);
+      [
+        JSON.stringify({ total: 2, ticketDone: 0 }),
+        '2026-10-07 12:00:00+09',
+        CONFIG_ID,
+        fv,
+      ]
+    );
   }
-  await captureAll('.withProgress');
+  await capture('.withProgress');
+
+  if (VERIFY) {
+    const want = (
+      JSON.parse(readFileSync(FIXTURE, 'utf-8')) as {
+        messages: Record<string, string>;
+      }
+    ).messages;
+    let bad = 0;
+    const keys = [...new Set([...Object.keys(want), ...Object.keys(out)])];
+    for (const k of keys.sort()) {
+      if (want[k] === out[k]) {
+        console.log(`✓ ${k}`);
+        continue;
+      }
+      bad++;
+      console.log(`✗ ${k}`);
+      console.log(`  옛: ${JSON.stringify(want[k])}`);
+      console.log(`  새: ${JSON.stringify(out[k])}`);
+    }
+    console.log(`\n${keys.length}개 대조, 다름 ${bad}`);
+    await c.end();
+    if (bad > 0) process.exit(1);
+    return;
+  }
 
   writeFileSync(
-    'scripts/fixtures/alert-messages.json',
-    JSON.stringify({ recordedAt: new Date().toISOString(), today: TODAY, messages: out }, null, 2) + '\n');
+    FIXTURE,
+    JSON.stringify(
+      { recordedAt: new Date().toISOString(), today: TODAY, messages: out },
+      null,
+      2
+    ) + '\n'
+  );
   console.log(`기록: ${Object.keys(out).length}개`);
   for (const [k, v] of Object.entries(out)) {
-    console.log(`\n── ${k}\n${v.split('\n').map((l) => '   ' + l).join('\n')}`);
+    console.log(
+      `\n── ${k}\n${v
+        .split('\n')
+        .map((l) => '   ' + l)
+        .join('\n')}`
+    );
   }
   await c.end();
 }

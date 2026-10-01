@@ -2602,6 +2602,58 @@ test('알림 판단 — 새 모양이 옛 모양과 같은 답을 낸다', () =>
 });
 
 /*
+  ── 앵커가 아닌 규칙이 섞인 목록 ──
+
+  `milestoneFrom` 은 `when.kind` 가 `anchor` 가 아닌 규칙을 걸러 내는데,
+  지금까지는 그 자리에 **앵커 규칙만** 왔기 때문에 그 거르기가 한 번도
+  실제로 쓰이지 않았다. 마이그레이션이 모든 대상의 `alert_rules` 에
+  activeCycle·scheduleUnusable 규칙을 넣으므로, 이제 어드민 화면이 읽는
+  목록에 그 둘이 늘 섞여 있다.
+
+  걸러지지 않으면 `when` 안의 앵커를 못 찾아 `undefined` 를 기준일로 삼고,
+  그 규칙의 문구("마감 요약")가 화면의 마감선 자리에 튀어나온다.
+*/
+test('마감선 — 앵커가 아닌 규칙은 건너뛴다', () => {
+  const s = {
+    qaStartYmd: '2026-09-22',
+    qaEndYmd: '2026-09-29',
+    prodYmd: '2026-09-30',
+    deployYmd: '2026-09-30',
+  };
+  const notAnchor: AlertRuleV2[] = [
+    {
+      id: 'dailySummary',
+      at: '18:00',
+      when: { kind: 'activeCycle' },
+      label: '마감 요약',
+      enabled: true,
+    },
+    {
+      id: 'scheduleWarning',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: true,
+    },
+  ];
+  const anchors = DEFAULT_ALERT_RULES.map(toAlertRuleV2);
+  // 섞여 있어도 앵커만 있는 목록과 답이 같아야 한다
+  for (const day of ['2026-09-22', '2026-09-29', '2026-09-30', '2026-10-01']) {
+    assert.equal(
+      milestoneFrom([...notAnchor, ...anchors], s, day),
+      milestoneFrom(anchors, s, day),
+      `${day} 에서 섞인 목록이 다른 답을 낸다`
+    );
+  }
+  assert.equal(
+    milestoneFrom([...notAnchor, ...anchors], s, '2026-09-30'),
+    '오늘 운영 배포'
+  );
+  // 앵커가 하나도 없으면 null. "마감 요약" 이 마감선 자리로 새면 안 된다.
+  assert.equal(milestoneFrom(notAnchor, s, '2026-09-30'), null);
+});
+
+/*
   ── 왜 종류별로 가르나 ──
 
   한 목록으로 두면 날짜 알림 본문에 {알림건수} 를 쓸 수 있게 된다. 거기서는
@@ -5379,6 +5431,82 @@ test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
       `${k} 이 너무 짧다 — 빈 채로 기록된 것 같다`
     );
   }
+});
+
+/*
+  ── 마이그레이션이 크론을 하나로 바꾼다 ──
+
+  이 테스트는 SQL 을 실행하지 않는다. 실행 리허설은 버리는 로컬 Postgres 에
+  따로 돌리고(`scripts/diff-due-rules.mts`,
+  `scripts/record-alert-messages.mts --verify`), 여기서는 **그 파일이 되돌릴
+  수 없는 실수를 안 하는지**만 글자로 고정한다.
+*/
+test('알림 모델 — 마이그레이션이 크론을 하나로 바꾼다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 함정: 파일 안의 rollback 은 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
+  assert.match(sql, /unschedule\('qa-router-morning-brief'\)/);
+  assert.match(sql, /unschedule\('qa-router-daily-summary'\)/);
+  assert.match(sql, /schedule\('qa-router-alerts', '\*\/10 \* \* \* \*'/);
+  assert.match(sql, /drop column if exists alerts/);
+  assert.match(sql, /drop function if exists public\.qa_router_alert_on/);
+  // qa_router_hit_rule 은 안 건드린다 — 인자를 늘리면 오버로드가 생긴다
+  assert.doesNotMatch(sql, /function public\.qa_router_hit_rule/);
+  assert.match(sql, /add column if not exists alert_sent_on jsonb/);
+  // 고르기는 따로 뺀다 — TS dueRules 와 대조할 수 있어야 한다
+  assert.match(sql, /function public\.qa_router_due_rules/);
+  // CHECK 가 새 모양을 받게 먼저 갈아 끼운다. 안 하면 update 가 한 줄도 안 들어간다.
+  const validAt = sql.indexOf('function public.qa_router_valid_alert_rules');
+  const firstUpdate = sql.indexOf('update public.qa_router_configs');
+  assert.ok(validAt > 0, 'CHECK 검사 함수를 안 바꿨다');
+  assert.ok(validAt < firstUpdate, 'CHECK 를 update 보다 먼저 갈아야 한다');
+
+  /*
+    기본 경고 문구에 {일정경고이유} 가 반드시 있어야 한다.
+
+    `checkAlertRulesV2` 의 필수 변수 검사는 `template` 을 **덮어썼을 때만** 돈다
+    (`if (r.template !== undefined)`). 안 덮어쓴 대상은 기본 문구를 쓰므로,
+    기본 문구에 이유가 없으면 "일정 문제" 만 남고 무엇이 문제인지 사라진다.
+    저장 차단이 못 막는 자리라 여기서 막는다.
+  */
+  const warnTpl = sql.match(/qa_router_schedule_warning_template[\s\S]*?\$\$;/);
+  assert.ok(warnTpl, '기본 경고 문구 함수가 없다');
+  assert.match(warnTpl[0], /\{일정경고이유\}/);
+
+  // morningBrief 는 09:10 루프 전체의 마스터 스위치였다. 껐던 대상이
+  // 갑자기 알림을 받기 시작하지 않도록 규칙을 전부 꺼야 한다.
+  // (브리프는 `/s` 플래그를 썼지만 이 레포의 tsconfig target 이 ES2017 이라
+  //  그 플래그가 TS1501 로 막힌다. `[\s\S]` 로 같은 뜻을 적는다.)
+  assert.match(sql, /morningBrief[\s\S]*::boolean, true\) = false/);
+  // 경고는 목록 뒤에 붙는다 — 같은 시각에서 날짜 알림이 이기던 순서를 지킨다
+  const warnAt = sql.indexOf("'scheduleWarning'");
+  const concat = sql.indexOf('alert_rules || jsonb_build_array');
+  assert.ok(concat > 0 && warnAt > concat, '경고는 뒤에 붙여야 한다');
+
+  /*
+    브리프 밖에서 찾은 두 구멍. 둘 다 "알림이 조용히 멎는" 쪽이라 같이 막는다.
+
+    ① `qa_router_wants_qa_alerts` 는 `r.value->>'anchor'` 를 읽었다. 앵커가
+       `when` 안으로 들어가면 모든 대상에서 거짓이 되어 일정 경고와 18시
+       요약의 일정 한 줄이 통째로 사라진다.
+    ② `qa_router_cycles.alert_rules_override` 는 `qa_router_alert_rules_for`
+       가 설정값보다 **먼저** 보는 자리다. 안 옮기면 덮어쓰기가 걸린 차수만
+       옛 모양으로 남아 그 차수의 알림이 전부 멎는다.
+  */
+  assert.match(sql, /function public\.qa_router_wants_qa_alerts/);
+  assert.match(sql, /update public\.qa_router_cycles/);
+  // 새 대상도 만들 수 있어야 한다 — 컬럼 기본값이 옛 모양이면 CHECK 에 걸려
+  // insert 가 통째로 죽는다.
+  assert.match(sql, /alter column alert_rules set default/);
 });
 
 /*
