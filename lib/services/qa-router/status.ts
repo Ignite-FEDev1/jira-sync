@@ -10,7 +10,9 @@ import { prodDayOf } from './qa-window';
 import { DEPLOY_KINDS } from './types';
 import type {
   AlertRule,
+  AlertRuleV2,
   AlertShift,
+  AlertWhen,
   ActiveCycle,
   DeployCycle,
   DeployKind,
@@ -381,7 +383,8 @@ export function cycleStage(
       지금 바꿔야 하는지는 **다음 차수 QA 가 시작됐는지**에 달렸고, 그
       판단은 대상 전체 상태(`computeHealth`)가 한다.
     */
-    const label = cycle.fixVersion === activeFixVersion ? '배포 완료' : '지난 차수';
+    const label =
+      cycle.fixVersion === activeFixVersion ? '배포 완료' : '지난 차수';
     return { stage: 'past', label, tone: 'off' };
   }
 
@@ -525,10 +528,7 @@ export function staleFilterCycle(
 // (같은 방식의 선례: isWorkingWindow ↔ qa_router_in_window)
 
 /** 날짜를 말하는 출처. 신뢰 순서대로다. */
-export type ScheduleSource =
-  | 'ledgerTitle'
-  | 'fixVersion'
-  | 'ledgerBody';
+export type ScheduleSource = 'ledgerTitle' | 'fixVersion' | 'ledgerBody';
 
 export const SOURCE_LABEL: Record<ScheduleSource, string> = {
   ledgerTitle: '배포대장 제목',
@@ -703,8 +703,19 @@ export function ruleDay(
  * **위에서부터 보고 처음 맞는 것 하나만** 낸다. 하루에 둘이 겹치는 일이
  * 실제로 있다 — 운영 배포일과 QA 종료 다음 근무일이 같은 날일 수 있다.
  * 둘 다 보내면 같은 차수 이야기가 두 번 오므로 순서로 우선순위를 정한다.
+ *
+ * ── 왜 이름이 `Legacy` 인가 ──
+ *
+ * `milestoneFrom` 이라는 이름과 옛 모양(`AlertRule[]`)을 그대로 두고, 새
+ * 모양(`AlertRuleV2[]`)을 받는 같은 이름의 함수를 아래에 새로 둔다. 이 판은
+ * `milestoneFromLegacy` 로 옮겨 **대조 테스트** 전용으로만 남긴다 — 새 판이
+ * 옛 판과 같은 답을 내는지 맞대어 보는 것 말고 다른 쓸모가 없다.
+ *
+ * `DEFAULT_ALERT_RULES` 가 새 모양으로 바뀌는 날(Task 9) 이 함수는 할 일이
+ * 없어져 지운다. 그 전까지는 임시다 — 다른 코드가 이 이름을 새로 불러
+ * 쓰면 안 된다.
  */
-export function milestoneFrom(
+export function milestoneFromLegacy(
   rules: readonly AlertRule[],
   s: {
     qaStartYmd: string | null;
@@ -789,6 +800,42 @@ export function milestoneFrom(
       : r.label.replace('{days}', String(days));
   }
   return null;
+}
+
+/**
+ * 오늘 알릴 문구 — 새 모양(`AlertRuleV2[]`) 판.
+ *
+ * `when.kind !== 'anchor'` 인 규칙은 건너뛴다. 날짜 앵커가 아닌 조건
+ * (`activeCycle`, `scheduleUnusable`)은 크론이 직접 판단하고, 이 함수는
+ * 날짜 마감선 로직(`milestoneFromLegacy`)만 재사용한다.
+ */
+export function milestoneFrom(
+  rules: readonly AlertRuleV2[],
+  s: {
+    qaStartYmd: string | null;
+    qaEndYmd: string | null;
+    prodYmd: string | null;
+    deployYmd?: string;
+  },
+  todayYmd: string
+): string | null {
+  const anchors = rules.filter(
+    (r): r is AlertRuleV2 & { when: Extract<AlertWhen, { kind: 'anchor' }> } =>
+      r.when.kind === 'anchor'
+  );
+  return milestoneFromLegacy(
+    anchors.map((r) => ({
+      id: r.id,
+      anchor: r.when.anchor,
+      offset: r.when.offset,
+      shift: r.when.shift,
+      label: r.label,
+      enabled: r.enabled,
+      template: r.template,
+    })),
+    s,
+    todayYmd
+  );
 }
 
 /**
@@ -1032,7 +1079,12 @@ export function readCyclePageTitle(
   */
   const fromVersion = resolved
     ? DEPLOY_KINDS.find((k) => {
-        const p = buildFixVersion(opts.rule ?? null, k, deployYmd, DEPLOY_KINDS);
+        const p = buildFixVersion(
+          opts.rule ?? null,
+          k,
+          deployYmd,
+          DEPLOY_KINDS
+        );
         return p !== null && p === resolved;
       })
     : undefined;

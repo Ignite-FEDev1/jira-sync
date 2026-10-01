@@ -89,3 +89,34 @@ export function dueRules(
   }
   return [...byAt.values()].sort((a, b) => a.at.localeCompare(b.at));
 }
+
+export interface StatusInput {
+  /** 마지막 확인이 한 시간을 넘었나. */
+  stalled: boolean;
+  /** 오늘 실패한 건수. */
+  failedToday: number;
+  /** 연속 실패 횟수. */
+  consecutiveFails: number;
+}
+
+/**
+ * 18:00 요약의 머리말 문구. **절대 비지 않는다.**
+ *
+ * 처음엔 `오늘 마감{상태문구}` 처럼 접미사로 두려 했다가 되돌렸다.
+ * `renderTemplate` 은 "한 줄에 쓰인 변수 중 빈 것이 하나라도 있으면 그 줄을
+ * 통째로 버린다". 평소에 이 값이 비면 머리말 줄이 사라져 **제목 없는
+ * 알림**이 나간다. 실제로 돌려서 확인했다.
+ *
+ * 예외를 만들어 이 변수만 빈 값을 견디게 하는 길도 있었지만 택하지 않았다.
+ * "왜 이 변수만 다르지" 가 생기고, 예외는 두 번째 예외를 부른다.
+ *
+ * 우선순위는 옛 코드와 같다 (`20260929_qa_router_schedule_gap.sql` 의
+ * 마감 요약 조립부): 멈춤 > 오늘 실패 > 연속 실패 > 평소.
+ */
+export function statusPhrase(i: StatusInput): string {
+  if (i.stalled) return '오늘 마감 · 확인이 멈춰 있습니다';
+  if (i.failedToday > 0) return `오늘 마감 · 실패 ${i.failedToday}건`;
+  if (i.consecutiveFails > 0)
+    return `오늘 마감 · 연속 실패 ${i.consecutiveFails}회`;
+  return '오늘 마감';
+}

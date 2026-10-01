@@ -17,6 +17,7 @@ import {
   describeScope,
   formatClock,
   milestoneFrom,
+  milestoneFromLegacy,
   milestoneOn,
   nextWorkday,
   overdueSlot,
@@ -38,7 +39,11 @@ import {
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
 import { planToggleEnabled } from '@/app/admin/qa-router/toggle-enabled-plan';
-import { dueRules, toAlertRuleV2 } from '@/lib/services/qa-router/alert-rule';
+import {
+  dueRules,
+  statusPhrase,
+  toAlertRuleV2,
+} from '@/lib/services/qa-router/alert-rule';
 import type { AlertRuleV2 } from '@/lib/services/qa-router/types';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
@@ -2322,7 +2327,7 @@ test('알림 규칙 — 기본값이 기존 분기점과 다른 날은 뺀 규�
     const day = new Date(Date.UTC(2026, 7, 25) + i * 86_400_000)
       .toISOString()
       .slice(0, 10);
-    const now = milestoneFrom(DEFAULT_ALERT_RULES, s, day);
+    const now = milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, day);
     const legacy = milestoneOn(s, day);
     if (now !== legacy) diffs.push(day);
     else continue;
@@ -2357,7 +2362,7 @@ test('알림 규칙 — 3일 전이라고 넣으면 정확히 3일 전에 울린
       label: '{days}일 뒤 QA 시작',
       enabled: true,
     },
-  ];
+  ].map(toAlertRuleV2);
   assert.equal(milestoneFrom(rules, s, '2026-08-31'), '3일 뒤 QA 시작');
   assert.equal(milestoneFrom(rules, s, '2026-08-28'), null);
 });
@@ -2384,11 +2389,11 @@ test('알림 규칙 — 하루에 둘이 걸리면 위에 있는 것 하나만 �
     prodYmd: '2026-09-14',
   };
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-14'),
+    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-14'),
     '오늘 운영 배포'
   );
   // 순서를 뒤집으면 반대가 나온다 — 순서가 곧 우선순위다.
-  const flipped = [...DEFAULT_ALERT_RULES].reverse();
+  const flipped = [...DEFAULT_ALERT_RULES].reverse().map(toAlertRuleV2);
   assert.equal(milestoneFrom(flipped, s, '2026-09-14'), 'QA 종료');
 });
 
@@ -2400,7 +2405,7 @@ test('알림 규칙 — 끈 규칙은 울리지 않는다', () => {
   };
   const off = DEFAULT_ALERT_RULES.map((r) =>
     r.id === 'qaStart' ? { ...r, enabled: false } : r
-  );
+  ).map(toAlertRuleV2);
   assert.equal(milestoneFrom(off, s, '2026-09-03'), null);
 });
 
@@ -2437,8 +2442,12 @@ test('차수 덮어쓰기 — null 이면 설정값을 쓴다 (한 날도 다르
       .toISOString()
       .slice(0, 10);
     assert.equal(
-      milestoneFrom(effectiveAlertRules(null, configRules), s, day),
-      milestoneFrom(configRules, s, day),
+      milestoneFrom(
+        effectiveAlertRules(null, configRules).map(toAlertRuleV2),
+        s,
+        day
+      ),
+      milestoneFrom(configRules.map(toAlertRuleV2), s, day),
       `${day} 에서 갈림`
     );
   }
@@ -2471,9 +2480,15 @@ test('차수 덮어쓰기 — 값이 있으면 그것을 쓴다', () => {
   assert.equal(used, override);
 
   // 설정값은 09-10 에 울리고, 덮어쓴 차수는 09-14 에 울린다.
-  assert.equal(milestoneFrom(configRules, s, '2026-09-10'), '오늘 운영 배포');
-  assert.equal(milestoneFrom(used, s, '2026-09-10'), null);
-  assert.equal(milestoneFrom(used, s, '2026-09-14'), '오늘 운영 배포');
+  assert.equal(
+    milestoneFrom(configRules.map(toAlertRuleV2), s, '2026-09-10'),
+    '오늘 운영 배포'
+  );
+  assert.equal(milestoneFrom(used.map(toAlertRuleV2), s, '2026-09-10'), null);
+  assert.equal(
+    milestoneFrom(used.map(toAlertRuleV2), s, '2026-09-14'),
+    '오늘 운영 배포'
+  );
 });
 
 test('차수 덮어쓰기 — 덮어쓴 차수인지 화면이 알 수 있다', () => {
@@ -2513,6 +2528,77 @@ test('차수 덮어쓰기 — 저장 전에 깨진 규칙을 사람 말로 막�
       '',
     /모르는 변수/
   );
+});
+
+/*
+  ── 상태문구 — 18:00 요약의 머리말 ──
+
+  처음엔 `오늘 마감{상태문구}` 처럼 접미사로 두려 했다. renderTemplate 은
+  "한 줄에 쓰인 변수 중 빈 것이 하나라도 있으면 그 줄을 통째로 버린다".
+  평소에 {상태문구} 가 비면 **머리말 줄이 통째로 사라져 제목 없는 알림이
+  나간다.** 실제로 돌려서 확인했다.
+
+  그래서 이 값은 **절대 비지 않는다.**
+*/
+test('상태문구 — 평소에도 비지 않는다', () => {
+  const s = statusPhrase({
+    stalled: false,
+    failedToday: 0,
+    consecutiveFails: 0,
+  });
+  assert.equal(s, '오늘 마감');
+  assert.ok(s.length > 0, '비면 머리말 줄이 사라진다');
+});
+
+test('상태문구 — 네 갈래가 각각 옳은 값을 낸다', () => {
+  assert.equal(
+    statusPhrase({ stalled: true, failedToday: 0, consecutiveFails: 0 }),
+    '오늘 마감 · 확인이 멈춰 있습니다'
+  );
+  assert.equal(
+    statusPhrase({ stalled: false, failedToday: 3, consecutiveFails: 0 }),
+    '오늘 마감 · 실패 3건'
+  );
+  assert.equal(
+    statusPhrase({ stalled: false, failedToday: 0, consecutiveFails: 7 }),
+    '오늘 마감 · 연속 실패 7회'
+  );
+});
+
+/*
+  우선순위는 옛 코드와 같아야 한다 (20260929…sql 의 마감 요약 조립부).
+  멈춤 > 오늘 실패 > 연속 실패 > 평소.
+*/
+test('상태문구 — 여럿이 겹치면 멈춤이 이긴다', () => {
+  assert.equal(
+    statusPhrase({ stalled: true, failedToday: 3, consecutiveFails: 7 }),
+    '오늘 마감 · 확인이 멈춰 있습니다'
+  );
+  assert.equal(
+    statusPhrase({ stalled: false, failedToday: 3, consecutiveFails: 7 }),
+    '오늘 마감 · 실패 3건'
+  );
+});
+
+/*
+  옛 규칙으로 돌린 답과 새 모양으로 돌린 답이 같아야 한다. 옮기는 일이지
+  바꾸는 일이 아니다.
+*/
+test('알림 판단 — 새 모양이 옛 모양과 같은 답을 낸다', () => {
+  const s = {
+    qaStartYmd: '2026-09-22',
+    qaEndYmd: '2026-09-29',
+    prodYmd: '2026-09-30',
+    deployYmd: '2026-09-30',
+  };
+  const v2 = DEFAULT_ALERT_RULES.map(toAlertRuleV2);
+  for (const day of ['2026-09-22', '2026-09-29', '2026-09-30', '2026-10-01']) {
+    assert.equal(
+      milestoneFrom(v2, s, day),
+      milestoneFromLegacy(DEFAULT_ALERT_RULES, s, day),
+      `${day} 에서 답이 갈린다`
+    );
+  }
 });
 
 /*
@@ -4540,7 +4626,10 @@ test('마감선 — 운영 배포일 다음날부터는 아무것도 안 울린�
     prodYmd: '2026-10-07',
   };
   // 10-08 은 qaEnd 당일이지만 배포가 지났으므로 안 울린다
-  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'), null);
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-10-08'),
+    null
+  );
 });
 
 test('마감선 — 운영 배포일 당일은 막지 않는다', () => {
@@ -4551,7 +4640,7 @@ test('마감선 — 운영 배포일 당일은 막지 않는다', () => {
   };
   // '오늘 운영 배포' 가 살아 있어야 한다
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-07'),
+    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-10-07'),
     '오늘 운영 배포'
   );
 });
@@ -4563,12 +4652,15 @@ test('마감선 — 정상 데이터에서는 아무것도 안 바뀐다', () =>
     prodYmd: '2026-09-30',
   };
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
+    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-22'),
     '오늘 QA 시작'
   );
-  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'), 'QA 종료');
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-30'),
+    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-29'),
+    'QA 종료'
+  );
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-30'),
     '오늘 운영 배포'
   );
 });
@@ -4578,7 +4670,7 @@ test('마감선 — 운영 배포일을 모르면 막지 않는다', () => {
   // 마감선 때문에 QA 알림이 통째로 죽으면 안 된다.
   const s = { qaStartYmd: '2026-09-22', qaEndYmd: '2026-09-29', prodYmd: null };
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
+    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-22'),
     '오늘 QA 시작'
   );
 });
@@ -4610,7 +4702,7 @@ test('마감선 — 대장 본문에 운영일이 없으면 제목의 날짜가 
       label: '오늘 운영 배포',
       enabled: true,
     },
-  ];
+  ].map(toAlertRuleV2);
   const ledger = {
     qaStartYmd: '2026-09-01',
     qaEndYmd: '2026-09-11',
@@ -4641,7 +4733,7 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
     qaEndYmd: '2026-09-09',
     prodYmd: '2026-09-10',
   };
-  const override = [
+  const overrideOld = [
     {
       id: 'prodToday',
       anchor: 'prod' as const,
@@ -4651,11 +4743,12 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
       enabled: true,
     },
   ];
+  const override = overrideOld.map(toAlertRuleV2);
   // 보정된 배포일(09-14) 당일이므로 울린다
   assert.equal(milestoneFrom(override, s, '2026-09-14'), '오늘 운영 배포');
   // 그리고 그 다음날부터는 무엇도 안 울린다
   const withQa = [
-    ...override,
+    ...overrideOld,
     {
       id: 'qaLate',
       anchor: 'qa_end' as const,
@@ -4664,7 +4757,7 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
       label: '늦은 QA 알림',
       enabled: true,
     },
-  ];
+  ].map(toAlertRuleV2);
   assert.equal(milestoneFrom(withQa, s, '2026-09-15'), null);
 });
 
@@ -4675,7 +4768,7 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
   가 그대로 마감선이어야 한다.
 */
 test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이다', () => {
-  const qaEndOnly = [
+  const qaEndOnlyOld = [
     {
       id: 'qaEnd',
       anchor: 'qa_end' as const,
@@ -4685,6 +4778,7 @@ test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이�
       enabled: true,
     },
   ];
+  const qaEndOnly = qaEndOnlyOld.map(toAlertRuleV2);
 
   // prod 앵커가 아예 없다 → 마감선은 원본 prodYmd(09-10) 그대로다.
   // qaEnd(09-11)가 그보다 뒤라 마감선을 넘는다.
@@ -4722,7 +4816,7 @@ test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이�
     아래 assert 가 깨진다.
   */
   const withDisabledProd = [
-    ...qaEndOnly,
+    ...qaEndOnlyOld,
     {
       id: 'prodDisabled',
       anchor: 'prod' as const,
@@ -4731,7 +4825,7 @@ test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이�
       label: '오늘 운영 배포',
       enabled: false,
     },
-  ];
+  ].map(toAlertRuleV2);
   assert.equal(
     milestoneFrom(
       withDisabledProd,
