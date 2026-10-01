@@ -77,6 +77,9 @@ docs/auth-query.md
 # 각자 녹화한다: npx tsx scripts/qa-router.record.mts
 # 없으면 회귀 테스트만 건너뛴다 (나머지는 그대로 돈다).
 /scripts/fixtures/*.json
+# 알림 골든만 예외. judge-cases.json 은 사람마다 다시 걷는 자료라 안 넣지만,
+# 이쪽은 "옮기기 전 글자" 라서 다시 걷으면 재는 의미가 사라진다. 얼려 둔다.
+!/scripts/fixtures/alert-messages.json
 
 # SDD 작업공간 (원장·브리프·리뷰 꾸러미) — 기록은 git 히스토리가 한다
 .superpowers/
