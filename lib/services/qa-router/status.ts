@@ -9,8 +9,10 @@ import { buildFixVersion, type FixVersionRule } from './derive';
 import { prodDayOf } from './qa-window';
 import { DEPLOY_KINDS } from './types';
 import type {
+  AlertAnchor,
   AlertRule,
   AlertShift,
+  AlertWhen,
   ActiveCycle,
   DeployCycle,
   DeployKind,
@@ -381,7 +383,8 @@ export function cycleStage(
       지금 바꿔야 하는지는 **다음 차수 QA 가 시작됐는지**에 달렸고, 그
       판단은 대상 전체 상태(`computeHealth`)가 한다.
     */
-    const label = cycle.fixVersion === activeFixVersion ? '배포 완료' : '지난 차수';
+    const label =
+      cycle.fixVersion === activeFixVersion ? '배포 완료' : '지난 차수';
     return { stage: 'past', label, tone: 'off' };
   }
 
@@ -525,10 +528,7 @@ export function staleFilterCycle(
 // (같은 방식의 선례: isWorkingWindow ↔ qa_router_in_window)
 
 /** 날짜를 말하는 출처. 신뢰 순서대로다. */
-export type ScheduleSource =
-  | 'ledgerTitle'
-  | 'fixVersion'
-  | 'ledgerBody';
+export type ScheduleSource = 'ledgerTitle' | 'fixVersion' | 'ledgerBody';
 
 export const SOURCE_LABEL: Record<ScheduleSource, string> = {
   ledgerTitle: '배포대장 제목',
@@ -703,6 +703,13 @@ export function ruleDay(
  * **위에서부터 보고 처음 맞는 것 하나만** 낸다. 하루에 둘이 겹치는 일이
  * 실제로 있다 — 운영 배포일과 QA 종료 다음 근무일이 같은 날일 수 있다.
  * 둘 다 보내면 같은 차수 이야기가 두 번 오므로 순서로 우선순위를 정한다.
+ *
+ * `when.kind` 가 `anchor` 가 아닌 규칙은 건너뛴다. 날짜가 아닌 조건
+ * (`activeCycle` · `scheduleUnusable`)은 크론이 직접 판단하고, 이 함수는
+ * 날짜 마감선만 본다. 마이그레이션이 모든 대상의 목록에 그 둘을 넣었으므로
+ * 섞여 오는 것이 평소 모양이다 — 안 거르면 `when` 안의 앵커를 못 찾아
+ * `undefined` 를 기준일로 삼고, 그 규칙의 문구("마감 요약")가 화면의 마감선
+ * 자리에 튀어나온다.
  */
 export function milestoneFrom(
   rules: readonly AlertRule[],
@@ -734,7 +741,12 @@ export function milestoneFrom(
       ? s.prodYmd
       : prodDayOf({ deployYmd: s.deployYmd, prodYmd: s.prodYmd });
 
-  const anchorOf = (a: AlertRule['anchor']) =>
+  type AnchorRule = AlertRule & {
+    when: Extract<AlertWhen, { kind: 'anchor' }>;
+  };
+  const anchors = rules.filter((r): r is AnchorRule => r.when.kind === 'anchor');
+
+  const anchorOf = (a: AlertAnchor) =>
     a === 'qa_start' ? s.qaStartYmd : a === 'qa_end' ? s.qaEndYmd : prod;
 
   /*
@@ -752,25 +764,25 @@ export function milestoneFrom(
     배포일이 새 선이 될 뿐이다.
   */
   /*
-    `prod` 앵커 규칙이 여럿 켜져 있을 수도 있다 (`AlertRule[]` 은 유일성을
-    강제하지 않는다). 그런 경우 **배열 순서상 먼저 나오는 첫 규칙**이
-    이긴다 - 임의가 아니라 의도한 선택이다. SQL 쌍둥이
-    `qa_router_hit_rule` 도 같은 선택을 `order by ordinality limit 1` 로
-    표현한다. 여기서 고르는 방식을 바꾸면 그쪽도 같이 바꿔야 한다.
+    `prod` 앵커 규칙이 여럿 켜져 있을 수도 있다 (목록은 유일성을 강제하지
+    않는다). 그런 경우 **배열 순서상 먼저 나오는 첫 규칙**이 이긴다 - 임의가
+    아니라 의도한 선택이다. SQL 쌍둥이 `qa_router_hit_rule` 도 같은 선택을
+    `order by ordinality limit 1` 로 표현한다. 여기서 고르는 방식을 바꾸면
+    그쪽도 같이 바꿔야 한다.
   */
-  const prodRule = rules.find(
-    (r) => r.enabled !== false && r.anchor === 'prod'
+  const prodRule = anchors.find(
+    (r) => r.enabled !== false && r.when.anchor === 'prod'
   );
   const cutoff = prod
     ? prodRule
-      ? ruleDay(prod, prodRule.offset, prodRule.shift)
+      ? ruleDay(prod, prodRule.when.offset, prodRule.when.shift)
       : prod
     : null;
 
-  for (const r of rules) {
+  for (const r of anchors) {
     if (r.enabled === false) continue;
-    const anchor = anchorOf(r.anchor);
-    const day = ruleDay(anchor, r.offset, r.shift);
+    const anchor = anchorOf(r.when.anchor);
+    const day = ruleDay(anchor, r.when.offset, r.when.shift);
     if (day !== todayYmd) continue;
     /*
       당일은 막지 않는다 - `오늘 운영 배포` 가 그날 울려야 한다.
@@ -1032,7 +1044,12 @@ export function readCyclePageTitle(
   */
   const fromVersion = resolved
     ? DEPLOY_KINDS.find((k) => {
-        const p = buildFixVersion(opts.rule ?? null, k, deployYmd, DEPLOY_KINDS);
+        const p = buildFixVersion(
+          opts.rule ?? null,
+          k,
+          deployYmd,
+          DEPLOY_KINDS
+        );
         return p !== null && p === resolved;
       })
     : undefined;

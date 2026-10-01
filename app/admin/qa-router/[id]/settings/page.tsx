@@ -32,19 +32,20 @@ import {
 } from '@/lib/services/qa-router/status';
 import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import {
-  ALERT_DESC,
-  ALERT_KINDS,
-  ALERT_LABEL,
+  checkAlertRules,
   DEFAULT_TEMPLATE,
   DEPLOY_KINDS,
+  HM_RE,
   JUDGE_TIERS,
-  TEMPLATE_VARS,
-  unknownVars,
+  requiredVars,
+  ruleProblem,
+  usedVars,
+  varPaletteFor,
+  varsFor,
   type AlertAnchor,
-  type AlertKind,
   type AlertRule,
   type AlertShift,
-  type AlertSwitches,
+  type AlertWhen,
   type DeployCycle,
   type DeployKind,
   type FilterGap,
@@ -55,14 +56,15 @@ import {
 } from '@/lib/services/qa-router/types';
 
 import {
-  ALERT_AT,
-  ALERT_SHORT,
   alertRuleRows,
+  anchorWhen,
   HoursEditor,
   Live,
   groupAlertRows,
   Pill,
   RuleList,
+  ruleName,
+  whenText,
   ymdDow,
   ANCHOR_OPTIONS,
   DayStepper,
@@ -878,7 +880,7 @@ export default function QaRouterSettingsPage() {
         <Stage
           n={5}
           title="언제 요약을 보내나"
-          subtitle="날짜 알림 · 정기 보고"
+          subtitle="알림 규칙 한 목록"
           editing={editing === 'what'}
           onEdit={() => requestEditSwitch('what')}
         >
@@ -886,7 +888,6 @@ export default function QaRouterSettingsPage() {
             <WhatEditor
               id={id}
               rules={config.alertRules}
-              alerts={config.alerts}
               channelName={names[config.slackChannelId] ?? null}
               /*
                 읽기 화면(RuleList)에만 넘기고 있었다. 그래서 고치는 동안에는
@@ -900,19 +901,15 @@ export default function QaRouterSettingsPage() {
             />
           ) : (
             <>
-              <RuleList
-                rules={config.alertRules}
-                schedule={schedule}
-                alerts={config.alerts}
-              />
+              <RuleList rules={config.alertRules} schedule={schedule} />
               {/*
                 `지금` 배지를 떼었다. 그 배지는 "이 설정이 지금 만들어 내는
                 것" 을 뜻하는데, 이 문장은 상태가 아니라 설명이다 —
                 배지를 달면 배지가 거짓말을 한다.
               */}
               <p className="mt-1.5 text-[11px] text-muted-foreground">
-                판정 알림(티켓이 생길 때마다)은 여기 없습니다. 위는 날짜에
-                맞춰 나가는 것입니다
+                판정 알림(티켓이 생길 때마다)은 여기 없습니다. 위는 정해진
+                시각에 나가는 것입니다
                 {schedule?.prodYmd && ' · 날짜는 이번 차수 기준입니다'}
               </p>
             </>
@@ -3012,8 +3009,15 @@ function WhereEditor({
  * 또 쓰면 두 벌이 조용히 어긋난다 — 화면에서는 멀쩡한데 실제로 나간 건
  * 다른 상황이 가장 나쁘다.
  */
-function useMessagePreview(id: string, template: string, milestone: string) {
-  const key = `${template}|${milestone}`;
+function useMessagePreview(
+  id: string,
+  template: string,
+  milestone: string,
+  /** 고치는 중인 규칙의 조건. 종류마다 채워지는 변수가 다르다. */
+  when: AlertWhen
+) {
+  const whenJson = JSON.stringify(when);
+  const key = `${template}|${milestone}|${whenJson}`;
   const [res, setRes] = useState<{
     key: string;
     text: string | null;
@@ -3027,7 +3031,7 @@ function useMessagePreview(id: string, template: string, milestone: string) {
       fetch(`/api/qa-router/${id}/message-preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ template, milestone }),
+        body: JSON.stringify({ template, milestone, when: JSON.parse(whenJson) }),
       })
         .then(async (r) => {
           const b = await r.json();
@@ -3046,7 +3050,7 @@ function useMessagePreview(id: string, template: string, milestone: string) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [id, key, template, milestone]);
+  }, [id, key, template, milestone, whenJson]);
 
   /*
     **이전 결과를 지우지 않는다.** 타이핑할 때마다 미리보기가 비면 화면이
@@ -3067,41 +3071,35 @@ function useMessagePreview(id: string, template: string, milestone: string) {
  * 할 이유가 없다. 본문은 알림마다 갖는다.
  */
 /**
- * 목록에 적을 이름. `{days}` 를 실제 숫자로 바꾼다.
- *
- * 다른 줄은 `오늘 운영 배포` 처럼 완성된 문장인데 이 줄만 `{days}일 뒤
- * 운영 배포` 로 떠 있었다. 변수가 화면까지 새어 나온 것이고, 그 값은
- * 바로 옆 `offset` 에 이미 있다. 좁은 칸에서 `{days}` 여섯 글자는
- * 정작 읽어야 할 뒷말을 밀어내 `{days}일 뒤 …` 로 잘리게 만들었다.
- *
- * 읽기 화면(`RuleList`)이 이미 같은 일을 한다. 저장되는 라벨은 그대로
- * 둔다 — 날짜가 바뀌면 문구도 따라가야 하므로 템플릿인 게 맞다.
- */
-function ruleName(r: AlertRule): string {
-  return r.label.replace('{days}', String(Math.abs(r.offset)));
-}
-
-/**
  * 왼쪽 목록의 한 줄.
  *
- * 시각 칸을 고정폭으로 둔다. 세로로 서면 날짜가 한 열이 되어 목록이
- * 규칙 모음이 아니라 **일정표로** 읽힌다 — 이 화면에 오는 가장 큰
+ * 시각 칸을 고정폭으로 둔다. 세로로 서면 시각이 한 열이 되어 목록이
+ * 규칙 모음이 아니라 **시간표로** 읽힌다 — 이 화면에 오는 가장 큰
  * 이유("언제 뭐가 나가나")에 목록 모양 자체가 답하게 하려는 것이다.
+ *
+ * 걸리는 날은 오른쪽 끝에 작게 둔다. 앵커 규칙에만 있는 값이라 왼쪽
+ * 고정 칸에 넣으면 조건형 줄에서 그 칸이 빈다.
  */
 function NavRow({
   when,
   name,
+  day,
   on,
   picked,
   clash,
+  bad,
   onPick,
 }: {
   when: string;
   name: string;
+  /** 이번 차수에 걸리는 날. 조건형은 없다. */
+  day?: string | null;
   on: boolean;
   picked: boolean;
-  /** 같은 날 다른 알림에 밀려 안 나간다. 표식만 남기고 이유는 오른쪽이 말한다. */
+  /** 같은 시각 다른 알림에 밀려 안 나간다. 표식만 남기고 이유는 오른쪽이 말한다. */
   clash?: boolean;
+  /** 저장을 막는 문제가 있다. 어느 줄인지 목록에서 찾을 수 있어야 한다. */
+  bad?: boolean;
   onPick: () => void;
 }) {
   return (
@@ -3120,7 +3118,7 @@ function NavRow({
     >
       <span
         className={cn(
-          'w-[38px] shrink-0 text-[11.5px] font-semibold tabular-nums',
+          'w-[34px] shrink-0 text-[11.5px] font-semibold tabular-nums',
           !on && 'text-muted-foreground'
         )}
       >
@@ -3134,10 +3132,15 @@ function NavRow({
       >
         {name}
       </span>
+      {day && (
+        <span className="shrink-0 text-[10.5px] tabular-nums text-muted-foreground">
+          {day.slice(5)}
+        </span>
+      )}
       {clash && (
         <span
           aria-hidden
-          title="같은 날 다른 알림에 밀려 안 나갑니다"
+          title="같은 시각 다른 알림에 밀려 안 나갑니다"
           className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400"
         >
           ⚠
@@ -3145,9 +3148,14 @@ function NavRow({
       )}
       <span
         aria-hidden
+        title={bad ? '저장을 막는 문제가 있습니다' : undefined}
         className={cn(
           'size-1.5 shrink-0 rounded-full',
-          on ? 'bg-emerald-500' : 'bg-muted-foreground/40'
+          bad
+            ? 'bg-red-500'
+            : on
+              ? 'bg-emerald-500'
+              : 'bg-muted-foreground/40'
         )}
       />
     </button>
@@ -3162,11 +3170,44 @@ function NavGroup({ label }: { label: string }) {
 }
 
 /**
- * 날짜 알림 하나를 고친다.
+ * 미리보기가 **예시**로 채우는 변수. 보내는 순간에만 정해지는 값들이다.
  *
- * 규칙(언제·며칠·주말) 바로 아래에 **그 규칙이 이번 차수에 만들어 내는
- * 날짜**를 둔다. 위를 바꾸면 아래가 즉시 따라 움직이므로, 고르는 행동과
- * 그 결과가 한 눈에 이어진다.
+ * `20261001_qa_router_preview_kinds.sql` 이 실제로 넣는 목록과 같아야 한다.
+ * SQL 에서 빠지면 그 줄이 미리보기에서 사라지고, 여기서 빠지면 화면이
+ * 예시를 진짜 값이라고 말한다.
+ *
+ * 나머지는 실제 값에서 온다 — `{일정경고이유}` 는 사다리를 실제로 불러
+ * 받는다. 그 변수가 비면 줄이 통째로 사라지는데, 그 사라짐이 바로 이
+ * 미리보기가 고치려는 증상이라 예시로 둘 수 없었다.
+ *
+ * "실제 값" 이 아니라 "실제 값에서 온다" 인 이유: 미리보기는 사다리가 정한
+ * 날짜를 `qa_router_vars` 에 **일부러 안 넘긴다**(앵커 미리보기의 답을 안
+ * 바꾸려고). 그래서 수동 QA 일정이 걸린 차수에서는 `{QA종료일}` 이 실제
+ * 발송과 다를 수 있고, `{상세링크}` 도 앵커 쪽 문구를 쓴다. 둘 다 줄을
+ * 지우지는 않는다.
+ */
+const SAMPLE_VARS: Record<AlertWhen['kind'], readonly string[]> = {
+  anchor: [],
+  activeCycle: ['기호', '상태문구', '알림건수', '재배정건수', '마지막확인'],
+  scheduleUnusable: [],
+};
+
+/**
+ * 알림 하나를 고친다. **세 종류가 같은 부품을 쓴다.**
+ *
+ * ── 여기 있던 문장을 지웠다 ──
+ *
+ * 정기 보고 둘(18:00 마감 요약 · 09:10 경고)에는 스위치 하나와 이런
+ * 문장만 있었다.
+ *
+ *     문구가 코드에 박혀 있어 본문을 고칠 수 없습니다.
+ *
+ * 참인 문장이었다 — 그 둘의 본문은 SQL 함수 안에 있었다. 앞 단계들이 그
+ * 사실을 없앴다. 지금은 어떤 알림이든 `at`(몇 시)·`when`(무슨 조건)·
+ * `template`(무슨 글자) 세 칸이고, 종류마다 다른 것은 조건 칸뿐이다.
+ *
+ * 규칙 바로 아래에 **이번 차수에 만들어 내는 날짜**를 둔다. 위를 바꾸면
+ * 아래가 즉시 따라 움직이므로, 고르는 행동과 그 결과가 한 눈에 이어진다.
  */
 function RuleDetail({
   id,
@@ -3182,10 +3223,29 @@ function RuleDetail({
   onRemove: () => void;
 }) {
   const r = row.rule;
-  const tpl = r.template ?? DEFAULT_TEMPLATE;
-  const bad = unknownVars(tpl);
+  /** 앵커 조건이면 그 조건. 아니면 날짜 칸이 아예 없다. */
+  const w = anchorWhen(r);
+  /*
+    본문이 없을 때의 기본값은 종류마다 다르다. 날짜 알림은 TS 의
+    `DEFAULT_TEMPLATE` 이지만 정기 보고 둘의 기본 본문은 SQL 에만 있다
+    (`qa_router_daily_summary_template`·`qa_router_schedule_warning_template`).
+    여기서 `DEFAULT_TEMPLATE` 을 보여주면 **그 종류가 쓸 수 없는 변수**가
+    박힌 본문을 권하게 된다. 마이그레이션이 둘 다 template 을 채워 넣으므로
+    실제로 빈 경우는 손으로 넣은 행뿐이다.
+  */
+  const tpl = r.template ?? (w ? DEFAULT_TEMPLATE : '');
+  const allowed = varsFor(r.when);
+  const used = usedVars(tpl);
+  const bad = used.filter((k) => !allowed.includes(k));
+  const missing = requiredVars(r.when).filter((k) => !used.includes(k));
+  const atBad = !HM_RE.test(r.at);
   // `{days}` 는 그날 정해진다. 미리보기에서는 3 으로 보여준다.
-  const preview = useMessagePreview(id, tpl, r.label.replace('{days}', '3'));
+  const preview = useMessagePreview(
+    id,
+    tpl,
+    r.label.replace('{days}', '3'),
+    r.when
+  );
   /*
     한 번에 하나만 보이므로 펼쳐 둬도 화면이 길어지지 않는다. 카드가 넷
     쌓이던 때와 다른 점이다. 그래도 접는 길은 남긴다 — 규칙만 고치러 온
@@ -3207,69 +3267,122 @@ function RuleDetail({
           onCheckedChange={(v) => onChange({ ...r, enabled: v })}
           aria-label={`${r.label} 사용`}
         />
+        {/*
+          ── 조건형은 지울 수 없다 ──
+
+          `addRule` 은 날짜 알림만 만든다 (거기 주석 참고). 그래서 18:00
+          마감 요약이나 09:10 경고를 한 번 지우면 **화면에서 되돌릴 길이
+          없다** — DB 를 손으로 고쳐야 한다.
+
+          옛 모델에서 이 둘은 `alerts` 컬럼의 on/off 스위치였고 끄는 것은
+          늘 되돌릴 수 있었다. 모델을 합치면서 "끔" 이 "없앰" 이 되면 안
+          된다. 멈추는 길은 옆 스위치로 남기고 지우기만 막는다.
+        */}
         <Button
           variant="ghost"
           size="icon"
           className="size-7 shrink-0 text-muted-foreground"
           onClick={onRemove}
+          disabled={!w}
+          title={w ? undefined : '이 알림은 지울 수 없습니다'}
           aria-label={`${r.label} 삭제`}
         >
           <Trash2 />
         </Button>
       </div>
 
+      {!w && (
+        /*
+          왜 꺼져 있는지 글자로 말한다. 흐린 버튼만 두면 "왜 안 눌리지" 가
+          남고, 그 답은 코드에만 있다.
+        */
+        <p className="mt-1 px-1.5 text-[10.5px] text-muted-foreground">
+          지울 수 없는 알림입니다 · 대상마다 하나뿐이라 다시 만들 길이 없습니다
+          · 멈추려면 위 스위치를 끕니다
+        </p>
+      )}
+
       <div className="my-3 border-t" />
 
       {/*
-        셋을 한 줄에 세운다. 마스터-디테일로 오면서 이 패널이 전체 폭을
-        쓰게 됐으니 세로로 쌓을 이유가 없어졌다 — 셋은 "언제 울릴지" 라는
-        한 가지를 정하는 값이라 흩어 놓으면 오히려 따로 읽힌다.
+        한 줄에 세운다. 넷은 "언제 울릴지" 라는 한 가지를 정하는 값이라
+        흩어 놓으면 오히려 따로 읽힌다.
 
-        라벨은 남긴다. 값만 늘어놓으면(`[운영 배포일][− 당일 +][그날
+        라벨은 남긴다. 값만 늘어놓으면(`[09:10][운영 배포일][− 당일 +][그날
         그대로]`) 두 번째 것이 무엇을 세는 숫자인지 매번 되짚어야 한다.
       */}
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2 text-[11.5px]">
-        <label className="text-muted-foreground">언제</label>
-        <NativeSelect
-          value={r.anchor}
-          onChange={(v) => onChange({ ...r, anchor: v as AlertAnchor })}
-          options={ANCHOR_OPTIONS}
-          label="기준일"
-        />
-        <label className="text-muted-foreground">며칠</label>
-        <DayStepper
-          value={r.offset}
-          onChange={(offset) => onChange({ ...r, offset })}
-          label="날짜 차이"
-        />
-        <label className="text-muted-foreground">주말</label>
-        <NativeSelect
-          value={r.shift}
-          onChange={(v) => onChange({ ...r, shift: v as AlertShift })}
-          options={SHIFT_OPTIONS}
-          label="주말 처리"
-        />
+        <label className="text-muted-foreground" htmlFor={`at-${r.id}`}>
+          몇 시
+        </label>
         {/*
-          전에는 여기서 `운영 배포일 이후라 울리지 않습니다` 라고 했다.
-          Task 3 이후로 **틀린 말**이다 — 마감선은 대장의 운영 배포일이
-          아니라 **켜져 있는 첫 `prod` 앵커 규칙이 울리는 날**이다. 양수
-          오프셋을 넣은 prod 규칙은 막히는 쪽이 아니라 **선을 정하는 쪽**이고,
-          "기록된 날짜보다 N일 늦게 실제로 나갔다" 를 적는 데 쓰라고 만든
-          패턴이다(`milestoneFrom` 주석과 마감선 테스트가 고정한다). 낡은
-          안내를 그대로 두면 사람이 제 일을 하고 있는 규칙을 지운다.
-
-          그래서 경고가 아니라 설명이고, 색도 경고색을 쓰지 않는다. 선을
-          정하지 못한 채 선 뒤로 밀린 규칙(먼저 나온 prod 규칙이 따로 있는
-          경우)은 바로 아래 상세 칸이 `pastCutoff` 로 정확히 말하므로,
-          여기서는 그 경우를 비워 두 문장이 서로 반대로 말하지 않게 한다.
+          `type="time"` 이 모양을 지킨다. 저장값은 `HH:MM` 문자열이고,
+          브라우저가 못 읽는 값을 넣으면 빈 문자열이 되어 아래 빨간 줄과
+          `checkAlertRules` 가 같이 막는다 — 틀린 시각이 조용히 저장되는
+          길은 없다.
         */}
-        {r.anchor === 'prod' && r.offset > 0 && !row.pastCutoff && (
+        <input
+          id={`at-${r.id}`}
+          type="time"
+          value={r.at}
+          onChange={(e) => onChange({ ...r, at: e.target.value })}
+          aria-label="보내는 시각"
+          className={cn(
+            'h-7 rounded-md border bg-background px-2 text-[11.5px] tabular-nums',
+            atBad && 'border-red-500 text-red-700 dark:text-red-300'
+          )}
+        />
+        <label className="text-muted-foreground">언제</label>
+        {w ? (
+          <>
+            <NativeSelect
+              value={w.anchor}
+              onChange={(v) =>
+                onChange({ ...r, when: { ...w, anchor: v as AlertAnchor } })
+              }
+              options={ANCHOR_OPTIONS}
+              label="기준일"
+            />
+            <label className="text-muted-foreground">며칠</label>
+            <DayStepper
+              value={w.offset}
+              onChange={(offset) => onChange({ ...r, when: { ...w, offset } })}
+              label="날짜 차이"
+            />
+            <label className="text-muted-foreground">주말</label>
+            <NativeSelect
+              value={w.shift}
+              onChange={(v) =>
+                onChange({ ...r, when: { ...w, shift: v as AlertShift } })
+              }
+              options={SHIFT_OPTIONS}
+              label="주말 처리"
+            />
+          </>
+        ) : (
+          /*
+            조건형은 조건을 못 바꾼다. 바꿀 수 있게 하면 "마감 요약" 을
+            날짜 알림으로 만드는 길이 생기는데, 그건 이 알림을 고치는 게
+            아니라 다른 알림으로 바꾸는 일이다 (쓸 수 있는 변수도 함께
+            바뀐다). 지우고 새로 만드는 쪽이 무슨 일이 일어나는지 분명하다.
+          */
+          <span className="rounded border bg-muted/40 px-1.5 py-0.5">
+            {whenText(r.when)}
+          </span>
+        )}
+        {w && w.anchor === 'prod' && w.offset > 0 && !row.pastCutoff && (
           <span className="text-muted-foreground">
             차수 마감선이 이 날로 옮겨집니다 — 이 규칙도, 그때까지의 QA 알림도
             울립니다
           </span>
         )}
       </div>
+
+      {atBad && (
+        <p className="mt-1.5 text-[11px] text-red-700 dark:text-red-300">
+          시각은 09:10 처럼 두 자리씩 적어 주세요 · 지금은 저장되지 않습니다
+        </p>
+      )}
 
       <div
         className={cn(
@@ -3281,6 +3394,19 @@ function RuleDetail({
       >
         {!r.enabled ? (
           '꺼져 있어 안 울립니다'
+        ) : !w ? (
+          /*
+            조건형은 차수 날짜가 아니라 그날의 상태를 보고 나간다. 며칠에
+            걸리는지 미리 적을 수 없고, 적으면 거짓말이 된다.
+
+            조건형끼리 같은 시각에 서면 앞엣것만 나간다 — 날짜가 없으니
+            어느 날이든 그렇다. 그 경우까지 `나갑니다` 로 적지 않는다.
+          */
+          row.shadowed
+            ? `${whenText(r.when)}마다 ${r.at} 이지만, 같은 시각에 ${
+                row.shadowedBy ? ruleName(row.shadowedBy) : '다른 알림'
+              } 이 먼저 잡혀 이건 안 나갑니다`
+            : `${whenText(r.when)}마다 ${r.at} 에 나갑니다`
         ) : !row.day ? (
           '이번 차수 날짜를 아직 못 읽어 언제 울릴지 계산할 수 없습니다'
         ) : row.pastCutoff ? (
@@ -3292,21 +3418,25 @@ function RuleDetail({
         ) : row.shadowed ? (
           /*
             겹침은 고쳐야 할 문제다. 무엇과 겹쳤는지 이름을 대고, 푸는
-            길을 같이 준다 — 날짜는 바로 위 칸에서 바꾸면 되므로 문장으로
-            가리키고, 끄기·지우기만 버튼으로 둔다.
+            길을 같이 준다.
+
+            기준이 **날에서 날+시각으로** 바뀌었다. 크론이 하나가 되면서
+            `dueRules` 가 같은 시각끼리만 하나를 고르기 때문이다 — 같은
+            날이라도 시각이 다르면 둘 다 나간다. 그래서 시각을 옮기는 길도
+            문장에 넣는다.
           */
           <div className="flex flex-col gap-2">
             <p>
-              <b className="font-semibold">{ymdDow(row.day)}</b> 에 걸리는데,
-              같은 날{' '}
+              <b className="font-semibold">{ymdDow(row.day)}</b>{' '}
+              <b className="font-semibold">{r.at}</b> 에 걸리는데, 같은 시각에{' '}
               <b className="font-semibold">
                 {row.shadowedBy ? ruleName(row.shadowedBy) : '다른 알림'}
               </b>{' '}
               이 먼저 잡혀 <b className="font-semibold">이건 안 나갑니다</b>. 한
-              날에 하나만 보냅니다.
+              시각에 하나만 보냅니다.
             </p>
             <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px]">
-              <span>위에서 날짜를 옮기거나,</span>
+              <span>위에서 날짜나 시각을 옮기거나,</span>
               <button
                 type="button"
                 onClick={() => onChange({ ...r, enabled: false })}
@@ -3325,8 +3455,8 @@ function RuleDetail({
           </div>
         ) : (
           <>
-            이번 차수 <b className="font-semibold">{ymdDow(row.day)}</b> 에
-            울립니다
+            이번 차수 <b className="font-semibold">{ymdDow(row.day)}</b>{' '}
+            <b className="font-semibold">{r.at}</b> 에 울립니다
           </>
         )}
       </div>
@@ -3356,6 +3486,11 @@ function RuleDetail({
             모르는 변수 {bad.length}개
           </span>
         )}
+        {missing.length > 0 && (
+          <span className="text-red-700 dark:text-red-300">
+            빠진 변수 {missing.length}개
+          </span>
+        )}
       </button>
 
       {bodyOpen && (
@@ -3363,15 +3498,40 @@ function RuleDetail({
           <TemplateEditor
             value={tpl}
             onChange={(template) => onChange({ ...r, template })}
-            vars={TEMPLATE_VARS}
+            /*
+              변수 메뉴는 `varsFor(when)` 에서 온다. 한 목록을 박아 두면
+              `{알림건수}` 를 날짜 알림에 권하게 되는데, 그 변수는 거기서
+              값이 비어 **그 줄이 통째로 사라진다** — 저장은 되고 알림에서만
+              한 줄이 없어진다.
+            */
+            vars={varPaletteFor(r.when)}
             preview={preview.text}
             stale={preview.stale}
             channel={channelName}
           />
           {bad.length > 0 && (
             <p className="mt-1.5 text-[11px] text-red-700 dark:text-red-300">
-              모르는 변수라 저장되지 않습니다 ·{' '}
+              이 종류가 쓸 수 없는 변수라 저장되지 않습니다 ·{' '}
               {bad.map((x) => `{${x}}`).join(', ')}
+            </p>
+          )}
+          {missing.length > 0 && (
+            <p className="mt-1.5 text-[11px] text-red-700 dark:text-red-300">
+              {missing.map((x) => `{${x}}`).join(', ')} 가 없으면 무엇이
+              문제인지 사라집니다. 저장되지 않습니다
+            </p>
+          )}
+          {SAMPLE_VARS[r.when.kind].length > 0 && (
+            /*
+              예시임을 밝힌다. 안 밝히면 "오늘 3건이 나갔다" 로 읽힌다 —
+              미리보기가 답하는 질문은 건수가 아니라 **이 본문이 무슨
+              모양으로 나가나** 다.
+            */
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
+              미리보기에서{' '}
+              {SAMPLE_VARS[r.when.kind].map((v) => `{${v}}`).join(' ')} 는
+              예시값입니다 — 보내는 순간에 정해집니다. 나머지는 실제 값에서
+              옵니다
             </p>
           )}
         </div>
@@ -3380,68 +3540,9 @@ function RuleDetail({
   );
 }
 
-/**
- * 정기 보고 하나.
- *
- * 켜고 끄는 것 말고는 손댈 게 없다. 그 사실을 빈 화면으로 두지 않고
- * **왜 없는지** 로 채운다 — 날짜 알림에는 있는 본문이 여기만 없으면
- * "빠뜨린 것" 으로 읽힌다.
- */
-function DailyDetail({
-  kind,
-  on,
-  onToggle,
-}: {
-  kind: AlertKind;
-  on: boolean;
-  onToggle: (v: boolean) => void;
-}) {
-  return (
-    <div>
-      <div className="flex items-center gap-2">
-        <span className="flex-1 px-1.5 text-[14px] font-semibold">
-          {ALERT_AT[kind]} {ALERT_SHORT[kind]}
-        </span>
-        <Switch
-          checked={on}
-          onCheckedChange={onToggle}
-          aria-label={`${ALERT_LABEL[kind]} 사용`}
-        />
-      </div>
-
-      <div className="my-3 border-t" />
-
-      <p className="text-[12.5px] leading-relaxed text-muted-foreground">
-        {ALERT_DESC[kind]}
-      </p>
-
-      <div className="mt-3 rounded-md border bg-muted/20 px-3 py-2.5 text-[12px] leading-relaxed">
-        {kind === 'morningBrief' ? (
-          <>
-            <b className="font-medium text-foreground">
-              날짜 알림이 걸린 날 아침에
-            </b>
-            , 그 알림의 본문을 그대로 보냅니다. 그래서 여기엔 따로 고칠 본문이
-            없습니다 — 위 날짜 알림의 본문을 고치면 이쪽도 같이 바뀝니다.
-          </>
-        ) : (
-          <>
-            <b className="font-medium text-foreground">
-              문구가 코드에 박혀 있어
-            </b>{' '}
-            본문을 고칠 수 없습니다. 날짜 알림과 달리 차수가 아니라 그날 봇이
-            한 일을 세는 보고라, 지금은 형태가 고정입니다.
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function WhatEditor({
   id,
   rules,
-  alerts,
   channelName,
   schedule,
   saving,
@@ -3450,17 +3551,13 @@ function WhatEditor({
 }: EditorBase & {
   id: string;
   rules: AlertRule[];
-  alerts: AlertSwitches;
   channelName?: string | null;
   /** 이번 차수 날짜. 규칙이 며칠에 울리는지 계산하는 데 쓴다. */
   schedule: AlertSchedule | null;
 }) {
   const [draftRules, setDraftRules] = useState<AlertRule[]>(rules);
-  const [draft, setDraft] = useState<AlertSwitches>(alerts);
-  /** 지금 고른 것. 규칙 id 이거나 정기 보고 종류다. */
-  const [picked, setPicked] = useState<string>(
-    rules[0]?.id ?? ALERT_KINDS[0]
-  );
+  /** 지금 고른 알림의 id. */
+  const [picked, setPicked] = useState<string>(rules[0]?.id ?? '');
 
   /*
     고치는 중인 값으로 계산한다. 저장된 값이 아니라 `draftRules` 를 넘기므로
@@ -3476,16 +3573,16 @@ function WhatEditor({
     const rest = draftRules.filter((r) => r.id !== ruleId);
     setDraftRules(rest);
     // 지운 것을 계속 고르고 있을 수는 없다. 남은 첫 줄로 옮긴다.
-    if (picked === ruleId) setPicked(rest[0]?.id ?? ALERT_KINDS[0]);
+    if (picked === ruleId) setPicked(rest[0]?.id ?? '');
   };
 
   /*
     순서를 바꾸는 길은 두지 않는다.
 
     배열 순서가 곧 우선순위지만, 겹쳤을 때 답은 "순서를 바꾼다" 가 아니라
-    "겹치지 않게 고친다"(날짜를 옮기거나·끄거나·지운다)다. 겹침은 설계가
-    아니라 사고이기 때문이다. 순서 조작을 열어 두면 사고를 그대로 둔 채
-    운영하는 길이 생긴다.
+    "겹치지 않게 고친다"(시각이나 날짜를 옮기거나·끄거나·지운다)다. 겹침은
+    설계가 아니라 사고이기 때문이다. 순서 조작을 열어 두면 사고를 그대로
+    둔 채 운영하는 길이 생긴다.
   */
 
   const addRule = () => {
@@ -3497,13 +3594,23 @@ function WhatEditor({
       ...draftRules,
       {
         id: newId,
-        anchor: 'prod',
         /*
-          기본 날짜는 기존 넷과 안 겹치는 자리로 고른다. 만들자마자
-          "가려져서 안 울립니다" 가 뜨면 무엇을 잘못했는지 오해한다.
+          새 알림은 날짜 알림으로 만든다. 조건형 둘(차수가 열려 있는 날 ·
+          QA 기간을 못 읽은 날)은 대상마다 하나면 족한 보고라, 하나 더
+          만드는 것이 뜻을 갖지 않는다. 기본 시각도 날짜 알림이 늘 나가던
+          09:10 이다.
         */
-        offset: -3,
-        shift: 'prev_workday',
+        at: '09:10',
+        when: {
+          kind: 'anchor',
+          anchor: 'prod',
+          /*
+            기본 날짜는 기존 것들과 안 겹치는 자리로 고른다. 만들자마자
+            "가려져서 안 울립니다" 가 뜨면 무엇을 잘못했는지 오해한다.
+          */
+          offset: -3,
+          shift: 'prev_workday',
+        },
         label: '새 알림',
         enabled: true,
         template: DEFAULT_TEMPLATE,
@@ -3512,17 +3619,15 @@ function WhatEditor({
     setPicked(newId);
   };
 
-  const noneOn =
-    draftRules.filter((r) => r.enabled).length === 0 &&
-    ALERT_KINDS.every((k) => draft[k] === false);
-  const anyBad = draftRules.some(
-    (r) => unknownVars(r.template ?? DEFAULT_TEMPLATE).length > 0
-  );
+  const noneOn = draftRules.filter((r) => r.enabled).length === 0;
+  /*
+    저장 차단은 **서버가 쓰는 함수 그대로** 판단한다. 화면이 제 기준을
+    따로 만들면 화면은 통과시키는데 서버가 거절하는 짝이 생긴다.
+    어느 줄이 문제인지는 왼쪽 목록의 빨간 점과 오른쪽 빨간 줄이 말한다.
+  */
+  const blocked = checkAlertRules(draftRules);
 
   const pickedRow = rows.find((x) => x.rule.id === picked);
-  const pickedKind = (ALERT_KINDS as readonly string[]).includes(picked)
-    ? (picked as AlertKind)
-    : null;
 
   return (
     <div>
@@ -3538,33 +3643,40 @@ function WhatEditor({
         <div className="lg:border-r lg:pr-3">
           <FieldLabel>보내는 것</FieldLabel>
 
-          <NavGroup label="날짜에 맞춰" />
-          {groups.dated.map((row) => (
+          {/*
+            ── 묶음 머리말을 뗐다 ──
+
+            `날짜에 맞춰` 와 `매일 같은 시각에` 로 갈려 있었다. 둘로 가른
+            근거는 "추가" 의 뜻이 다르다는 것이었는데, 그건 추가 버튼 하나의
+            사정이지 목록 전체를 가를 이유가 아니었다. 무엇보다 **두 묶음은
+            고치는 방법이 서로 달랐다** — 한쪽만 본문을 고칠 수 있었다.
+            지금은 같으므로 한 목록에 시각순으로 선다.
+          */}
+          {groups.live.map((row) => (
             <NavRow
               key={row.rule.id}
-              when={row.day!.slice(5)}
+              when={row.rule.at}
               name={ruleName(row.rule)}
+              day={row.day}
               on={row.rule.enabled}
               picked={picked === row.rule.id}
               clash={row.shadowed}
+              bad={ruleProblem(row.rule) !== null}
               onPick={() => setPicked(row.rule.id)}
             />
           ))}
-          {groups.dated.length === 0 && (
+          {groups.live.length === 0 && (
             <p className="px-2 py-1 text-[11px] text-muted-foreground">
-              날짜가 잡힌 알림이 없습니다
+              이번 차수에 나갈 알림이 없습니다
             </p>
           )}
 
           {/*
-            ── 추가 버튼은 목록 머리가 아니라 이 묶음 끝에 ──
+            ── 추가 버튼은 목록 끝에 ──
 
-            목록 머리에 두니 `+ 날짜 알림` 이라고 종류를 밝혀야 했다.
-            버튼이 두 묶음 위에 떠 있어서 무엇이 만들어지는지 자리로는
-            알 수 없었기 때문이다. 만들어지는 자리(`날짜에 맞춰` 끝)로
-            내리면 문맥이 종류를 말하므로 글자는 `알림 추가` 면 된다.
-            아래 `매일 같은 시각에` 는 만들 수 없는 묶음이라는 것도
-            버튼이 거기 없다는 사실로 드러난다.
+            만들어지는 것이 날짜 알림 하나뿐이라 자리로는 종류를 말할 수
+            없다. 글자로 밝힌다 — 묶음이 없어졌으니 문맥이 대신 말해 줄
+            것도 없다.
           */}
           <button
             type="button"
@@ -3572,32 +3684,22 @@ function WhatEditor({
             className="mt-1 flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-[11.5px] text-muted-foreground hover:bg-muted/60 hover:text-foreground"
           >
             <Plus className="size-3.5" />
-            알림 추가
+            날짜 알림 추가
           </button>
-
-          <NavGroup label="매일 같은 시각에" />
-          {ALERT_KINDS.map((k) => (
-            <NavRow
-              key={k}
-              when={ALERT_AT[k]}
-              name={ALERT_SHORT[k]}
-              on={draft[k] !== false}
-              picked={picked === k}
-              onPick={() => setPicked(k)}
-            />
-          ))}
 
           {groups.silent.length > 0 && (
             <>
               <NavGroup label="안 울림" />
-              {groups.silent.map((x) => (
+              {groups.silent.map((row) => (
                 <NavRow
-                  key={x.rule.id}
-                  when="—"
-                  name={ruleName(x.rule)}
+                  key={row.rule.id}
+                  when={row.rule.at}
+                  name={ruleName(row.rule)}
+                  day={row.day}
                   on={false}
-                  picked={picked === x.rule.id}
-                  onPick={() => setPicked(x.rule.id)}
+                  picked={picked === row.rule.id}
+                  bad={ruleProblem(row.rule) !== null}
+                  onPick={() => setPicked(row.rule.id)}
                 />
               ))}
             </>
@@ -3605,13 +3707,7 @@ function WhatEditor({
         </div>
 
         <div className="min-w-0">
-          {pickedKind ? (
-            <DailyDetail
-              kind={pickedKind}
-              on={draft[pickedKind] !== false}
-              onToggle={(v) => setDraft({ ...draft, [pickedKind]: v })}
-            />
-          ) : pickedRow ? (
+          {pickedRow ? (
             <RuleDetail
               id={id}
               row={pickedRow}
@@ -3628,22 +3724,19 @@ function WhatEditor({
       </div>
 
       <Hint>
-        같은 날에 둘이 걸리면 위에 있는 것 하나만 나갑니다. 순서는 겹쳤을 때만
-        뜻이 있어서, 겹친 자리에서만 바꿀 수 있습니다.
+        같은 시각에 둘이 걸리면 위에 있는 것 하나만 나갑니다. 시각이 다르면
+        둘 다 나갑니다 — 순서는 겹쳤을 때만 뜻이 있어서, 겹친 자리에서만
+        바꿀 수 있습니다.
       </Hint>
 
       <StageActions
         saving={saving}
-        disabled={anyBad}
+        disabled={blocked !== null}
         note={
-          anyBad
-            ? '모르는 변수가 있는 본문이 있습니다'
-            : noneOn
-              ? '전부 끄면 아무 알림도 안 갑니다'
-              : undefined
+          blocked ?? (noneOn ? '전부 끄면 아무 알림도 안 갑니다' : undefined)
         }
         onCancel={onCancel}
-        onSave={() => void onSave({ alertRules: draftRules, alerts: draft })}
+        onSave={() => void onSave({ alertRules: draftRules })}
       />
     </div>
   );

@@ -645,8 +645,16 @@ export function demoState(activeFixVersion: string): QaRouterState {
     failAlertTs: null,
     // 데모는 늘 정상이다. 실패 화면은 실데이터에서만 본다.
     sideEffects: {},
+    /*
+      데모는 아무것도 안 보낸 상태다. 빈 객체가 그 뜻이다.
+
+      전에는 끝에서 `as QaRouterState` 로 단언해 이 칸이 빠져 있었다. 단언은
+      타입 검사를 건너뛰므로 칸이 늘어도 컴파일러가 아무 말을 안 한다 —
+      `demoConfig` 가 같은 이유로 `as` 를 뗐던 그 문제다.
+    */
+    alertSentOn: {},
     updatedAt: new Date().toISOString(),
-  } as QaRouterState;
+  };
 }
 
 /*
@@ -681,7 +689,6 @@ export function demoConfig(
     planCollectHours: [9, 17],
     deployKinds: ['regular'],
     judgeTiers: [...JUDGE_TIERS],
-    alerts: {},
     alertRules: [...DEFAULT_ALERT_RULES],
     quietHours: { startHour: 9, endHour: 18, skipWeekend: true },
     tickIntervalSeconds: 60,

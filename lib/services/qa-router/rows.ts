@@ -24,7 +24,7 @@ import type {
   DeployCycle,
   DerivedContext,
   AlertRule,
-  AlertSwitches,
+  LegacyAlertRule,
   DeployKind,
   JudgeTier,
   QaRouterConfig,
@@ -36,6 +36,7 @@ import type {
   SideEffectResult,
 } from './types';
 import { DEFAULT_ALERT_RULES, JUDGE_TIERS } from './types';
+import { toAlertRuleV2 } from './alert-rule';
 
 export type ConfigRow = {
   id: string;
@@ -59,8 +60,12 @@ export type ConfigRow = {
   plan_collect_hours: number[] | null;
   deploy_kinds?: DeployKind[] | null;
   judge_tiers: JudgeTier[] | null;
-  alerts: AlertSwitches | null;
-  alert_rules: AlertRule[] | null;
+  /**
+   * 새 모양(`AlertRule`)으로 저장된다. 그런데 **옛 모양이 섞여 올 수 있다** —
+   * 20260930 마이그레이션 이전 백업을 되돌렸거나 손으로 넣은 행이다.
+   * 그래서 읽을 때 한 번 더 가른다 (`toConfig`).
+   */
+  alert_rules: (AlertRule | LegacyAlertRule)[] | null;
   quiet_hours: QuietHours;
   tick_interval_seconds: number | null;
   reassign_mode: QaRouterConfig['reassignMode'];
@@ -83,6 +88,7 @@ export type StateRow = {
   stale_alerted_at: string | null;
   fail_alert_ts: string | null;
   side_effects: Record<string, SideEffectResult> | null;
+  alert_sent_on: Record<string, string> | null;
   updated_at: string;
 };
 
@@ -106,6 +112,30 @@ export type EventRow = {
   fix_version: string | null;
   created_at: string;
 };
+
+/**
+ * 규칙으로 읽을 수 있는 모양인가. 아니면 **버린다.**
+ *
+ * ── 왜 버리나 ──
+ *
+ * 전에는 "객체가 아니면 그대로 통과" 였다. `'anchor' in null` 이 던지는 것만
+ * 막고 값은 흘려보냈는데, **그러면 터지는 자리가 화면으로 옮겨갈 뿐이다.**
+ * 실측으로 확인했다 — `alert_rules` 에 `null`·문자열·숫자·`{}` 가 하나라도
+ * 섞이면 `milestoneFrom` 과 `ruleProblem` 이 둘 다 던진다.
+ *
+ *   null  → Cannot read properties of null (reading 'when')
+ *   {}    → Cannot read properties of undefined (reading 'kind')
+ *
+ * 그 둘은 알림 목록을 그리는 길목이라 화면이 통째로 하얘진다. 그러면 **그
+ * 행을 고치러 들어갈 화면 자체가 없어진다.** 한 줄이 조용히 빠지는 쪽과
+ * 화면이 안 열리는 쪽 중에 고칠 수 있는 길이 남는 쪽을 택한다.
+ *
+ * 버리는 것은 "둘 중 어느 모양도 아닌 것" 뿐이다. 옛 모양(`anchor`)도
+ * 새 모양(`when`)도 그대로 살아서 아래 map 으로 간다.
+ */
+function isAlertRuleShaped(x: unknown): x is object {
+  return !!x && typeof x === 'object' && ('anchor' in x || 'when' in x);
+}
 
 export function toConfig(r: ConfigRow): QaRouterConfig {
   return {
@@ -136,11 +166,21 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
     planCollectHours: r.plan_collect_hours ?? [9, 17],
     deployKinds: r.deploy_kinds?.length ? r.deploy_kinds : ['regular'],
     judgeTiers: r.judge_tiers ?? [...JUDGE_TIERS],
-    alerts: r.alerts ?? {},
-    // 빈 배열은 "알림을 다 껐다" 가 아니라 컬럼이 아직 없다는 뜻에 가깝다.
-    alertRules: r.alert_rules?.length
-      ? r.alert_rules
-      : [...DEFAULT_ALERT_RULES],
+    /*
+      빈 배열은 "알림을 다 껐다" 가 아니라 컬럼이 아직 없다는 뜻에 가깝다.
+
+      옛 모양(`anchor` 를 직접 들고 있는 행)은 여기서 새 모양으로 감싼다.
+      화면이 `at` 과 `when` 만 읽으므로, 안 감싸면 되돌린 백업 하나에
+      알림 목록이 통째로 빈칸이 된다.
+    */
+    alertRules: (r.alert_rules?.length
+      ? (r.alert_rules as unknown[])
+      : [...DEFAULT_ALERT_RULES]
+    )
+      .filter(isAlertRuleShaped)
+      .map((x) =>
+        'anchor' in x ? toAlertRuleV2(x as LegacyAlertRule) : (x as AlertRule)
+      ),
     quietHours: r.quiet_hours,
     tickIntervalSeconds: r.tick_interval_seconds ?? 60,
     reassignMode: r.reassign_mode,
@@ -167,6 +207,7 @@ export function toState(r: StateRow): QaRouterState {
     // 컬럼이 없던 시절에 쓰인 행도, 리허설이 만드는 빈 행도 null 이 답이다.
     failAlertTs: r.fail_alert_ts ?? null,
     sideEffects: r.side_effects ?? {},
+    alertSentOn: (r.alert_sent_on as Record<string, string> | null) ?? {},
     updatedAt: r.updated_at,
   };
 }

@@ -38,22 +38,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { ruleDay } from '@/lib/services/qa-router/status';
 import {
-  ALERT_DESC,
-  ALERT_KINDS,
-  ALERT_LABEL,
   ANCHOR_LABEL,
   SHIFT_LABEL,
   JUDGE_TIERS,
   JUDGE_STEP,
   type AlertAnchor,
-  type AlertKind,
   type AlertRule,
   type AlertShift,
-  type AlertSwitches,
+  type AlertWhen,
   type JudgeStep,
   type JudgeTier,
 } from '@/lib/services/qa-router/types';
@@ -895,7 +890,7 @@ export function HoursEditor({
 }
 
 // ─────────────────────────────────────────────────────────────
-// ⑤ 알림 — 날짜 규칙 + 정기 보고
+// ⑤ 알림 — 한 목록
 // ─────────────────────────────────────────────────────────────
 
 
@@ -1017,12 +1012,23 @@ export interface AlertSchedule {
 
 export interface AlertRuleRow {
   rule: AlertRule;
-  /** 이번 차수에 실제로 울리는 날. */
+  /**
+   * 이번 차수에 실제로 울리는 날.
+   *
+   * **조건형(`activeCycle`·`scheduleUnusable`)은 늘 null 이다.** 그것들은
+   * 차수의 날짜가 아니라 그날의 상태를 보고 나가므로 미리 날을 정할 수 없다.
+   * 안 울린다는 뜻이 아니다 — `groupAlertRows` 가 그 둘을 구분한다.
+   */
   day: string | null;
-  /** 위에 같은 날 규칙이 이미 있어서 이건 안 울린다. */
+  /**
+   * 같은 시각에 먼저 걸린 규칙이 있어서 이건 안 울린다.
+   *
+   * 앵커끼리는 **같은 날 같은 시각**일 때만 겹치고, 조건형이 앞에 있으면
+   * 날짜와 무관하게 그 시각 전체가 막힌다 (`alertRuleRows` 주석 참고).
+   */
   shadowed: boolean;
   /**
-   * 같은 날 먼저 걸려 이걸 막은 규칙. 가려졌을 때만 있다.
+   * 먼저 걸려 이걸 막은 규칙. 가려졌을 때만 있다.
    *
    * 누가 막았는지 같이 들고 다녀야 화면이 **이름을 댈 수 있다.**
    * `위 알림이 먼저 걸려` 라고만 하면 그 "위" 가 무엇인지 목록을 다시
@@ -1079,22 +1085,62 @@ export function alertRuleRows(
     그 규칙은 배포일을 보정하는 쪽이라 막히지 않는다. 고르는 방식을 바꾸면
     저 둘도 같이 바꿔야 한다.
   */
-  const prodRule = rules.find((r) => r.enabled && r.anchor === 'prod');
+  const prodRule = rules
+    .filter((r) => r.enabled)
+    .map(anchorWhen)
+    .find((w) => w?.anchor === 'prod');
   const cutoff = schedule?.prodYmd
     ? prodRule
       ? ruleDay(schedule.prodYmd, prodRule.offset, prodRule.shift)
       : schedule.prodYmd
     : null;
 
+  /*
+    ── 겹침의 기준이 **날에서 날+시각으로** 바뀌었다 ──
+
+    옛 크론은 09:10 하나였고, 그 안에서 "같은 날이면 위엣것 하나만" 이었다.
+    지금은 규칙마다 `at` 이 있고 `dueRules` 가 **같은 시각끼리만** 하나를
+    고른다(`alert-rule.ts`). 그래서 같은 날이라도 시각이 다르면 둘 다 나간다 —
+    화면도 같은 기준으로 세야 "안 나갑니다" 가 거짓말이 안 된다.
+
+    ── 조건형도 자리를 차지한다 (날짜가 아니라 **시각 전체**를) ──
+
+    한동안 조건형(`activeCycle`·`scheduleUnusable`)을 이 셈에서 아예
+    뺐었다. 그 둘이 그날 나갈지는 보내는 순간의 상태가 정하는 것이라
+    차수 날짜로는 못 세기 때문이다. 그런데 `qa_router_due_rules` 는
+    **종류를 안 가린다** — 같은 `at` 에서 목록 앞엣것 하나만 남긴다.
+    마이그레이션이 `scheduleWarning@09:10` 을 목록 끝에 붙이고 `날짜 알림
+    추가` 가 그 뒤에 또 09:10 을 붙이므로, 새로 만든 날짜 알림은 조건형
+    뒤에 서게 된다. 조건이 맞는 날엔 조건형이 09:10 을 가져가고 뒤엣것은
+    굶는데, 화면만 `이번 차수 MM-DD 09:10 에 울립니다` 라고 적고 있었다.
+
+    날짜를 모른다는 것은 "안 걸린다" 가 아니라 **"어느 날이든 걸릴 수
+    있다"** 이므로, 조건형은 `*@시각` 한 칸을 잡는다. 그 뒤의 같은 시각
+    규칙은 날짜가 무엇이든 가려진 것으로 센다 — 못 재는 쪽으로 틀리는
+    편이 "울립니다" 라고 단언하고 안 울리는 것보다 낫다.
+
+    반대 방향은 안 센다. 앵커는 하루만 그 시각을 쓰므로, 그것 때문에
+    조건형을 `안 나갑니다` 라고 적으면 나머지 모든 날에 대해 거짓말이 된다.
+  */
   const taken = new Map<string, AlertRule>();
   return rules.map((r) => {
-    const day = r.enabled
-      ? ruleDay(anchorOf(r.anchor), r.offset, r.shift)
-      : null;
+    const w = anchorWhen(r);
+    const day =
+      r.enabled && w ? ruleDay(anchorOf(w.anchor), w.offset, w.shift) : null;
     const pastCutoff = !!(day && cutoff && day > cutoff);
+    const slot = w
+      ? day
+        ? `${day}@${r.at}`
+        : null
+      : r.enabled
+        ? `*@${r.at}`
+        : null;
     // 안 나가는 줄은 다른 줄을 가리지도 않는다.
-    const blocker = day && !pastCutoff ? (taken.get(day) ?? null) : null;
-    if (day && !pastCutoff && !blocker) taken.set(day, r);
+    const blocker =
+      slot && !pastCutoff
+        ? (taken.get(slot) ?? taken.get(`*@${r.at}`) ?? null)
+        : null;
+    if (slot && !pastCutoff && !blocker) taken.set(slot, r);
     return {
       rule: r,
       day,
@@ -1105,32 +1151,51 @@ export function alertRuleRows(
   });
 }
 
-/*
-  정기 보고의 시각과 이름. `ALERT_LABEL` 은 `18시 마감 요약` 처럼 시각이
-  문장에 섞인 한 덩어리라, [시각][이름] 두 칸으로 세우려면 쪼갠 값이
-  따로 필요하다. 읽기 화면과 편집 화면이 같이 쓴다.
-*/
-export const ALERT_AT: Record<AlertKind, string> = {
-  dailySummary: '18:00',
-  morningBrief: '09:10',
-};
-export const ALERT_SHORT: Record<AlertKind, string> = {
-  dailySummary: '마감 요약',
-  morningBrief: '아침 브리핑',
-};
+/** 앵커 조건이면 그 조건, 아니면 null. 날짜 계산은 앵커에만 있다. */
+export function anchorWhen(
+  r: AlertRule
+): Extract<AlertWhen, { kind: 'anchor' }> | null {
+  return r.when.kind === 'anchor' ? r.when : null;
+}
 
-/** 규칙이 정한 날을 사람 말로. `운영 배포일 당일 · 주말이면 이전 근무일` */
-function ruleWhen(r: AlertRule): string {
+/**
+ * 조건을 사람 말로. `운영 배포일 당일 · 주말이면 이전 근무일`
+ *
+ * 세 종류를 한 함수가 말한다. 목록이 하나가 됐으니 설명도 한 자리에서
+ * 나와야 종류가 늘어도 어느 한 화면만 빈칸이 되는 일이 없다.
+ */
+export function whenText(w: AlertWhen): string {
+  if (w.kind === 'activeCycle') return '차수가 열려 있는 날';
+  if (w.kind === 'scheduleUnusable') return 'QA 기간을 못 읽은 날';
   const off =
-    r.offset === 0
+    w.offset === 0
       ? '당일'
-      : r.offset < 0
-        ? `${-r.offset}일 전`
-        : `${r.offset}일 후`;
+      : w.offset < 0
+        ? `${-w.offset}일 전`
+        : `${w.offset}일 후`;
   return (
-    `${ANCHOR_LABEL[r.anchor]} ${off}` +
-    (r.shift !== 'none' ? ` · ${SHIFT_LABEL[r.shift]}` : '')
+    `${ANCHOR_LABEL[w.anchor]} ${off}` +
+    (w.shift !== 'none' ? ` · ${SHIFT_LABEL[w.shift]}` : '')
   );
+}
+
+/**
+ * 목록에 적을 이름. `{days}` 를 실제 숫자로 바꾼다.
+ *
+ * 다른 줄은 `오늘 운영 배포` 처럼 완성된 문장인데 이 줄만 `{days}일 뒤
+ * 운영 배포` 로 떠 있었다. 변수가 화면까지 새어 나온 것이고, 그 값은
+ * `offset` 에 이미 있다. 저장되는 라벨은 그대로 둔다 — 날짜가 바뀌면
+ * 문구도 따라가야 하므로 템플릿인 게 맞다.
+ */
+export function ruleName(r: AlertRule): string {
+  const w = anchorWhen(r);
+  return w ? r.label.replace('{days}', String(Math.abs(w.offset))) : r.label;
+}
+
+/** 목록 한 줄에 붙일 설명. 앵커는 걸리는 날을 앞에 둔다. */
+function ruleDetail(row: AlertRuleRow): string {
+  const text = whenText(row.rule.when);
+  return row.day ? `${ymdDow(row.day)} · ${text}` : text;
 }
 
 /** 목록 한 줄. 읽기 화면은 고를 수 없으니 버튼이 아니라 그냥 줄이다. */
@@ -1170,7 +1235,7 @@ function ReadRow({
       )}
       {clash && (
         <span className="text-[10.5px] text-amber-700 dark:text-amber-400">
-          ⚠ 같은 날 겹쳐 안 나감
+          ⚠ 같은 시각 겹쳐 안 나감
         </span>
       )}
     </div>
@@ -1199,63 +1264,41 @@ function ReadGroup({ label }: { label: string }) {
 export function RuleList({
   rules,
   schedule,
-  alerts,
 }: {
   rules: AlertRule[];
   schedule: AlertSchedule | null;
-  /**
-   * 정기 보고. 편집 화면처럼 같은 목록에 이어 붙인다.
-   *
-   * 없을 수 있다 — 차수별 알림 재정의 화면은 **그 차수의 날짜 규칙만**
-   * 다루고 정기 보고는 대상 전체의 설정이라 거기 낄 자리가 없다.
-   */
-  alerts?: AlertSwitches;
 }) {
-  const groups = groupAlertRows(alertRuleRows(rules, schedule));
+  const rows = alertRuleRows(rules, schedule);
+  const groups = groupAlertRows(rows);
   const noneOn = rules.filter((r) => r.enabled).length === 0;
 
   return (
     <div className="flex flex-col">
-      <ReadGroup label="날짜에 맞춰" />
-      {groups.dated.map(({ rule, day, shadowed }) => (
+      {groups.live.map((row) => (
         <ReadRow
-          key={rule.id}
-          when={ymdDow(day!).slice(0, 5)}
-          name={rule.label.replace('{days}', String(Math.abs(rule.offset)))}
-          detail={ruleWhen(rule)}
+          key={row.rule.id}
+          when={row.rule.at}
+          name={ruleName(row.rule)}
+          detail={ruleDetail(row)}
           on
-          clash={shadowed}
+          clash={row.shadowed}
         />
       ))}
       {noneOn && (
         <p className="text-[11.5px] text-red-700 dark:text-red-300">
-          날짜 알림이 하나도 켜져 있지 않습니다
+          켜져 있는 알림이 하나도 없습니다
         </p>
-      )}
-
-      {alerts && (
-        <>
-          <ReadGroup label="매일 같은 시각에" />
-          {ALERT_KINDS.map((k) => (
-            <ReadRow
-              key={k}
-              when={ALERT_AT[k]}
-              name={ALERT_SHORT[k]}
-              on={alerts[k] !== false}
-            />
-          ))}
-        </>
       )}
 
       {groups.silent.length > 0 && (
         <>
           <ReadGroup label="안 울림" />
-          {groups.silent.map(({ rule }) => (
+          {groups.silent.map((row) => (
             <ReadRow
-              key={rule.id}
-              when="—"
-              name={rule.label.replace('{days}', String(Math.abs(rule.offset)))}
-              detail={ruleWhen(rule)}
+              key={row.rule.id}
+              when={row.rule.at}
+              name={ruleName(row.rule)}
+              detail={ruleDetail(row)}
               on={false}
             />
           ))}
@@ -1270,19 +1313,22 @@ const DOW = ['일', '월', '화', '수', '목', '금', '토'];
 /**
  * 목록에 그릴 모양으로 묶는다.
  *
- * ── 왜 날짜순인가 ──
+ * ── 왜 시각순인가 ──
  *
- * 저장되는 배열 순서가 곧 우선순위지만, **우선순위는 같은 날에 둘 이상
- * 걸릴 때만 뜻이 있다.** 다른 날짜끼리는 순서가 아무 영향도 주지 않는다.
- * 그래서 평소엔 날짜순으로 보여주고, 겹친 것만 이긴 것 아래 매달아
- * 거기서만 순서를 만지게 한다.
+ * 전에는 날짜순이었다. 목록에 날짜 알림밖에 없었고 전부 09:10 에 나갔기
+ * 때문에, 그 목록에서 유일하게 다른 값이 날짜였던 것이다.
  *
- * **배열은 건드리지 않는다.** 날짜순은 보여주기일 뿐이다 — 날짜로 재정렬해
- * 저장하면 다음 차수에서 날짜가 바뀔 때 우선순위가 제멋대로 흔들린다.
+ * 이제 정기 보고도 같은 목록에 있고 `at` 이 규칙마다 다르다. 하루를
+ * 위에서 아래로 읽는 순서가 **시각**이고, 이 화면에 오는 가장 큰 이유인
+ * "언제 뭐가 나가나" 에 목록 모양 자체가 답한다. 걸리는 날은 줄마다 따로
+ * 적는다 — 날짜가 있는 것은 앵커 규칙뿐이라 정렬 기준이 될 수 없다.
+ *
+ * **배열은 건드리지 않는다.** 시각순은 보여주기일 뿐이다 — 재정렬해
+ * 저장하면 같은 시각에 겹쳤을 때의 우선순위가 제멋대로 흔들린다.
  */
 export interface AlertGroups {
-  /** 날짜가 잡힌 것. 날짜순. 겹친 것도 **같은 층**에 둔다. */
-  dated: AlertRuleRow[];
+  /** 이 차수에 나갈 것. 시각순. 겹친 것도 **같은 층**에 둔다. */
+  live: AlertRuleRow[];
   /** 꺼졌거나 날짜를 못 구해 안 울리는 것. */
   silent: AlertRuleRow[];
 }
@@ -1303,12 +1349,23 @@ export interface AlertGroups {
  * 것이 앞에 오므로 "위에 있는 게 이긴다" 는 규칙이 화면에도 그대로 선다.
  */
 export function groupAlertRows(rows: AlertRuleRow[]): AlertGroups {
-  // 마감선을 넘은 줄은 날짜가 잡혀도 안 나간다 - `안 울림` 쪽이다.
+  /*
+    안 울리는 줄:
+      · 꺼져 있다
+      · 앵커인데 이번 차수 날짜를 못 구했다
+      · 앵커인데 차수 마감선(운영 배포일)을 넘었다
+
+    조건형은 날짜가 없어도 여기 안 온다. 켜져 있으면 그 조건이 맞는 날
+    나가므로, 날짜가 없다는 이유로 `안 울림` 에 넣으면 거짓말이 된다.
+  */
+  const silent = (r: AlertRuleRow) =>
+    !r.rule.enabled ||
+    (r.rule.when.kind === 'anchor' && (!r.day || r.pastCutoff));
   return {
-    dated: rows
-      .filter((r) => r.day && !r.pastCutoff)
-      .sort((a, b) => a.day!.localeCompare(b.day!)),
-    silent: rows.filter((r) => !r.day || r.pastCutoff),
+    live: rows
+      .filter((r) => !silent(r))
+      .sort((a, b) => a.rule.at.localeCompare(b.rule.at)),
+    silent: rows.filter(silent),
   };
 }
 
@@ -1324,50 +1381,12 @@ export function ymdDow(ymd: string): string {
   return `${ymd.slice(5)}(${DOW[d.getUTCDay()]})`;
 }
 
-/**
- * 정기 보고 두 종. 날짜와 무관하게 시각에 맞춰 나간다.
- *
- * 위 규칙 목록과 따로 두는 이유는 "추가" 의 뜻이 다르기 때문이다.
- * 아침 브리핑을 하나 더 만드는 것과 알림 날짜를 하나 더 만드는 것은
- * 다른 일이고, 전자는 크론을 건드려야 한다.
- */
-export function AlertsEditor({
-  alerts,
-  onChange,
-}: {
-  alerts: AlertSwitches;
-  onChange: (next: AlertSwitches) => void;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      {ALERT_KINDS.map((k) => (
-        <label
-          key={k}
-          className="flex items-start justify-between gap-3 rounded border px-2 py-1.5"
-        >
-          <span className="min-w-0">
-            <span className="block text-[13px]">{ALERT_LABEL[k]}</span>
-            <span className="block text-[10.5px] text-muted-foreground">
-              {ALERT_DESC[k]}
-            </span>
-          </span>
-          <Switch
-            className="mt-0.5 shrink-0"
-            checked={alerts[k] !== false}
-            onCheckedChange={(v) => onChange({ ...alerts, [k]: v })}
-          />
-        </label>
-      ))}
-    </div>
-  );
-}
-
 /*
-  `AlertList` 를 지웠다.
+  `AlertsEditor` 와 `AlertList` 를 지웠다.
 
-  정기 보고를 읽기 화면 아래에 칩 두 개로 따로 붙이던 컴포넌트다. 이제는
-  `RuleList` 가 `매일 같은 시각에` 묶음으로 같은 목록 안에 그린다 —
-  편집 화면이 그렇게 보여주므로 읽기도 같아야 한다.
+  정기 보고 둘을 on/off 스위치로만 다루던 부품이다. 이제 그 둘도
+  `alertRules` 안의 규칙이라 `RuleList`(읽기)와 설정 화면의 편집기가
+  날짜 알림과 **같은 모양으로** 그린다. 따로 둘 자리가 없어졌다.
 */
 
 // ─────────────────────────────────────────────────────────────

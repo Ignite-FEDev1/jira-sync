@@ -80,6 +80,60 @@ PostgREST 용 `DB_SERVICE_ROLE_KEY` 로는 DDL 을 실행할 수 없어서 별�
 
 `psql` 이 필요합니다. macOS 는 `brew install postgresql@16` 입니다.
 
+## 신선한 DB 에 처음부터 재생할 때
+
+리허설용으로 **버리는 로컬 Postgres** 에 전부 다시 올릴 때 밟는 함정들입니다.
+운영은 과거에 적용 순서가 달라 멀쩡하므로, 아래는 전부 재생 전용 보정입니다.
+
+### `deploy_page_title` 컬럼을 손으로 넣어야 합니다
+
+```sql
+alter table public.qa_router_cycles add column if not exists deploy_page_title text;
+```
+
+- `20260908_qa_router_cycle_title.sql` 이
+  `20260908_qa_router_cycles.sql`(테이블을 만드는 파일)보다 **먼저** 정렬됩니다
+- 다섯 번째 글자 뒤에서 `_` 가 `s` 보다 작기 때문입니다
+  (`cycle_title` < `cycles`)
+- 그래서 테이블이 생기기도 전에 `alter table ... add column` 이 돌고,
+  그 뒤 어떤 마이그레이션도 이 컬럼을 다시 넣지 않습니다
+- `scripts/record-alert-messages.mts` 의 insert 가 이 컬럼을 쓰므로,
+  보정 없이는 골든 녹화·대조가 못 돕니다
+
+**로케일과 무관합니다.** 이 머신에서 직접 쟀습니다:
+
+```
+$ ls *.sql | sort        | grep 20260908_qa_router_cycle
+20260908_qa_router_cycle_title.sql
+20260908_qa_router_cycles.sql
+$ ls *.sql | LC_ALL=C sort | grep 20260908_qa_router_cycle
+20260908_qa_router_cycle_title.sql
+20260908_qa_router_cycles.sql
+```
+
+둘 다 `cycle_title` 이 앞입니다 — `LC_ALL=C` 가 고치지도 악화시키지도
+않습니다. (로케일이 실제로 갈리는 파일은 따로 있습니다: `20260907_qa_router.sql`
+은 기본 로케일에서 같은 접두사 그룹의 **맨 뒤**로, `LC_ALL=C` 에서는 **맨 앞**으로
+갑니다. 테이블을 만드는 쪽이라 재생할 때는 `LC_ALL=C` 가 맞습니다.)
+
+**적용된 마이그레이션 파일 자체는 고치지 않습니다** — 체크섬이 바뀌면 운영
+DB 가 그 파일을 다시 적용하려 듭니다. 위 한 줄은 신선한 복제본에만 쓰는
+보정이고 마이그레이션의 일부가 아닙니다.
+
+### 한 번만 적용되는 파일이 있습니다
+
+`20260930_qa_router_alert_model.sql` 은 옛 `alerts` 컬럼을 읽은 **뒤에** 그
+컬럼을 떨어뜨립니다. 두 번째 적용은 `column "alerts" does not exist` 로
+죽습니다 — 파일 머리 주석에 그 이유가 적혀 있습니다. 적용 뒤에 이 파일을
+고치지 말고, 바꿀 것이 있으면 `create or replace` 만 든 새 파일을 만드세요.
+
+### 그 밖에 필요한 것
+
+- `pg_cron`·`pg_net` 확장과 `vault`·`cron`·`net` 스키마 (로컬에는 없으므로
+  스텁으로 대신합니다)
+- `anon`·`authenticated` 롤 — 없으면 `grant` 가 죽고 `--single-transaction`
+  탓에 **파일 전체가 롤백**됩니다. "적용했는데 옛 함수가 남아 있다" 로 보입니다
+
 ## 이 스크립트를 새 DB 에 처음 붙일 때
 
 ```bash

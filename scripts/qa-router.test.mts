@@ -38,10 +38,24 @@ import {
   shiftBusinessDays,
 } from '@/lib/services/qa-router/qa-window';
 import { planToggleEnabled } from '@/app/admin/qa-router/toggle-enabled-plan';
+/*
+  화면 파일에서 가져오는 유일한 함수다. `alertRuleRows` 는 "이 규칙이
+  이번 차수 며칠에 울리나 · 누구에게 가려지나" 를 셈하는 순수 함수이고,
+  그 답이 `dueRules`(위)·`qa_router_due_rules`(SQL)와 갈리면 화면이
+  "울립니다" 라고 적은 날 알림이 안 나간다. React 를 안 쓰므로 환경변수
+  없이도 돈다.
+*/
+import { alertRuleRows } from '@/app/admin/qa-router/[id]/pipeline';
+import {
+  dueRules,
+  statusPhrase,
+  toAlertRuleV2,
+} from '@/lib/services/qa-router/alert-rule';
+import type { AlertRule, AlertWhen } from '@/lib/services/qa-router/types';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
-import { cycleUpsertRow, toState } from '@/lib/services/qa-router/rows';
-import type { StateRow } from '@/lib/services/qa-router/rows';
+import { cycleUpsertRow, toConfig, toState } from '@/lib/services/qa-router/rows';
+import type { ConfigRow, StateRow } from '@/lib/services/qa-router/rows';
 import {
   extractIssueKeys,
   extractJqlStrings,
@@ -57,8 +71,11 @@ import type { DeployCycle } from '../lib/services/qa-router/types';
 import {
   checkAlertRules,
   DEFAULT_ALERT_RULES,
+  DEFAULT_TEMPLATE,
   effectiveAlertRules,
   hasAlertOverride,
+  ruleProblem,
+  varsFor,
 } from '../lib/services/qa-router/types';
 import {
   hasProblem,
@@ -2345,14 +2362,14 @@ test('알림 규칙 — 3일 전이라고 넣으면 정확히 3일 전에 울린
   };
   const rules = [
     ...DEFAULT_ALERT_RULES,
-    {
+    toAlertRuleV2({
       id: 'qaSoon',
       anchor: 'qa_start' as const,
       offset: -3,
       shift: 'prev_workday' as const,
       label: '{days}일 뒤 QA 시작',
       enabled: true,
-    },
+    }),
   ];
   assert.equal(milestoneFrom(rules, s, '2026-08-31'), '3일 뒤 QA 시작');
   assert.equal(milestoneFrom(rules, s, '2026-08-28'), null);
@@ -2452,7 +2469,7 @@ test('차수 덮어쓰기 — 값이 있으면 그것을 쓴다', () => {
   };
   const configRules = [...DEFAULT_ALERT_RULES];
   const override = [
-    {
+    toAlertRuleV2({
       id: 'prodToday',
       anchor: 'prod' as const,
       // 브랜치를 자른 날(09-10)보다 4일 뒤에 배포했다.
@@ -2460,7 +2477,7 @@ test('차수 덮어쓰기 — 값이 있으면 그것을 쓴다', () => {
       shift: 'none' as const,
       label: '오늘 운영 배포',
       enabled: true,
-    },
+    }),
   ];
 
   const used = effectiveAlertRules(override, configRules);
@@ -2477,38 +2494,255 @@ test('차수 덮어쓰기 — 덮어쓴 차수인지 화면이 알 수 있다', 
   assert.equal(hasAlertOverride({}), false);
   assert.equal(hasAlertOverride({ alertRulesOverride: null }), false);
   assert.equal(
-    hasAlertOverride({ alertRulesOverride: [...DEFAULT_ALERT_RULES] }),
+    hasAlertOverride({
+      alertRulesOverride: [...DEFAULT_ALERT_RULES],
+    }),
     true
   );
 });
 
 test('차수 덮어쓰기 — 저장 전에 깨진 규칙을 사람 말로 막는다', () => {
+  /** 기본값 첫 줄(앵커 규칙)에서 한 군데만 망가뜨린다. */
+  const anchor = DEFAULT_ALERT_RULES[0];
+  const when = anchor.when as Extract<AlertWhen, { kind: 'anchor' }>;
+
   assert.equal(checkAlertRules([...DEFAULT_ALERT_RULES]), null);
   // `[]` 는 알림을 통째로 끈 상태가 된다. DB CHECK 도 같은 것을 막는다.
   assert.match(checkAlertRules([]) ?? '', /하나도 없습니다/);
   assert.match(checkAlertRules('nope') ?? '', /형식이 잘못/);
   assert.match(
-    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], anchor: 'nope' }]) ?? '',
+    checkAlertRules([{ ...anchor, when: { ...when, anchor: 'nope' } }]) ?? '',
     /기준일이 잘못/
   );
   assert.match(
-    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], offset: 99 }]) ?? '',
+    checkAlertRules([{ ...anchor, when: { ...when, offset: 99 } }]) ?? '',
     /-60 ~ 60/
   );
-  assert.match(
-    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], label: '  ' }]) ?? '',
-    /문구를 입력/
-  );
+  assert.match(checkAlertRules([{ ...anchor, label: '  ' }]) ?? '', /문구를 입력/);
+  // 시각이 데이터가 되면서 새로 생긴 칸이다. 여기도 사람 말로 막아야 한다.
+  assert.match(checkAlertRules([{ ...anchor, at: '9:10' }]) ?? '', /시각/);
   // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
+  assert.match(checkAlertRules([anchor, anchor]) ?? '', /겹칩니다/);
   assert.match(
-    checkAlertRules([DEFAULT_ALERT_RULES[0], DEFAULT_ALERT_RULES[0]]) ?? '',
-    /겹칩니다/
-  );
-  assert.match(
-    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], template: '{없는변수}' }]) ??
-      '',
+    checkAlertRules([{ ...anchor, template: '{없는변수}' }]) ?? '',
     /모르는 변수/
   );
+});
+
+/*
+  ── 상태문구 — 18:00 요약의 머리말 ──
+
+  처음엔 `오늘 마감{상태문구}` 처럼 접미사로 두려 했다. renderTemplate 은
+  "한 줄에 쓰인 변수 중 빈 것이 하나라도 있으면 그 줄을 통째로 버린다".
+  평소에 {상태문구} 가 비면 **머리말 줄이 통째로 사라져 제목 없는 알림이
+  나간다.** 실제로 돌려서 확인했다.
+
+  그래서 이 값은 **절대 비지 않는다.**
+*/
+test('상태문구 — 평소에도 비지 않는다', () => {
+  const s = statusPhrase({
+    stalled: false,
+    failedToday: 0,
+    consecutiveFails: 0,
+  });
+  assert.equal(s, '오늘 마감');
+  assert.ok(s.length > 0, '비면 머리말 줄이 사라진다');
+});
+
+test('상태문구 — 네 갈래가 각각 옳은 값을 낸다', () => {
+  assert.equal(
+    statusPhrase({ stalled: true, failedToday: 0, consecutiveFails: 0 }),
+    '오늘 마감 · 확인이 멈춰 있습니다'
+  );
+  assert.equal(
+    statusPhrase({ stalled: false, failedToday: 3, consecutiveFails: 0 }),
+    '오늘 마감 · 실패 3건'
+  );
+  assert.equal(
+    statusPhrase({ stalled: false, failedToday: 0, consecutiveFails: 7 }),
+    '오늘 마감 · 연속 실패 7회'
+  );
+});
+
+/*
+  우선순위는 옛 코드와 같아야 한다 (20260929…sql 의 마감 요약 조립부).
+  멈춤 > 오늘 실패 > 연속 실패 > 평소.
+*/
+test('상태문구 — 여럿이 겹치면 멈춤이 이긴다', () => {
+  assert.equal(
+    statusPhrase({ stalled: true, failedToday: 3, consecutiveFails: 7 }),
+    '오늘 마감 · 확인이 멈춰 있습니다'
+  );
+  assert.equal(
+    statusPhrase({ stalled: false, failedToday: 3, consecutiveFails: 7 }),
+    '오늘 마감 · 실패 3건'
+  );
+});
+
+/*
+  ── 여기 있던 대조 테스트를 지웠다 ──
+
+  `milestoneFrom` 과 `milestoneFromLegacy` 가 같은 답을 내는지 맞대던
+  테스트다. 옛 판이 사라졌으므로 맞댈 상대가 없다 — 남겨 두면 자기 자신과
+  비교하는 항등식이 된다.
+
+  그 테스트가 지키던 것은 "이사가 답을 안 바꿨다" 이고, 그 역할은 위쪽
+  `milestoneOn` 대조 테스트(갈리는 날이 09-11 하루뿐임을 고정한다)와 아래
+  마감선 테스트들이 그대로 들고 있다. 둘 다 옛 판을 안 쓴다.
+*/
+
+/*
+  ── 앵커가 아닌 규칙이 섞인 목록 ──
+
+  `milestoneFrom` 은 `when.kind` 가 `anchor` 가 아닌 규칙을 걸러 내는데,
+  지금까지는 그 자리에 **앵커 규칙만** 왔기 때문에 그 거르기가 한 번도
+  실제로 쓰이지 않았다. 마이그레이션이 모든 대상의 `alert_rules` 에
+  activeCycle·scheduleUnusable 규칙을 넣으므로, 이제 어드민 화면이 읽는
+  목록에 그 둘이 늘 섞여 있다.
+
+  걸러지지 않으면 `when` 안의 앵커를 못 찾아 `undefined` 를 기준일로 삼고,
+  그 규칙의 문구("마감 요약")가 화면의 마감선 자리에 튀어나온다.
+*/
+test('마감선 — 앵커가 아닌 규칙은 건너뛴다', () => {
+  const s = {
+    qaStartYmd: '2026-09-22',
+    qaEndYmd: '2026-09-29',
+    prodYmd: '2026-09-30',
+    deployYmd: '2026-09-30',
+  };
+  const notAnchor: AlertRule[] = [
+    {
+      id: 'dailySummary',
+      at: '18:00',
+      when: { kind: 'activeCycle' },
+      label: '마감 요약',
+      enabled: true,
+    },
+    {
+      id: 'scheduleWarning',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: true,
+    },
+  ];
+  const anchors = DEFAULT_ALERT_RULES.filter((r) => r.when.kind === 'anchor');
+  // 섞여 있어도 앵커만 있는 목록과 답이 같아야 한다
+  for (const day of ['2026-09-22', '2026-09-29', '2026-09-30', '2026-10-01']) {
+    assert.equal(
+      milestoneFrom([...notAnchor, ...anchors], s, day),
+      milestoneFrom(anchors, s, day),
+      `${day} 에서 섞인 목록이 다른 답을 낸다`
+    );
+  }
+  assert.equal(
+    milestoneFrom([...notAnchor, ...anchors], s, '2026-09-30'),
+    '오늘 운영 배포'
+  );
+  // 앵커가 하나도 없으면 null. "마감 요약" 이 마감선 자리로 새면 안 된다.
+  assert.equal(milestoneFrom(notAnchor, s, '2026-09-30'), null);
+});
+
+/*
+  ── 왜 종류별로 가르나 ──
+
+  한 목록으로 두면 날짜 알림 본문에 {알림건수} 를 쓸 수 있게 된다. 거기서는
+  값이 비고, renderTemplate 규칙에 따라 **그 줄이 통째로 사라진다.** 저장은
+  되는데 알림에서 한 줄이 없어지고 아무도 모른다.
+*/
+test('변수 집합 — 종류마다 쓸 수 있는 것이 다르다', () => {
+  const anchor = varsFor({
+    kind: 'anchor',
+    anchor: 'prod',
+    offset: 0,
+    shift: 'none',
+  });
+  const cycle = varsFor({ kind: 'activeCycle' });
+  const warn = varsFor({ kind: 'scheduleUnusable' });
+
+  // 차수 이야기는 셋 다 쓴다
+  for (const s of [anchor, cycle, warn]) assert.ok(s.includes('차수'));
+
+  assert.ok(anchor.includes('문구'));
+  assert.ok(!cycle.includes('문구'));
+
+  assert.ok(cycle.includes('알림건수'));
+  assert.ok(
+    !anchor.includes('알림건수'),
+    '날짜 알림이 알림건수를 쓰면 줄이 사라진다'
+  );
+
+  assert.ok(cycle.includes('상태문구'));
+  assert.ok(!warn.includes('상태문구'));
+
+  assert.ok(warn.includes('일정경고이유'));
+  assert.ok(!anchor.includes('일정경고이유'));
+
+  /*
+    `*일정*`·`*참고*` 는 18시 요약에서만 **변수**다. 그 알림만 스레드 안에서
+    블록을 통째로 빼기 때문이다 — 글자로 박아 두면 그 줄에 변수가 없어
+    renderTemplate 의 빈 변수 규칙이 안 걸리고 머리말 두 줄만 남는다.
+    날짜 알림에는 그 조건이 없어 블록이 늘 나간다.
+  */
+  for (const k of ['일정머리말', '참고머리말']) {
+    assert.ok(cycle.includes(k), `18시 요약이 ${k} 를 못 쓴다`);
+    assert.ok(!anchor.includes(k), `날짜 알림에 ${k} 가 새어 들어갔다`);
+    assert.ok(!warn.includes(k), `일정 경고에 ${k} 가 새어 들어갔다`);
+  }
+});
+
+test('검증 — 그 종류가 모르는 변수면 막는다', () => {
+  const bad = [
+    {
+      id: 'x',
+      at: '09:10',
+      when: { kind: 'anchor', anchor: 'prod', offset: 0, shift: 'none' },
+      label: 'ㄱ',
+      enabled: true,
+      template: '오늘 알림 {알림건수}건',
+    },
+  ];
+  assert.match(checkAlertRules(bad) ?? '', /알림건수/);
+});
+
+/*
+  경고 본문에서 {일정경고이유} 를 빼면 "일정 문제" 만 남고 무엇이 문제인지
+  사라진다. 조용한 실패로 되돌아가는 길이라 저장을 막는다.
+*/
+test('검증 — 경고 본문에 이유가 없으면 막는다', () => {
+  const noReason = [
+    {
+      id: 'w',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: true,
+      template: '{기호} {대상이름} 일정 문제',
+    },
+  ];
+  assert.match(checkAlertRules(noReason) ?? '', /일정경고이유/);
+
+  const ok = [
+    {
+      id: 'w',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: true,
+      template: '{기호} {대상이름} 일정 문제\n{일정경고이유}',
+    },
+  ];
+  assert.equal(checkAlertRules(ok), null);
+});
+
+test('검증 — 시각 모양이 틀리면 막는다', () => {
+  const mk = (at: string) => [
+    { id: 'x', at, when: { kind: 'activeCycle' }, label: 'ㄱ', enabled: true },
+  ];
+  assert.equal(checkAlertRules(mk('18:00')), null);
+  assert.match(checkAlertRules(mk('1800')) ?? '', /시각/);
+  assert.match(checkAlertRules(mk('25:00')) ?? '', /시각/);
+  assert.match(checkAlertRules(mk('9:10')) ?? '', /시각/);
 });
 
 /*
@@ -3735,21 +3969,29 @@ test('알림 규칙 검증 — 저장 경로가 쓰는 함수 하나로 모았�
   */
   assert.match(checkAlertRules([]) ?? '', /하나도 없습니다/);
 
-  const one = (over: Record<string, unknown>) => [
+  const one = (
+    over: Record<string, unknown>,
+    whenOver: Record<string, unknown> = {}
+  ) => [
     {
       id: 'x',
+      at: '09:10',
+      when: {
+        kind: 'anchor',
+        anchor: 'prod',
+        offset: 0,
+        shift: 'none',
+        ...whenOver,
+      },
       label: '테스트',
-      anchor: 'prod',
-      offset: 0,
-      shift: 'none',
       enabled: true,
       ...over,
     },
   ];
   assert.equal(checkAlertRules(one({})), null);
   assert.match(checkAlertRules(one({ enabled: 'yes' })) ?? '', /사용 여부/);
-  assert.match(checkAlertRules(one({ anchor: 'nope' })) ?? '', /기준일/);
-  assert.match(checkAlertRules(one({ offset: 999 })) ?? '', /날짜 차이/);
+  assert.match(checkAlertRules(one({}, { anchor: 'nope' })) ?? '', /기준일/);
+  assert.match(checkAlertRules(one({}, { offset: 999 })) ?? '', /날짜 차이/);
 });
 
 test('전환 대기 — 차수가 끝나면 필터가 그걸 말한다', () => {
@@ -4446,7 +4688,10 @@ test('마감선 — 운영 배포일 다음날부터는 아무것도 안 울린�
     prodYmd: '2026-10-07',
   };
   // 10-08 은 qaEnd 당일이지만 배포가 지났으므로 안 울린다
-  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'), null);
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'),
+    null
+  );
 });
 
 test('마감선 — 운영 배포일 당일은 막지 않는다', () => {
@@ -4472,7 +4717,10 @@ test('마감선 — 정상 데이터에서는 아무것도 안 바뀐다', () =>
     milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
     '오늘 QA 시작'
   );
-  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'), 'QA 종료');
+  assert.equal(
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'),
+    'QA 종료'
+  );
   assert.equal(
     milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-30'),
     '오늘 운영 배포'
@@ -4516,7 +4764,7 @@ test('마감선 — 대장 본문에 운영일이 없으면 제목의 날짜가 
       label: '오늘 운영 배포',
       enabled: true,
     },
-  ];
+  ].map(toAlertRuleV2);
   const ledger = {
     qaStartYmd: '2026-09-01',
     qaEndYmd: '2026-09-11',
@@ -4547,7 +4795,7 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
     qaEndYmd: '2026-09-09',
     prodYmd: '2026-09-10',
   };
-  const override = [
+  const overrideOld = [
     {
       id: 'prodToday',
       anchor: 'prod' as const,
@@ -4557,11 +4805,12 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
       enabled: true,
     },
   ];
+  const override = overrideOld.map(toAlertRuleV2);
   // 보정된 배포일(09-14) 당일이므로 울린다
   assert.equal(milestoneFrom(override, s, '2026-09-14'), '오늘 운영 배포');
   // 그리고 그 다음날부터는 무엇도 안 울린다
   const withQa = [
-    ...override,
+    ...overrideOld,
     {
       id: 'qaLate',
       anchor: 'qa_end' as const,
@@ -4570,7 +4819,7 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
       label: '늦은 QA 알림',
       enabled: true,
     },
-  ];
+  ].map(toAlertRuleV2);
   assert.equal(milestoneFrom(withQa, s, '2026-09-15'), null);
 });
 
@@ -4581,7 +4830,7 @@ test('마감선 — prod 앵커 규칙이 배포일을 보정하면 선도 따�
   가 그대로 마감선이어야 한다.
 */
 test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이다', () => {
-  const qaEndOnly = [
+  const qaEndOnlyOld = [
     {
       id: 'qaEnd',
       anchor: 'qa_end' as const,
@@ -4591,6 +4840,7 @@ test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이�
       enabled: true,
     },
   ];
+  const qaEndOnly = qaEndOnlyOld.map(toAlertRuleV2);
 
   // prod 앵커가 아예 없다 → 마감선은 원본 prodYmd(09-10) 그대로다.
   // qaEnd(09-11)가 그보다 뒤라 마감선을 넘는다.
@@ -4628,7 +4878,7 @@ test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이�
     아래 assert 가 깨진다.
   */
   const withDisabledProd = [
-    ...qaEndOnly,
+    ...qaEndOnlyOld,
     {
       id: 'prodDisabled',
       anchor: 'prod' as const,
@@ -4637,7 +4887,7 @@ test('마감선 — prod 앵커 규칙이 없으면 배포일 자체가 선이�
       label: '오늘 운영 배포',
       enabled: false,
     },
-  ];
+  ].map(toAlertRuleV2);
   assert.equal(
     milestoneFrom(
       withDisabledProd,
@@ -4779,6 +5029,232 @@ test('알림 본문 — 사다리가 정한 날짜를 qa_router_vars 에 넘긴�
   // 안 넘기면 예전처럼 대장 칸을 읽는다 - 그 4인자 호출의 답은 안 바뀐다
   assert.match(vars, /coalesce\(p_qa_end, cyc\.qa_end_ymd\)/);
   assert.match(vars, /coalesce\(p_prod,\s+cyc\.deploy_ymd\)/);
+});
+
+/*
+  ── 미리보기가 종류를 안다 ──
+
+  `qa_router_preview_message`(20260914)는 `qa_router_vars` 하나만 불러
+  차수 변수 열한 개만 채웠다. 18:00 요약·09:10 경고가 쓰는 변수는 비어서
+  `qa_router_render` 의 "빈 변수가 있는 줄은 버린다" 규칙에 걸려 **미리보기
+  에서만** 그 줄이 사라졌다 (마감 요약 11줄 → 6줄, 일정 경고 3줄 → 1줄).
+
+  본문 편집기 오른쪽의 그 칸이 이 기능이 받아들여진 근거였으므로, 두 종류
+  에서만 거짓이 되면 안 된다.
+*/
+test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+
+  /*
+    인자를 뒤에 붙이면 옛 3인자 판과 둘 다 후보가 되어 호출이
+    `function ... is not unique` 로 죽는다. 이 저장소가 두 번 겪은 사고다.
+    **지우기가 만들기보다 앞서야** 한다.
+  */
+  const drop = sql.indexOf(
+    'drop function if exists public.qa_router_preview_message(uuid, text, text);'
+  );
+  const create = sql.indexOf(
+    'create or replace function public.qa_router_preview_message'
+  );
+  assert.ok(drop >= 0, '옛 3인자 판을 안 지웠다');
+  assert.ok(drop < create, '지우기가 만들기보다 뒤에 있다');
+
+  // 새 서명에 권한을 다시 준다 — drop 이 옛 grant 를 같이 가져간다
+  assert.match(
+    sql,
+    /grant execute on function public\.qa_router_preview_message\(uuid, text, text, jsonb\)/
+  );
+
+  // 종류를 읽고, 그 종류의 변수를 얹는다
+  assert.match(sql, /coalesce\(p_when->>'kind', 'anchor'\)/);
+  for (const v of ['알림건수', '상태문구', '마지막확인', '일정머리말', '참고머리말']) {
+    assert.match(sql, new RegExp(`'${v}'`), `${v} 를 안 채운다`);
+  }
+
+  /*
+    `{일정경고이유}` 만은 예시로 두지 않는다. 그 변수가 비면 줄이 통째로
+    사라지는데, 그 사라짐이 이 함수가 고치려는 바로 그 증상이다.
+    사다리를 실제로 불러 받아야 한다.
+  */
+  assert.match(sql, /qa_router_qa_window/);
+  assert.match(sql, /'일정경고이유'/);
+});
+
+/*
+  ── 일정 경고 두 문장이 세 곳에 복제돼 있다 ──
+
+  `invalid`·`none` 중 **어느 문장을 고를지**는 PL/pgSQL 함수 본문 안에만 있어
+  바깥에서 부를 수가 없다. 그래서 같은 `case` 가 세 벌이다:
+
+    · 20260930 디스패처(activeCycle 갈래)   — 실제로 나가는 글자
+    · 20261001 미리보기                      — 화면이 보여주는 글자
+    · scripts/record-alert-messages.mts      — 골든을 녹화하는 글자
+
+  주석 셋은 알림 셋일 뿐 보증이 아니다. 이 저장소는 같은 질문에 **세 답**이
+  나와 어느 게 맞는지 아무도 모르던 사고를 겪었다(`config/route.ts` 의
+  검증 쌍둥이 주석). 디스패처 문구만 고치면 화면이 조용히 다른 말을 하게
+  되는데, 골든 테스트는 키 존재와 길이만 봐서 그걸 못 잡는다.
+
+  그래서 **세 파일의 글자를 직접 맞댄다.** `qa_router_vars` 오버로드 핀
+  테스트와 같은 수법이고, 적용된 마이그레이션을 건드리지 않는다.
+
+  ※ `20260929_qa_router_schedule_gap.sql` 에 네 번째 사본이 있다 —
+     20260930 이 대체한 옛 `qa_router_daily_summary` 의 것이라 더는 안 돈다.
+     여기서 안 센다. 나중에 문구를 바꿀 때는 디스패처를 `create or replace`
+     하는 **새 마이그레이션**이 생기므로, 아래 목록의 20260930 자리를 그
+     파일로 옮긴다.
+*/
+test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () => {
+  const files = {
+    '디스패처(20260930)': '../supabase/migrations/20260930_qa_router_alert_model.sql',
+    '미리보기(20261001)': '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
+    '녹화(record-alert-messages)': '../scripts/record-alert-messages.mts',
+  };
+
+  /** 작은따옴표 문자열 리터럴 안에 있으므로 따옴표·줄바꿈 앞에서 끊는다. */
+  const pick = (src: string, head: string, where: string) => {
+    const m = src.match(new RegExp(`${head}[^'\\n]*`));
+    assert.ok(m, `${where} 에서 "${head}" 로 시작하는 문장을 못 찾았다`);
+    return m![0];
+  };
+
+  const invalid: Record<string, string> = {};
+  const none: Record<string, string> = {};
+  for (const [where, rel] of Object.entries(files)) {
+    const src = readFileSync(new URL(rel, import.meta.url), 'utf-8');
+    invalid[where] = pick(src, ':warning: QA 일정이 서로 어긋납니다', where);
+    none[where] = pick(src, ':warning: 이 차수의 QA', where);
+  }
+
+  const [first, ...rest] = Object.keys(files);
+  for (const where of rest) {
+    assert.equal(
+      invalid[where],
+      invalid[first],
+      `invalid 문장이 ${first} 와 ${where} 에서 다르다`
+    );
+    assert.equal(
+      none[where],
+      none[first],
+      `none 문장이 ${first} 와 ${where} 에서 다르다`
+    );
+  }
+
+  // 빈 문자열을 세 곳에서 똑같이 못 찾아 통과하는 길을 막는다.
+  assert.ok(invalid[first].length > 20);
+  assert.ok(none[first].length > 20);
+});
+
+/*
+  ── statusPhrase 는 쌍둥이라고 적어 놓고 짝이 없었다 ──
+
+  `alert-rule.ts` 의 머리말에는 "이 파일의 함수들은 SQL 쌍둥이와 줄 단위로
+  대조해야 한다" 고 적혀 있다. 그런데 `statusPhrase` 는 **실행 코드에서
+  아무도 안 부른다** — 18시 요약의 머리말을 실제로 만드는 것은 디스패처의
+  `case head_kind` 뿐이다(20260930). 기존 테스트는 TS 리터럴을 테스트
+  파일에 적은 리터럴과 맞대므로, SQL 쪽 문장을 한 글자 고쳐도 275개가
+  전부 초록이다.
+
+  함수를 지우지는 않는다. 이 저장소는 **부르는 데가 없어도 핀으로 남기는**
+  쌍둥이를 일부러 둔다(`milestoneFrom` 이 그렇다) — 화면과 알림이 다른
+  말을 하기 시작하는 순간을 테스트가 먼저 알아채기 위해서다. 결함은 함수의
+  존재가 아니라 **핀이 없는 것**이었다. 그래서 여기서 원문을 맞댄다.
+
+  골든(`alert-messages.json`)이 못 덮는 자리이기도 하다. 14개는 `ok` 와
+  `failed` 머리말만 지나고 `stalled`(`확인이 멈춰 있습니다`)·`streak`
+  (`연속 실패 N회`)는 한 번도 안 나온다. 골든을 다시 걷어 늘리지 않는다 —
+  그것은 "옮기기 전 글자" 라 다시 걷으면 재는 의미가 사라진다. 문구만큼은
+  이 테스트가 막는다.
+
+  `%s`(SQL)와 `${...}`(TS)는 같은 구멍이므로 `%s` 로 맞춘 뒤 비교한다.
+*/
+test('18시 머리말 문구 — statusPhrase 와 SQL case 가 한 글자도 다르지 않다', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const ts = readFileSync(
+    new URL('../lib/services/qa-router/alert-rule.ts', import.meta.url),
+    'utf-8'
+  );
+
+  // SQL — `case head_kind … end` 안의 작은따옴표 리터럴에서 종류 이름 셋을 뺀다
+  const block = sql.match(/case head_kind([\s\S]*?)\bend\b/);
+  assert.ok(block, 'SQL 에서 case head_kind 블록을 못 찾았다');
+  const KINDS = ['stalled', 'failed', 'streak', 'ok'];
+  const fromSql = [...block![1].matchAll(/'([^']*)'/g)]
+    .map((m) => m[1])
+    .filter((s) => !KINDS.includes(s));
+
+  // TS — statusPhrase 본문의 return 리터럴을 순서대로
+  const body = ts.match(
+    /export function statusPhrase\(i: StatusInput\): string \{([\s\S]*?)\n\}/
+  );
+  assert.ok(body, 'alert-rule.ts 에서 statusPhrase 본문을 못 찾았다');
+  const fromTs = [...body![1].matchAll(/return\s+(?:'([^']*)'|`([^`]*)`)/g)]
+    .map((m) => m[1] ?? m[2])
+    .map((s) => s.replace(/\$\{[^}]*\}/g, '%s'));
+
+  assert.equal(fromSql.length, 4, `SQL 에서 네 문장을 못 골랐다: ${fromSql}`);
+  assert.equal(fromTs.length, 4, `TS 에서 네 문장을 못 골랐다: ${fromTs}`);
+  assert.deepEqual(
+    fromTs,
+    fromSql,
+    'statusPhrase 와 디스패처의 머리말 문구가 갈렸다'
+  );
+
+  // 빈 문자열끼리 맞아 통과하는 길을 막는다.
+  for (const s of fromSql) assert.ok(s.startsWith('오늘 마감'), s);
+});
+
+/*
+  ── SAMPLE_VARS 도 손으로 맞추는 거울이다 ──
+
+  `20261001` 미리보기가 **예시값**으로 채우는 변수 목록과, 설정 화면이
+  "이것들은 예시입니다" 라고 말하는 목록(`SAMPLE_VARS`)이 두 곳에 있다.
+  SQL 에서 빠지면 그 줄이 미리보기에서 사라지고, 화면에서 빠지면 화면이
+  예시를 진짜 값이라고 말한다. 어느 쪽이든 조용하다.
+
+  위 '일정 경고 문장' 테스트와 같은 수법으로 **원문을 직접 맞댄다.**
+  SQL 쪽은 `-- 아래 다섯은 **예시**다` 와 `-- 여기부터는 진짜 값` 사이의
+  키들이 그 목록이다. 주석을 표식으로 쓰는 것이 불안해 보이지만, 표식이
+  사라지면 이 테스트가 먼저 깨진다 — 조용히 통과하는 길이 없다.
+*/
+test('예시 변수 — 화면과 미리보기가 같은 다섯을 가리킨다', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const page = readFileSync(
+    new URL('../app/admin/qa-router/[id]/settings/page.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  const block = sql.match(
+    /아래 다섯은 \*\*예시\*\*다[^\n]*\n([\s\S]*?)-- 여기부터는 진짜 값/
+  );
+  assert.ok(block, 'SQL 에서 예시 블록 표식을 못 찾았다');
+  const fromSql = [...block![1].matchAll(/'([^']+)',\s*'/g)].map((m) => m[1]);
+
+  const row = page.match(/\n  activeCycle: \[([^\]]*)\]/);
+  assert.ok(row, 'SAMPLE_VARS 의 activeCycle 줄을 못 찾았다');
+  const fromPage = [...row![1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+
+  // 빈 목록 둘이 똑같아서 통과하는 길을 막는다.
+  assert.equal(fromSql.length, 5, `SQL 예시가 다섯이 아니다: ${fromSql}`);
+  assert.deepEqual([...fromPage].sort(), [...fromSql].sort());
 });
 
 test('수동 일정 — 둘 다 비우면 지우는 것이다', () => {
@@ -5121,6 +5597,7 @@ test('상태 행 — 실패 알림 ts 를 도메인 값으로 옮긴다', () => 
     stale_alerted_at: null,
     fail_alert_ts: '1727500000.123456',
     side_effects: null,
+    alert_sent_on: null,
     updated_at: '2026-09-29T09:00:00Z',
   } satisfies StateRow;
   assert.equal(toState(row).failAlertTs, '1727500000.123456');
@@ -5132,6 +5609,218 @@ test('상태 행 — 실패 알림 ts 를 도메인 값으로 옮긴다', () => 
   );
 });
 
+test('상태 매핑 — alert_sent_on 이 읽힌다', () => {
+  const st = toState({
+    config_id: 'c1',
+    alert_sent_on: { qaEnd: '2026-10-07' },
+  } as never);
+  assert.deepEqual(st.alertSentOn, { qaEnd: '2026-10-07' });
+});
+
+test('상태 매핑 — 칸이 없으면 빈 객체다', () => {
+  const st = toState({ config_id: 'c1' } as never);
+  assert.deepEqual(st.alertSentOn, {});
+});
+
+/*
+  ── 옛 모양을 만나도 화면이 살아 있나 ──
+
+  `toAlertRuleV2` 자체는 여러 번 단위 테스트돼 있다. 그런데 **언제 그것을
+  부를지 정하는 자리**(`toConfig`)는 지금까지 어느 테스트도 안 돌렸다.
+  타입 검사는 `typeof null === 'object'` 가 런타임에 무슨 일을 하는지
+  말해 주지 않는다.
+
+  이 길이 이 브랜치가 남긴 안전망이다 — 마이그레이션이 DB 를 새 모양으로
+  바꿨지만, 되돌린 백업이나 손으로 넣은 행이 옛 모양일 수 있고 그때 화면이
+  죽으면 안 된다. 그래서 여기서 직접 돌린다.
+*/
+
+/** `alert_rules` 만 바꿔 가며 `toConfig` 를 돌리기 위한 최소 행. */
+const CONFIG_ROW = {
+  id: 'cfg-1',
+  name: 'CPO BO QA',
+  enabled: true,
+  jira_instance: 'ignite',
+  jira_filter_id: '12571',
+  triage_account_id: 'triage',
+  jira_operator_account_id: null,
+  confluence_deploy_root_id: 'root',
+  fix_version_pattern: 'release_{ymd}',
+  qa_schedule_rule: null,
+  slack_channel_id: 'C1',
+  slack_fallback_channel_id: 'C1',
+  slack_ops_channel_id: null,
+  plan_issue_type_id: null,
+  dev_issue_type_id: null,
+  plan_issue_type_name: null,
+  dev_issue_type_name: null,
+  co_assignee_field: null,
+  plan_collect_hours: null,
+  judge_tiers: null,
+  alert_rules: null,
+  quiet_hours: { startHour: 9, endHour: 18, skipWeekend: true },
+  tick_interval_seconds: null,
+  reassign_mode: 'off',
+  self_account_id: null,
+  heartbeat_stale_minutes: 30,
+  created_at: '2026-09-01T00:00:00Z',
+  updated_at: '2026-09-01T00:00:00Z',
+} as unknown as ConfigRow;
+
+/** 그 행에 `alert_rules` 만 끼워 넣고 규칙 목록을 받는다. */
+const rulesFromRow = (alert_rules: unknown) =>
+  toConfig({ ...CONFIG_ROW, alert_rules } as ConfigRow).alertRules;
+
+test('설정 읽기 — 옛 모양과 새 모양이 섞여 와도 둘 다 산다', () => {
+  const legacy = {
+    id: 'qaEnd',
+    anchor: 'qa_end',
+    offset: 0,
+    shift: 'next_workday',
+    label: 'QA 종료',
+    enabled: true,
+    template: '본문',
+  };
+  const modern = {
+    id: 'dailySummary',
+    at: '18:00',
+    when: { kind: 'activeCycle' },
+    label: '마감 요약',
+    enabled: true,
+  };
+
+  const out = rulesFromRow([legacy, modern]);
+  assert.equal(out.length, 2);
+
+  // 옛 것은 감싼다 — 시각이 없던 규칙은 09:10 앵커 규칙이 된다.
+  assert.deepEqual(out[0], {
+    id: 'qaEnd',
+    at: '09:10',
+    when: {
+      kind: 'anchor',
+      anchor: 'qa_end',
+      offset: 0,
+      shift: 'next_workday',
+    },
+    label: 'QA 종료',
+    enabled: true,
+    template: '본문',
+  });
+  // 새 것은 **손대지 않는다.** 들어간 값이 그대로 나와야 한다.
+  assert.deepEqual(out[1], modern);
+});
+
+test('설정 읽기 — 새 모양만 있으면 아무것도 변환하지 않는다', () => {
+  const input = [
+    {
+      id: 'prodToday',
+      at: '09:10',
+      when: { kind: 'anchor', anchor: 'prod', offset: 0, shift: 'none' },
+      label: '오늘 운영 배포',
+      enabled: true,
+      template: DEFAULT_TEMPLATE,
+    },
+    {
+      id: 'scheduleWarning',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: false,
+    },
+  ];
+  // 글자 하나 안 바뀌어야 한다 — 읽기는 옮기는 일이지 고치는 일이 아니다.
+  assert.deepEqual(rulesFromRow(input), input);
+  assert.equal(JSON.stringify(rulesFromRow(input)), JSON.stringify(input));
+});
+
+test('설정 읽기 — 칸이 비면 기본 규칙 다섯으로 떨어진다', () => {
+  /*
+    빈 배열은 "알림을 다 껐다" 가 아니라 컬럼이 아직 없다는 뜻에 가깝다.
+    여기가 비면 화면은 "알림 없음" 을 그리는데 SQL 은 제 기본값으로 알림을
+    보내고 있어서 화면과 동작이 어긋난다.
+  */
+  for (const empty of [null, [], undefined]) {
+    assert.deepEqual(
+      rulesFromRow(empty),
+      [...DEFAULT_ALERT_RULES],
+      `${JSON.stringify(empty)} 에서 기본값으로 안 떨어졌다`
+    );
+  }
+  // 기본값 자체가 걸러지면 안 된다 — 다섯이 그대로 통과해야 한다.
+  assert.equal(rulesFromRow([]).length, 5);
+});
+
+/*
+  ── 쓰레기 한 줄이 화면을 못 죽이게 ──
+
+  전에는 "객체가 아니면 그대로 통과" 였다. 던지지는 않았지만 **터지는 자리를
+  화면으로 미뤘을 뿐**이다. 실측:
+
+    toConfig([null])  → [null]            (여기서는 조용하다)
+    milestoneFrom     → Cannot read properties of null (reading 'when')
+    ruleProblem       → Cannot read properties of null (reading 'label')
+
+  둘 다 알림 목록을 그리는 길목이라 화면이 통째로 하얘지고, 그러면 그 행을
+  고치러 들어갈 화면이 없어진다. 그래서 읽을 때 버린다.
+*/
+test('설정 읽기 — 규칙이 아닌 항목은 버리고 멀쩡한 것만 남긴다', () => {
+  const good = {
+    id: 'ok',
+    at: '09:10',
+    when: { kind: 'scheduleUnusable' },
+    label: '일정 경고',
+    enabled: true,
+  };
+
+  for (const junk of [null, undefined, 'nope', 7, true, {}, []]) {
+    const out = rulesFromRow([junk, good]);
+    const what = JSON.stringify(junk) ?? 'undefined';
+    // 던지지 않는다
+    assert.deepEqual(out, [good], `${what} 를 안 버렸다`);
+    // 그리고 칸이 빈 규칙으로 둔갑하지도 않는다
+    assert.equal(out.length, 1, `${what} 가 규칙 하나로 남았다`);
+  }
+});
+
+test('설정 읽기 — 버린 뒤 화면 코드가 실제로 안 던진다', () => {
+  /*
+    위 테스트는 "버렸다" 만 본다. 정작 확인해야 하는 것은 **그래서 화면이
+    사나** 이므로, 걸러진 목록을 알림 목록을 그리는 두 함수에 그대로 먹인다.
+    이 둘이 옛 코드에서 실제로 던지던 자리다.
+  */
+  const rules = rulesFromRow([
+    null,
+    {},
+    'nope',
+    {
+      id: 'qaEnd',
+      anchor: 'qa_end',
+      offset: 0,
+      shift: 'none',
+      label: 'QA 종료',
+      enabled: true,
+    },
+  ]);
+  const s = {
+    qaStartYmd: '2026-09-22',
+    qaEndYmd: '2026-09-29',
+    prodYmd: '2026-09-30',
+  };
+  assert.doesNotThrow(() => milestoneFrom(rules, s, '2026-09-29'));
+  assert.doesNotThrow(() => rules.map((r) => ruleProblem(r)));
+  // 살아남은 규칙은 제 일을 한다 — 버리기가 멀쩡한 줄까지 먹지 않았다.
+  assert.equal(milestoneFrom(rules, s, '2026-09-29'), 'QA 종료');
+});
+
+test('설정 읽기 — 쓰레기만 있으면 빈 목록이다 (기본값으로 안 되돌린다)', () => {
+  /*
+    `[]` 와 다르다. `[]` 는 "컬럼이 아직 없다" 로 읽어 기본값으로 떨어지지만,
+    여기는 행이 값을 들고 있었고 그게 전부 못 읽을 것이었다는 뜻이다.
+    기본값으로 되돌리면 **DB 에 없는 알림을 화면이 있다고 말하게 된다.**
+  */
+  assert.deepEqual(rulesFromRow([null, 'nope']), []);
+});
+
 test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {
   const src = readFileSync(
     new URL('../lib/services/qa-router/repository.ts', import.meta.url),
@@ -5141,5 +5830,459 @@ test('상태 저장 — 실패 알림 ts 패치가 컬럼으로 간다', () => {
   assert.match(
     src,
     /if \(patch\.failAlertTs !== undefined\) row\.fail_alert_ts = patch\.failAlertTs;/
+  );
+});
+
+/*
+  ── 옮기기 전 글자를 지킨다 ──
+
+  알림을 한 모양으로 모으는 작업의 유일한 합격 기준은 "채널에 나가는 글자가
+  한 자도 달라지지 않는다" 이다. 구조를 바꾸는 일이지 문구를 바꾸는 일이
+  아니다.
+
+  이 테스트는 지금은 픽스처가 **있다는 것만** 지킨다. 실제 대조는 Task 6 에서
+  새 함수가 생긴 뒤에 붙는다. 먼저 넣는 이유는, 픽스처가 사라지거나 빈 채로
+  커밋되는 것을 막기 위해서다.
+
+  10개인 이유: `{진행률}` 이 비어 있는 갈래(원래 5개)와 차 있는 갈래
+  (`.withProgress` 5개)를 둘 다 찍는다. 비어 있는 쪽만 있으면 이 골든은
+  `{진행률}` 이 실제로 치환되는 경로를 한 번도 안 지나서, 나중에 그 변수
+  연결이 잘못돼도 이 테스트가 못 잡는다.
+
+  5개인 이유: 18시 요약은 다섯 조각(head, progress_line, body_text,
+  schedule_note, detail_lines)을 잇는다. `dailySummary.scheduleNote` 가
+  없으면 `schedule_note` 조각 — 사다리가 깨졌을 때 나가는 경고 줄 — 이
+  이 골든을 한 번도 안 지나서, 그 조각이 통째로 빠지거나 순서가 바뀌어도
+  이 테스트가 못 잡는다.
+
+  ── 10 → 14 로 는 이유 ──
+
+  둘을 나중에 더했다. 둘 다 **운영에서 실제로 도는데 골든이 한 번도 안
+  지나던** 자리다. 처음 10개는 글자가 그대로다 — 재녹화가 아니라 빠져 있던
+  측정을 더한 것이다.
+
+  · `dailySummary.inThread` — 18시 요약은 스레드 안이면 일정·참고 블록을
+    통째로 뺀다(`detail_lines := null`). 활성 차수에는 늘 스레드가 있으므로
+    (`tick.ts` 가 차수를 열 때 머리글을 올리고 `threadTs` 를 적는다) 사람이
+    실제로 보는 것은 이쪽이다. 처음 10개는 전부 스레드 밖 모양이었다.
+  · `dailySummary.scheduleNone` — `{일정경고이유}` 는 `invalid` 와 `none`
+    중 **고른 문장 전체**를 담는데, 처음 10개는 `invalid` 만 지난다. GW 는
+    대장 33개 중 0개가 파싱되는 대상이라 늘 `none` 이다.
+*/
+test('알림 골든 — 옮기기 전 메시지가 기록돼 있다', () => {
+  const raw = readFileSync(
+    new URL('./fixtures/alert-messages.json', import.meta.url),
+    'utf-8'
+  );
+  const f = JSON.parse(raw) as { messages: Record<string, string> };
+  const want = [
+    'dateAlert.prodToday',
+    'scheduleWarning.invalid',
+    'dailySummary.normal',
+    'dailySummary.failed',
+    'dailySummary.scheduleNote',
+    'dailySummary.inThread',
+    'dailySummary.scheduleNone',
+    'dateAlert.prodToday.withProgress',
+    'scheduleWarning.invalid.withProgress',
+    'dailySummary.normal.withProgress',
+    'dailySummary.failed.withProgress',
+    'dailySummary.scheduleNote.withProgress',
+    'dailySummary.inThread.withProgress',
+    'dailySummary.scheduleNone.withProgress',
+  ];
+  for (const k of want) {
+    assert.ok(f.messages[k], `${k} 이 픽스처에 없음`);
+    assert.ok(
+      f.messages[k].trim().length > 20,
+      `${k} 이 너무 짧다 — 빈 채로 기록된 것 같다`
+    );
+  }
+});
+
+/*
+  ── 마이그레이션이 크론을 하나로 바꾼다 ──
+
+  이 테스트는 SQL 을 실행하지 않는다. 실행 리허설은 버리는 로컬 Postgres 에
+  따로 돌리고(`scripts/diff-due-rules.mts`,
+  `scripts/record-alert-messages.mts --verify`), 여기서는 **그 파일이 되돌릴
+  수 없는 실수를 안 하는지**만 글자로 고정한다.
+*/
+test('알림 모델 — 마이그레이션이 크론을 하나로 바꾼다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 함정: 파일 안의 rollback 은 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
+  assert.match(sql, /unschedule\('qa-router-morning-brief'\)/);
+  assert.match(sql, /unschedule\('qa-router-daily-summary'\)/);
+  assert.match(sql, /schedule\('qa-router-alerts', '\*\/10 \* \* \* \*'/);
+  assert.match(sql, /drop column if exists alerts/);
+  assert.match(sql, /drop function if exists public\.qa_router_alert_on/);
+  // qa_router_hit_rule 은 안 건드린다 — 인자를 늘리면 오버로드가 생긴다
+  assert.doesNotMatch(sql, /function public\.qa_router_hit_rule/);
+  assert.match(sql, /add column if not exists alert_sent_on jsonb/);
+  // 고르기는 따로 뺀다 — TS dueRules 와 대조할 수 있어야 한다
+  assert.match(sql, /function public\.qa_router_due_rules/);
+  // CHECK 가 새 모양을 받게 먼저 갈아 끼운다. 안 하면 update 가 한 줄도 안 들어간다.
+  const validAt = sql.indexOf('function public.qa_router_valid_alert_rules');
+  const firstUpdate = sql.indexOf('update public.qa_router_configs');
+  assert.ok(validAt > 0, 'CHECK 검사 함수를 안 바꿨다');
+  assert.ok(validAt < firstUpdate, 'CHECK 를 update 보다 먼저 갈아야 한다');
+
+  /*
+    기본 경고 문구에 {일정경고이유} 가 반드시 있어야 한다.
+
+    `checkAlertRules` 의 필수 변수 검사는 `template` 을 **덮어썼을 때만** 돈다
+    (`if (r.template !== undefined)`). 안 덮어쓴 대상은 기본 문구를 쓰므로,
+    기본 문구에 이유가 없으면 "일정 문제" 만 남고 무엇이 문제인지 사라진다.
+    저장 차단이 못 막는 자리라 여기서 막는다.
+  */
+  const warnTpl = sql.match(/qa_router_schedule_warning_template[\s\S]*?\$\$;/);
+  assert.ok(warnTpl, '기본 경고 문구 함수가 없다');
+  assert.match(warnTpl[0], /\{일정경고이유\}/);
+
+  // morningBrief 는 09:10 루프 전체의 마스터 스위치였다. 껐던 대상이
+  // 갑자기 알림을 받기 시작하지 않도록 규칙을 전부 꺼야 한다.
+  // (브리프는 `/s` 플래그를 썼지만 이 레포의 tsconfig target 이 ES2017 이라
+  //  그 플래그가 TS1501 로 막힌다. `[\s\S]` 로 같은 뜻을 적는다.)
+  assert.match(sql, /morningBrief[\s\S]*::boolean, true\) = false/);
+  // 경고는 목록 뒤에 붙는다 — 같은 시각에서 날짜 알림이 이기던 순서를 지킨다
+  const warnAt = sql.indexOf("'scheduleWarning'");
+  const concat = sql.indexOf('alert_rules || jsonb_build_array');
+  assert.ok(concat > 0 && warnAt > concat, '경고는 뒤에 붙여야 한다');
+
+  /*
+    브리프 밖에서 찾은 두 구멍. 둘 다 "알림이 조용히 멎는" 쪽이라 같이 막는다.
+
+    ① `qa_router_wants_qa_alerts` 는 `r.value->>'anchor'` 를 읽었다. 앵커가
+       `when` 안으로 들어가면 모든 대상에서 거짓이 되어 일정 경고와 18시
+       요약의 일정 한 줄이 통째로 사라진다.
+    ② `qa_router_cycles.alert_rules_override` 는 `qa_router_alert_rules_for`
+       가 설정값보다 **먼저** 보는 자리다. 안 옮기면 덮어쓰기가 걸린 차수만
+       옛 모양으로 남아 그 차수의 알림이 전부 멎는다.
+  */
+  assert.match(sql, /function public\.qa_router_wants_qa_alerts/);
+  assert.match(sql, /update public\.qa_router_cycles/);
+
+  /*
+    스레드 안에서는 일정·참고 블록이 통째로 빠져야 한다. 활성 차수에는 늘
+    스레드가 있으므로(`tick.ts` 가 차수를 열 때 `threadTs` 를 적는다) 이쪽이
+    운영에서 **평소 모양**이고, 머리말을 글자로 박아 두면 그 두 줄만 남는다.
+  */
+  const sumTpl = sql.match(/qa_router_daily_summary_template[\s\S]*?\$\$;/);
+  assert.ok(sumTpl, '18시 요약 기본 문구 함수가 없다');
+  assert.match(sumTpl[0], /\{일정머리말\}/);
+  assert.match(sumTpl[0], /\{참고머리말\}/);
+  // 글자로 박혀 있으면 그 줄은 절대 안 사라진다
+  assert.doesNotMatch(sumTpl[0], /'\*일정\*'/);
+  assert.doesNotMatch(sumTpl[0], /'\*참고\*'/);
+  // 스레드 안에서는 내용 다섯 키를 지운다 — strip_nulls 로 덮으면 안 지워진다
+  assert.match(
+    sql,
+    /vars := vars - array\['QA종료일', '운영배포일', '상세링크',\s*'배포대장링크', 'fixVersion'\]/
+  );
+  // 새 대상도 만들 수 있어야 한다 — 컬럼 기본값이 옛 모양이면 CHECK 에 걸려
+  // insert 가 통째로 죽는다.
+  assert.match(sql, /alter column alert_rules set default/);
+});
+
+/*
+  옛 규칙은 앵커만 있었고 시각이 없었다. 09:10 크론이 그것들만 돌렸기
+  때문이다. 시각이 데이터가 되면서 그 사실을 값으로 적어 줘야 한다.
+*/
+test('알림 변환 — 옛 규칙은 09:10 앵커 규칙이 된다', () => {
+  const v2 = toAlertRuleV2({
+    id: 'qaEnd',
+    anchor: 'qa_end',
+    offset: 0,
+    shift: 'next_workday',
+    label: 'QA 종료',
+    enabled: true,
+    template: '본문',
+  });
+  assert.equal(v2.at, '09:10');
+  assert.deepEqual(v2.when, {
+    kind: 'anchor',
+    anchor: 'qa_end',
+    offset: 0,
+    shift: 'next_workday',
+  });
+  // 나머지는 그대로 넘어와야 한다 — 옮기는 일이지 바꾸는 일이 아니다
+  assert.equal(v2.id, 'qaEnd');
+  assert.equal(v2.label, 'QA 종료');
+  assert.equal(v2.enabled, true);
+  assert.equal(v2.template, '본문');
+});
+
+test('알림 변환 — 본문이 없으면 없는 채로 둔다', () => {
+  const v2 = toAlertRuleV2({
+    id: 'x',
+    anchor: 'prod',
+    offset: 0,
+    shift: 'none',
+    label: 'ㄱ',
+    enabled: false,
+  });
+  assert.equal(v2.template, undefined);
+  assert.equal(v2.enabled, false);
+});
+
+const R = (o: Partial<AlertRule> & { id: string }): AlertRule => ({
+  at: '09:10',
+  when: { kind: 'activeCycle' },
+  label: o.id,
+  enabled: true,
+  ...o,
+});
+
+/** 2026-10-07 은 수요일, 10-10 은 토요일. */
+const BASE = {
+  todayYmd: '2026-10-07',
+  nowHm: '09:20',
+  sentOn: {} as Record<string, string>,
+  isDue: () => true,
+};
+
+test('알림 고르기 — 시각이 지나야 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' }), R({ id: 'b', at: '18:00' })];
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '09:20' }).map((r) => r.id),
+    ['a']
+  );
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '18:05' }).map((r) => r.id),
+    ['a', 'b']
+  );
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '08:00' }).map((r) => r.id),
+    []
+  );
+});
+
+/*
+  지금은 09:10 크론을 놓치면 그날 알림이 통째로 없다. "오늘 보냈나" 를
+  기록하면 늦게 깨어나도 그날 몫이 나간다. 그게 크론을 하나로 바꾸며
+  덤으로 얻는 것이다.
+*/
+test('알림 고르기 — 늦게 깨어나도 그날 몫이 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' })];
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '14:30' }).map((r) => r.id),
+    ['a']
+  );
+});
+
+test('알림 고르기 — 오늘 이미 보냈으면 안 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' })];
+  const sentOn = { a: '2026-10-07' };
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, sentOn }).map((r) => r.id),
+    []
+  );
+  // 어제 보낸 것은 오늘 다시 나간다
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, sentOn: { a: '2026-10-06' } }).map((r) => r.id),
+    ['a']
+  );
+});
+
+/*
+  옛 규칙은 "같은 날에 둘이 걸리면 위엣것만" 이었다. 이유는 "같은 차수
+  이야기가 두 번 오니까". 시각이 다른 규칙은 서로 다른 이야기라 둘 다
+  나가야 하므로, 그 규칙이 **같은 시각끼리**로 좁아진다.
+*/
+test('알림 고르기 — 같은 시각에 둘이면 위엣것만', () => {
+  const rules = [R({ id: 'a', at: '09:10' }), R({ id: 'b', at: '09:10' })];
+  assert.deepEqual(
+    dueRules(rules, BASE).map((r) => r.id),
+    ['a']
+  );
+});
+
+test('알림 고르기 — 시각이 다르면 둘 다 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' }), R({ id: 'b', at: '18:00' })];
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, nowHm: '18:05' }).map((r) => r.id),
+    ['a', 'b']
+  );
+});
+
+test('알림 고르기 — 꺼진 규칙은 세지도 않는다', () => {
+  // 꺼진 것이 위에 있어도 아래 것이 그 시각을 대표한다
+  const rules = [
+    R({ id: 'a', at: '09:10', enabled: false }),
+    R({ id: 'b', at: '09:10' }),
+  ];
+  assert.deepEqual(
+    dueRules(rules, BASE).map((r) => r.id),
+    ['b']
+  );
+});
+
+test('알림 고르기 — 조건이 거짓이면 안 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' })];
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, isDue: () => false }).map((r) => r.id),
+    []
+  );
+});
+
+/*
+  지금 두 크론이 `1-5` 라 평일만 돈다. 크론이 매일 도는 것으로 바뀌므로
+  그 제한을 여기로 옮긴다. 안 옮기면 토요일 아침에 알림이 나간다.
+*/
+test('알림 고르기 — 주말엔 아무것도 안 나간다', () => {
+  const rules = [R({ id: 'a', at: '09:10' })];
+  // 2026-10-10 토요일, 10-11 일요일
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, todayYmd: '2026-10-10' }).map((r) => r.id),
+    []
+  );
+  assert.deepEqual(
+    dueRules(rules, { ...BASE, todayYmd: '2026-10-11' }).map((r) => r.id),
+    []
+  );
+});
+
+/*
+  ── 화면도 같은 굶김을 알아야 한다 ──
+
+  `qa_router_due_rules` 는 같은 `at` 에서 목록 **앞엣것** 하나만 남기고,
+  종류를 안 가린다. 그래서 조건형(`activeCycle`·`scheduleUnusable`)이 앞에
+  있으면 조건이 맞는 날 같은 시각의 뒷 규칙이 통째로 굶는다.
+
+  마이그레이션이 `scheduleWarning@09:10` 을 목록 **끝에** 붙이고 설정 화면의
+  `날짜 알림 추가` 가 또 09:10 짜리를 그 뒤에 붙이므로, 사람이 새로 만든
+  날짜 알림이 정확히 그 자리에 선다. 그런데 `alertRuleRows` 는 조건형을
+  겹침 셈에서 아예 빼고 있어, 화면이 `이번 차수 MM-DD 09:10 에 울립니다`
+  라고 단언하고 실제로는 안 울리는 조합이 만들어졌다.
+
+  조건형은 날짜가 없으니 `*@시각` 한 칸을 잡는다 — "어느 날이든 걸릴 수
+  있다" 는 뜻이다. 반대 방향(앵커가 조건형을 가림)은 안 센다: 앵커는 하루만
+  그 시각을 쓰므로 나머지 모든 날에 대해 거짓말이 되기 때문이다.
+*/
+const ROWS_SCHEDULE = {
+  qaStartYmd: '2026-10-05',
+  qaEndYmd: '2026-10-06',
+  prodYmd: '2026-10-07',
+};
+const PROD_TODAY = {
+  kind: 'anchor',
+  anchor: 'prod',
+  offset: 0,
+  shift: 'none',
+} as const;
+
+test('겹침 셈 — 앞선 조건형이 같은 시각의 날짜 알림을 가린다', () => {
+  const rows = alertRuleRows(
+    [
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+      }),
+      R({ id: 'custom1', at: '09:10', when: PROD_TODAY }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.equal(rows[0].shadowed, false);
+  assert.equal(rows[1].day, '2026-10-07');
+  assert.equal(rows[1].shadowed, true, '09:10 을 조건형이 이미 가져갔다');
+  assert.equal(
+    rows[1].shadowedBy?.id,
+    'scheduleWarning',
+    '이름을 댈 수 있어야 한다'
+  );
+});
+
+test('겹침 셈 — 시각이 다르면 조건형은 아무도 안 가린다', () => {
+  const rows = alertRuleRows(
+    [
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+      }),
+      R({ id: 'custom1', at: '18:00', when: PROD_TODAY }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.deepEqual(
+    rows.map((r) => r.shadowed),
+    [false, false]
+  );
+});
+
+test('겹침 셈 — 꺼진 조건형은 자리를 안 잡는다', () => {
+  const rows = alertRuleRows(
+    [
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+        enabled: false,
+      }),
+      R({ id: 'custom1', at: '09:10', when: PROD_TODAY }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.equal(rows[1].shadowed, false, '안 나가는 줄은 다른 줄을 안 가린다');
+});
+
+test('겹침 셈 — 앵커는 조건형을 안 가린다 (하루치라 거짓말이 된다)', () => {
+  const rows = alertRuleRows(
+    [
+      R({ id: 'custom1', at: '09:10', when: PROD_TODAY }),
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+      }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.deepEqual(
+    rows.map((r) => r.shadowed),
+    [false, false]
+  );
+});
+
+test('겹침 셈 — 조건형 둘이 같은 시각이면 뒤엣것이 가려진다', () => {
+  const rows = alertRuleRows(
+    [
+      R({ id: 'dailySummary', at: '09:10', when: { kind: 'activeCycle' } }),
+      R({
+        id: 'scheduleWarning',
+        at: '09:10',
+        when: { kind: 'scheduleUnusable' },
+      }),
+    ],
+    ROWS_SCHEDULE
+  );
+  assert.equal(rows[1].shadowed, true);
+  assert.equal(rows[1].shadowedBy?.id, 'dailySummary');
+});
+
+/*
+  마이그레이션이 깔아 두는 배치(18:00 요약 + 09:10 경고 + 09:10 날짜 알림
+  셋)에서는 **아무도 안 가려져야** 한다. 경고가 목록 끝에 붙기 때문이다.
+  이게 깨지면 새 대상이 열리자마자 화면이 겹침 경고를 띄운다.
+*/
+test('겹침 셈 — 기본 다섯 규칙 배치에서는 겹침이 없다', () => {
+  const rows = alertRuleRows(
+    DEFAULT_ALERT_RULES.map((r) => ({ ...r })),
+    ROWS_SCHEDULE
+  );
+  assert.deepEqual(
+    rows.filter((r) => r.shadowed).map((r) => r.rule.id),
+    []
   );
 });

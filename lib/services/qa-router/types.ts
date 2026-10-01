@@ -171,32 +171,20 @@ export const JUDGE_TIER_KIND: Record<JudgeTier, '사실' | '추측'> = {
   ref_owner: '사실',
 };
 
-/**
- * 정기 보고 두 종. 날짜와 무관하게 시각에 맞춰 나간다.
- *
- * 날짜 알림 네 종은 여기 없다 — 그건 `AlertRule` 목록으로 옮겼다.
- * 둘을 한 목록에 두면 "추가" 가 무엇을 뜻하는지 흐려진다. 아침 브리핑을
- * 하나 더 만드는 것과 알림 날짜를 하나 더 만드는 것은 다른 일이다.
- */
-export type AlertKind = 'dailySummary' | 'morningBrief';
+/*
+  ── `AlertKind`·`ALERT_KINDS`·`AlertSwitches` 를 지웠다 ──
 
-export const ALERT_KINDS: readonly AlertKind[] = [
-  'dailySummary',
-  'morningBrief',
-];
+  18:00 마감 요약과 09:10 아침 브리핑을 `alerts` 컬럼의 on/off 두 칸으로
+  따로 들고 있었다. 그래서 그 둘만 **본문이 코드에 박혀 있었고** 화면이
+  "형태가 고정입니다" 라고 적어야 했다.
 
-export const ALERT_LABEL: Record<AlertKind, string> = {
-  dailySummary: '18시 마감 요약',
-  morningBrief: '09:10 아침 브리핑',
-};
-
-export const ALERT_DESC: Record<AlertKind, string> = {
-  dailySummary: '그날 몇 건을 알렸고 문제가 있었는지. 매일 18시.',
-  morningBrief: '아래 날짜 알림이 걸린 날 아침에 보냅니다. 평일 09:10.',
-};
+  지금은 둘 다 `alertRules` 안의 규칙 하나다 — `at`(몇 시) + `when`(무슨
+  조건) + `template`(무슨 글자). 종류를 가르던 타입이 사라지고, 날짜 알림과
+  같은 편집기가 그대로 붙는다. 조건의 종류는 `AlertWhen` 이 말한다.
+*/
 
 // ─────────────────────────────────────────────────────────────
-// 날짜 알림 규칙
+// 알림 규칙
 // ─────────────────────────────────────────────────────────────
 
 /** 무엇을 기준으로 세는가. */
@@ -251,9 +239,221 @@ export const TEMPLATE_VARS = [
   { name: '완료건수', desc: '7' },
 ] as const;
 
-export const TEMPLATE_VAR_NAMES: readonly string[] = TEMPLATE_VARS.map(
-  (v) => v.name
-);
+/** 차수 이야기. 세 종류가 다 쓴다. */
+const CYCLE_VARS = [
+  '기호',
+  '차수',
+  '진행률',
+  'QA종료일',
+  '운영배포일',
+  '상세링크',
+  '배포대장링크',
+  'fixVersion',
+  '기획건수',
+  '완료건수',
+] as const;
+
+/**
+ * 이 종류가 쓸 수 있는 변수.
+ *
+ * 한 목록으로 두면 날짜 알림 본문에 `{알림건수}` 를 쓸 수 있게 되는데,
+ * 거기서는 값이 비어 `renderTemplate` 규칙에 따라 **그 줄이 통째로
+ * 사라진다.** 저장은 되는데 알림에서 한 줄이 없어지고 아무도 모른다.
+ * 가르면 저장할 때 "모르는 변수" 로 막힌다.
+ */
+export function varsFor(when: AlertWhen): readonly string[] {
+  switch (when.kind) {
+    case 'anchor':
+      return [...CYCLE_VARS, '문구'];
+    case 'activeCycle':
+      return [
+        ...CYCLE_VARS,
+        '대상이름',
+        '상태문구',
+        '알림건수',
+        '재배정건수',
+        '마지막확인',
+        '일정경고이유',
+        /*
+          ── 머리말이 왜 변수인가 ──
+
+          18:00 요약은 **스레드 안이면 일정·참고 블록을 통째로 뺀다** — 같은
+          내용이 스레드 루트 메시지에 이미 있기 때문이다. 활성 차수에는 늘
+          스레드가 있으므로(`tick.ts` 가 차수를 열 때 머리글을 올리고
+          `threadTs` 를 적는다) 그쪽이 **평소 모양**이다.
+
+          `*일정*`·`*참고*` 를 글자로 박아 두면 그 줄에 변수가 없어
+          `renderTemplate` 의 "빈 변수가 있는 줄은 버린다" 규칙이 안 걸리고,
+          스레드 안에서 머리말 두 줄만 덩그러니 남는다. 변수로 두면 내용
+          줄들과 같은 규칙으로 같이 사라진다.
+
+          날짜 알림(anchor)에는 이 조건이 없어서 블록이 늘 나간다. 그래서
+          이 둘은 activeCycle 전용이다.
+        */
+        '일정머리말',
+        '참고머리말',
+      ];
+    case 'scheduleUnusable':
+      return [...CYCLE_VARS, '대상이름', '일정경고이유'];
+  }
+}
+
+/**
+ * `CYCLE_VARS` 밖 변수의 설명. 편집기의 변수 메뉴가 읽는다.
+ *
+ * `TEMPLATE_VARS` 는 차수 이야기 열한 개만 담는다 — 본문을 가진 알림이
+ * 날짜 알림뿐이던 때의 목록이다. 정기 보고가 같은 편집기로 오면서
+ * `varsFor` 가 내는 이름 **전부**에 설명이 있어야 한다. 설명 없는 이름이
+ * 메뉴에 뜨면 쓸지 말지를 코드를 읽어야 안다.
+ *
+ * 값의 예시는 SQL 의 `qa_router_vars` 가 실제로 넣는 것이다
+ * (`20260930_qa_router_alert_model.sql`).
+ */
+const EXTRA_VAR_DESC: Record<string, string> = {
+  대상이름: '이 라우터 대상의 이름 · GW',
+  상태문구: '머리말 전체 · 오늘 마감 · 실패 2건',
+  알림건수: '괄호까지 한 덩어리 · 3건 (Jira 변경 1건)',
+  재배정건수: '맨 숫자. 없는 날은 빈 값이라 그 줄이 빠진다 · 1',
+  마지막확인: '마지막으로 확인한 KST 시각 · 17:50',
+  일정경고이유: 'QA 기간을 왜 못 쓰는지 한 문장',
+  일정머리말: '*일정* · 스레드 안이면 비어 아래 줄들과 같이 사라진다',
+  참고머리말: '*참고* · 스레드 안이면 비어 아래 줄들과 같이 사라진다',
+};
+
+/**
+ * 이 종류의 변수 메뉴. **하드코딩한 목록을 쓰지 않는다.**
+ *
+ * 종류가 넷째로 늘면 `varsFor` 만 고쳐도 화면이 따라온다. 편집기가 제
+ * 목록을 따로 들면 그 자리만 조용히 옛 변수를 권한다.
+ */
+export function varPaletteFor(
+  when: AlertWhen
+): { name: string; desc: string }[] {
+  return varsFor(when).map((name) => ({
+    name,
+    desc:
+      TEMPLATE_VARS.find((v) => v.name === name)?.desc ??
+      EXTRA_VAR_DESC[name] ??
+      '',
+  }));
+}
+
+/**
+ * 이 종류의 본문에 **반드시 있어야 하는** 변수.
+ *
+ * 경고 본문에서 `{일정경고이유}` 를 빼면 "일정 문제" 만 남고 무엇이
+ * 문제인지 사라진다. 조용한 실패로 되돌아가는 길이다.
+ *
+ * 특별 취급이 아니라 이미 있는 저장 차단 장치에 규칙 하나를 더하는 것이다.
+ * 화면도 같고 빨간 문구도 같다.
+ */
+export function requiredVars(when: AlertWhen): readonly string[] {
+  return when.kind === 'scheduleUnusable' ? ['일정경고이유'] : [];
+}
+
+/** `09:10` 모양. 화면의 시각 칸도 이것으로 미리 막는다. */
+export const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** 본문에 쓰인 변수 이름들. 중복은 한 번만 센다. */
+export function usedVars(template: string): string[] {
+  return [...new Set([...template.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1]))];
+}
+
+/**
+ * 알림 규칙 배열 검증. 문제가 있으면 그 사유, 없으면 null.
+ *
+ * `at`(몇 시) + `when`(무슨 조건) + 종류별 변수 집합을 본다. **저장 경로가
+ * 쓰는 함수는 이것 하나다** — 설정 화면도, 차수 덮어쓰기 화면도, 저장
+ * 라우트 둘도 모두 이것을 부른다. 쌍둥이를 두지 않는 것이 요점이다. 이
+ * 레포는 같은 질문에 세 답이 있어 어느 게 맞는지 아무도 모르던 사고를 겪었다.
+ *
+ * DB CHECK(`qa_router_valid_alert_rules`)가 형태를 한 번 더 막지만, 제약이
+ * 내는 말은 `violates check constraint "..."` 다. 어느 줄의 무엇이 문제인지
+ * 사람이 알 수 있게 여기서 먼저 가른다.
+ */
+export function checkAlertRules(v: unknown): string | null {
+  if (!Array.isArray(v)) return '알림 규칙 형식이 잘못됐습니다.';
+  if (v.length === 0) return '알림 규칙이 하나도 없습니다.';
+  if (v.length > 20) return '알림 규칙은 20개까지입니다.';
+
+  const anchors: AlertAnchor[] = ['qa_start', 'qa_end', 'prod'];
+  const shifts: AlertShift[] = ['none', 'next_workday', 'prev_workday'];
+  const seen = new Set<string>();
+
+  for (const [i, raw] of v.entries()) {
+    const at = `${i + 1}번째 알림`;
+    if (typeof raw !== 'object' || raw === null)
+      return `${at} 형식이 잘못됐습니다.`;
+    const r = raw as Record<string, unknown>;
+
+    const label = typeof r.label === 'string' ? r.label.trim() : '';
+    if (!label) return `${at}의 문구를 입력해 주세요.`;
+
+    const id = typeof r.id === 'string' ? r.id.trim() : '';
+    if (!id) return `${at}의 식별자가 비었습니다.`;
+    if (seen.has(id)) return `알림 식별자가 겹칩니다: ${id}`;
+    seen.add(id);
+
+    if (typeof r.at !== 'string' || !HM_RE.test(r.at))
+      return `${at}의 시각은 09:10 처럼 두 자리씩 적어 주세요.`;
+
+    if (typeof r.enabled !== 'boolean')
+      return `${at}의 사용 여부가 잘못됐습니다.`;
+
+    const w = r.when as AlertWhen | undefined;
+    if (!w || typeof w !== 'object') return `${at}의 조건이 없습니다.`;
+    if (w.kind === 'anchor') {
+      if (!anchors.includes(w.anchor)) return `${at}의 기준일이 잘못됐습니다.`;
+      if (!shifts.includes(w.shift)) return `${at}의 주말 처리가 잘못됐습니다.`;
+      if (!Number.isInteger(w.offset) || w.offset < -60 || w.offset > 60)
+        return `${at}의 날짜 차이는 -60 ~ 60일 사이 정수여야 합니다.`;
+    } else if (w.kind !== 'activeCycle' && w.kind !== 'scheduleUnusable') {
+      return `${at}의 조건 종류가 잘못됐습니다.`;
+    }
+
+    if (r.template !== undefined) {
+      if (typeof r.template !== 'string')
+        return `${at}의 템플릿 형식이 잘못됐습니다.`;
+      if (!r.template.trim()) return `${at}의 본문이 비었습니다.`;
+
+      const allowed = varsFor(w);
+      const used = usedVars(r.template);
+      const bad = used.filter((k) => !allowed.includes(k));
+      if (bad.length)
+        return `${at}에 모르는 변수가 있습니다: ${bad.map((x) => `{${x}}`).join(', ')}`;
+
+      const missing = requiredVars(w).filter((k) => !used.includes(k));
+      if (missing.length)
+        return `${at}에는 ${missing.map((x) => `{${x}}`).join(', ')} 가 반드시 있어야 합니다.`;
+    }
+  }
+  return null;
+}
+
+/**
+ * 이 규칙 하나가 저장을 막는 이유. 없으면 null.
+ *
+ * **`checkAlertRules` 와 같은 기준을 줄마다 미리 말하는 것뿐이다.**
+ * 저장 차단의 판단은 그 함수가 하고(화면이 그대로 부른다), 여기는
+ * "어느 줄이 왜" 를 목록에서 보이게 한다. 기준을 따로 만들면 화면은
+ * 통과시키는데 서버가 거절하는 짝이 생긴다.
+ *
+ * 설정 화면과 차수 덮어쓰기 화면이 같이 쓴다 — 한쪽만 막으면 같은 값이
+ * 한 화면에서는 빨갛고 다른 화면에서는 저장을 눌러야 알게 된다.
+ */
+export function ruleProblem(r: AlertRule): string | null {
+  if (!r.label.trim()) return '이름이 비었습니다';
+  if (!HM_RE.test(r.at)) return '시각은 09:10 처럼 두 자리씩 적어 주세요';
+  if (r.template === undefined) return null;
+  if (!r.template.trim()) return '본문이 비었습니다';
+  const used = usedVars(r.template);
+  const bad = used.filter((k) => !varsFor(r.when).includes(k));
+  if (bad.length) return `모르는 변수 · ${bad.map((x) => `{${x}}`).join(', ')}`;
+  const missing = requiredVars(r.when).filter((k) => !used.includes(k));
+  if (missing.length)
+    return `${missing.map((x) => `{${x}}`).join(', ')} 가 반드시 있어야 합니다`;
+  return null;
+}
 
 /**
  * 템플릿 한 줄의 규칙: **값이 빈 변수가 있으면 줄째로 빠진다.**
@@ -275,19 +475,48 @@ export function renderTemplate(
   return out.join('\n');
 }
 
-/** 템플릿에 쓰인 모르는 변수. 비어 있으면 저장해도 된다. */
-export function unknownVars(template: string): string[] {
-  const used = [...template.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1]);
-  return [...new Set(used)].filter((k) => !TEMPLATE_VAR_NAMES.includes(k));
-}
-
-export interface AlertRule {
-  /** 규칙을 구분하는 값. 화면의 key 이자 기본 4종을 알아보는 이름이다. */
+/**
+ * 옛 모양의 알림 규칙. **새로 만들지 않는다.**
+ *
+ * 20260930 마이그레이션이 DB 의 규칙을 전부 새 모양으로 바꿨지만, 그 뒤에
+ * 복원된 백업이나 손으로 넣은 행이 옛 모양일 수 있다. `toAlertRuleV2` 가
+ * 그런 행을 받아 화면이 죽지 않게 한다.
+ */
+export interface LegacyAlertRule {
   id: string;
   anchor: AlertAnchor;
-  /** 기준일로부터 며칠. 음수가 미리 알리는 쪽이다. */
   offset: number;
   shift: AlertShift;
+  label: string;
+  enabled: boolean;
+  template?: string;
+}
+
+/**
+ * 이 알림이 나갈 조건.
+ *
+ * 세 가지가 다른 것은 **언제 보느냐**뿐이다. 앵커와 오프셋은 조건의 한
+ * 종류일 뿐이고, 켜고 끄기와 문구는 셋이 같다.
+ */
+export type AlertWhen =
+  | {
+      kind: 'anchor';
+      anchor: AlertAnchor;
+      /** 기준일로부터 며칠. 음수가 미리 알리는 쪽이다. */
+      offset: number;
+      shift: AlertShift;
+    }
+  /** 활성 차수가 있으면. 18:00 마감 요약이 쓴다. */
+  | { kind: 'activeCycle' }
+  /** QA 기간을 못 쓸 때. 09:10 일정 경고가 쓴다. */
+  | { kind: 'scheduleUnusable' };
+
+export interface AlertRule {
+  /** 규칙을 구분하는 값. 화면의 key 이자 `alert_sent_on` 의 키다. */
+  id: string;
+  /** 몇 시에 보내나. KST `HH:MM`. */
+  at: string;
+  when: AlertWhen;
   /** 이 알림의 이름. `{days}` 는 기준일까지 남은 일수로 바뀐다. */
   label: string;
   enabled: boolean;
@@ -295,7 +524,8 @@ export interface AlertRule {
    * 채널에 나갈 본문. `{변수}` 를 값으로 바꾼다.
    *
    * 알림마다 따로 갖는다 — "오늘 배포" 와 "3일 뒤 배포" 는 같은 말을 할
-   * 이유가 없다. 비어 있으면 기본 템플릿을 쓴다.
+   * 이유가 없다. 없으면 종류별 기본 본문을 쓴다 — 고르는 쪽은 SQL 이다
+   * (`coalesce(hit->>'template', …)`).
    */
   template?: string;
 }
@@ -318,12 +548,35 @@ export const DEFAULT_TEMPLATE = [
 ].join('\n');
 
 /**
- * 기본 규칙 셋. **DB 컬럼 기본값과 같은 값이어야 한다**
- * (`20260915_qa_router_drop_prod_soon.sql`).
+ * 기본 규칙 셋. **정본은 DB 컬럼 기본값이다**
+ * (`20260930_qa_router_alert_model.sql` ⑤c — `alert_rules` 의 default).
+ * 둘이 갈리면 DB 쪽이 맞다. 여기는 그것을 베껴 둔 폴백이다.
  *
- * 컬럼이 아직 없는 DB 에 새 코드가 붙는 창에서 쓰는 폴백이다. 여기가
- * 비면 화면이 "알림 없음" 을 그리는데, 실제로는 SQL 이 제 기본값으로
- * 알림을 보내고 있어서 화면과 동작이 어긋난다.
+ * ── 왜 사본이 필요한가 ──
+ *
+ * `toConfig` 가 `alert_rules` 를 **빈 채로** 읽었을 때만 닿는다. 컬럼이 아직
+ * 없는 DB 에 새 코드가 붙는 창이 실제로 있고, 그때 여기가 비면 화면은
+ * "알림 없음" 을 그리는데 SQL 은 제 기본값으로 알림을 보낸다 — 화면과 동작이
+ * 어긋난다.
+ *
+ * ── 왜 다섯인가 ──
+ *
+ * 20260930 이전에는 셋(앵커만)이었다. 18:00 마감 요약과 09:10 일정 경고는
+ * 규칙이 아니라 `alerts` 컬럼의 스위치였기 때문이다. 그 컬럼이 없어지면서
+ * 둘도 규칙이 됐고 DB 기본값은 다섯이 됐다. 여기를 셋으로 두면 "기본 알림이
+ * 무엇이냐" 에 답이 둘이 된다 — 이 레포가 검증 쌍둥이로 겪은 사고가 그것이다.
+ *
+ * **순서가 곧 우선순위다.** 같은 시각에 여럿이 걸리면 앞엣것이 이긴다
+ * (`dueRules` · `qa_router_due_rules`). 09:10 일정 경고가 맨 뒤인 이유가
+ * 그것이다 — 날짜 알림이 걸린 날엔 경고가 안 나가던 옛 동작을 보존한다.
+ *
+ * ── 정기 보고 둘에 `template` 이 없는 이유 ──
+ *
+ * 그 둘의 기본 본문은 SQL 에만 있다(`qa_router_daily_summary_template` ·
+ * `qa_router_schedule_warning_template`). 여기에 옮겨 적으면 글자 사본이
+ * 하나 더 생기는데, 그 사본은 아무도 안 보는 폴백 자리에서 조용히 갈린다.
+ * 비워 두면 디스패처도 미리보기도 종류별 기본 본문을 고르므로
+ * (`coalesce(hit->>'template', …)`) 나가는 글자는 같다.
  *
  * ── `{days}일 뒤 운영 배포` 를 뺐다 ──
  *
@@ -340,44 +593,48 @@ export const DEFAULT_TEMPLATE = [
 export const DEFAULT_ALERT_RULES: readonly AlertRule[] = [
   {
     id: 'prodToday',
-    anchor: 'prod',
-    offset: 0,
-    shift: 'none',
+    at: '09:10',
+    when: { kind: 'anchor', anchor: 'prod', offset: 0, shift: 'none' },
     label: '오늘 운영 배포',
     enabled: true,
     template: DEFAULT_TEMPLATE,
   },
   {
     id: 'qaStart',
-    anchor: 'qa_start',
-    offset: 0,
-    shift: 'none',
+    at: '09:10',
+    when: { kind: 'anchor', anchor: 'qa_start', offset: 0, shift: 'none' },
     label: '오늘 QA 시작',
     enabled: true,
     template: DEFAULT_TEMPLATE,
   },
   {
     id: 'qaEnd',
-    anchor: 'qa_end',
-    offset: 0,
-    shift: 'next_workday',
+    at: '09:10',
+    when: {
+      kind: 'anchor',
+      anchor: 'qa_end',
+      offset: 0,
+      shift: 'next_workday',
+    },
     label: 'QA 종료',
     enabled: true,
     template: DEFAULT_TEMPLATE,
   },
+  {
+    id: 'dailySummary',
+    at: '18:00',
+    when: { kind: 'activeCycle' },
+    label: '마감 요약',
+    enabled: true,
+  },
+  {
+    id: 'scheduleWarning',
+    at: '09:10',
+    when: { kind: 'scheduleUnusable' },
+    label: '일정 경고',
+    enabled: true,
+  },
 ];
-
-/**
- * 키가 없으면 켜진 것으로 본다.
- *
- * 컬럼을 더한 날 이전 행에는 키가 없다. 없는 걸 "꺼짐" 으로 읽으면
- * 마이그레이션 하나로 알림이 통째로 멎는다 — 기본값은 늘 기존 동작이다.
- */
-export type AlertSwitches = Partial<Record<AlertKind, boolean>>;
-
-export function alertOn(alerts: AlertSwitches, kind: AlertKind): boolean {
-  return alerts[kind] !== false;
-}
 
 export interface QaRouterConfig {
   id: string;
@@ -463,9 +720,12 @@ export interface QaRouterConfig {
 
   /** 판정 단계 순서. 앞에서부터 부르고 처음 답이 나오면 멈춘다. */
   judgeTiers: JudgeTier[];
-  /** 정기 보고 두 종의 on/off. 키가 없으면 켜진 것으로 본다. */
-  alerts: AlertSwitches;
-  /** 날짜 알림 규칙. 위에서부터 보고 처음 맞는 것 하나만 알린다. */
+  /**
+   * 알림 규칙 전부. 날짜 알림도 정기 보고도 여기 한 목록에 있다.
+   *
+   * 같은 `at` 에 여럿이 걸리면 목록 앞엣것 하나만 나간다 — 배열 순서가
+   * 곧 우선순위다 (`dueRules`, `qa_router_due_rules`).
+   */
   alertRules: AlertRule[];
 
   /**
@@ -512,7 +772,6 @@ export type QaRouterConfigInput = Pick<
       | 'quietHours'
       | 'tickIntervalSeconds'
       | 'judgeTiers'
-      | 'alerts'
       | 'alertRules'
       | 'planIssueTypeId'
       | 'devIssueTypeId'
@@ -638,6 +897,14 @@ export interface QaRouterState {
    * 던지지 않는 것과 남기지 않는 것은 다른 결정이다.
    */
   sideEffects: Record<string, SideEffectResult>;
+  /**
+   * 규칙 id → 마지막으로 보낸 날.
+   *
+   * 크론이 10분마다 도므로 "오늘 이 규칙을 보냈나" 를 여기서 본다.
+   * 시각마다 크론이 있던 때는 "깨어났다" 가 곧 "보낼 때다" 였는데,
+   * 하나로 합치면서 그 등식이 깨졌다.
+   */
+  alertSentOn: Record<string, string>;
   updatedAt: string;
 }
 
@@ -840,71 +1107,6 @@ export function hasAlertOverride(cycle: {
   alertRulesOverride?: AlertRule[] | null;
 }): boolean {
   return cycle.alertRulesOverride != null;
-}
-
-/**
- * 알림 규칙 배열 검증. 문제가 있으면 그 사유, 없으면 null.
- *
- * DB CHECK(`qa_router_valid_alert_rules`)가 형태를 한 번 더 막지만, 제약이 내는
- * 말은 `violates check constraint "..."` 다. 어느 줄의 무엇이 문제인지 사람이
- * 알 수 있게 여기서 먼저 가른다.
- *
- * ⚠ `app/api/qa-router/[id]/config/route.ts` 의 `checkRules` 가 쌍둥이다.
- *    그쪽은 라우트 파일이라 함수를 export 할 수 없어(Next 가 route 의 export 를
- *    HTTP 메서드로만 허용한다) 가져다 쓸 수 없었다. 규칙을 고칠 때는 둘을 같이
- *    고친다 — 다음에 그 파일을 손볼 사람은 본문을 이 함수 호출로 바꿔 두면 된다.
- */
-export function checkAlertRules(v: unknown): string | null {
-  if (!Array.isArray(v)) return '알림 규칙 형식이 잘못됐습니다.';
-  if (v.length === 0) return '알림 규칙이 하나도 없습니다.';
-  if (v.length > 20) return '알림 규칙은 20개까지입니다.';
-
-  const anchors: AlertAnchor[] = ['qa_start', 'qa_end', 'prod'];
-  const shifts: AlertShift[] = ['none', 'next_workday', 'prev_workday'];
-  const seen = new Set<string>();
-
-  for (const [i, raw] of v.entries()) {
-    const at = `${i + 1}번째 알림`;
-    if (typeof raw !== 'object' || raw === null)
-      return `${at} 형식이 잘못됐습니다.`;
-    const r = raw as Record<string, unknown>;
-
-    const label = typeof r.label === 'string' ? r.label.trim() : '';
-    if (!label) return `${at}의 문구를 입력해 주세요.`;
-
-    const id = typeof r.id === 'string' ? r.id.trim() : '';
-    if (!id) return `${at}의 식별자가 비었습니다.`;
-    // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
-    if (seen.has(id)) return `알림 식별자가 겹칩니다: ${id}`;
-    seen.add(id);
-
-    if (!anchors.includes(r.anchor as AlertAnchor))
-      return `${at}의 기준일이 잘못됐습니다.`;
-    if (!shifts.includes(r.shift as AlertShift))
-      return `${at}의 주말 처리가 잘못됐습니다.`;
-
-    const off = Number(r.offset);
-    if (!Number.isInteger(off) || off < -60 || off > 60)
-      return `${at}의 날짜 차이는 -60 ~ 60일 사이 정수여야 합니다.`;
-
-    if (typeof r.enabled !== 'boolean')
-      return `${at}의 사용 여부가 잘못됐습니다.`;
-
-    /*
-      템플릿에 모르는 변수가 있으면 **저장을 막는다.** 통과시키면 그 줄이
-      조용히 빠진 채 채널에 나간다 — 오타를 낸 사람은 "왜 그 줄이 안 나오지"
-      를 새벽에 알게 된다.
-    */
-    if (r.template !== undefined) {
-      if (typeof r.template !== 'string')
-        return `${at}의 템플릿 형식이 잘못됐습니다.`;
-      if (!r.template.trim()) return `${at}의 본문이 비었습니다.`;
-      const bad = unknownVars(r.template);
-      if (bad.length)
-        return `${at}에 모르는 변수가 있습니다: ${bad.map((x) => `{${x}}`).join(', ')}`;
-    }
-  }
-  return null;
 }
 
 // ─────────────────────────────────────────────────────────────

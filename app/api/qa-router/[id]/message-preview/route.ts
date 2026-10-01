@@ -16,10 +16,18 @@ import { dbServer } from '@/lib/db';
  */
 
 interface Body {
-  /** 저장 전 템플릿. 없으면 기본 템플릿으로 그린다. */
+  /** 저장 전 템플릿. 없으면 그 종류의 기본 본문으로 그린다. */
   template?: unknown;
   /** `{문구}` 에 넣을 값. 고치는 중인 알림의 이름이다. */
   milestone?: unknown;
+  /**
+   * 고치는 중인 규칙의 `when`. 안 보내면 앵커(날짜 알림)로 본다.
+   *
+   * 이걸 안 받던 때는 `qa_router_vars` 의 차수 변수만 채워서, 18:00 요약과
+   * 09:10 경고처럼 제 종류 변수를 쓰는 본문은 **그 줄이 통째로 사라진
+   * 미리보기**가 나왔다 (20261001_qa_router_preview_kinds.sql).
+   */
+  when?: unknown;
 }
 
 export async function POST(
@@ -42,6 +50,13 @@ export async function POST(
       : null) as never,
     p_milestone:
       typeof body.milestone === 'string' ? body.milestone : 'QA 종료',
+    /*
+      모양은 SQL 이 본다 (`p_when->>'kind'`). 여기서 한 번 더 가르면
+      쌍둥이가 하나 더 생기고, 모르는 kind 는 어차피 앵커로 떨어진다.
+    */
+    p_when: (body.when && typeof body.when === 'object'
+      ? body.when
+      : null) as never,
   });
 
   if (error) {

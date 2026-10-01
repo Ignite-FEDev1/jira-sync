@@ -52,9 +52,13 @@ import type {
   QaWindowSource,
 } from '@/lib/services/qa-router/types';
 import {
+  checkAlertRules,
   effectiveAlertRules,
   hasAlertOverride,
+  HM_RE,
+  ruleProblem,
 } from '@/lib/services/qa-router/types';
+import { cn } from '@/lib/utils';
 
 /*
   파이는 필요할 때 받는다.
@@ -111,10 +115,12 @@ import {
 */
 import {
   ANCHOR_OPTIONS,
+  anchorWhen,
   DayStepper,
   NativeSelect,
   RuleList,
   SHIFT_OPTIONS,
+  whenText,
 } from '../../pipeline';
 
 /**
@@ -853,7 +859,16 @@ function CycleRuleEditor({
   // 빈 목록은 저장할 수 없다. DB CHECK 도 같은 것을 막는다 — `[]` 는
   // "알림을 통째로 껐다" 가 되는데, 그 뜻은 규칙을 끈 채 남겨 말해야 한다.
   const empty = draft.length === 0;
-  const noLabel = draft.some((r) => !r.label.trim());
+  /*
+    ── 설정 화면과 **같은 함수**로 막는다 ──
+
+    전에는 여기만 빈 문구만 보고 나머지는 서버 토스트로 알았다. 같은 값이
+    한 화면에서는 빨갛고 다른 화면에서는 저장을 눌러야 아는 것은 같은 일을
+    두 가지로 가르치는 셈이다. `checkAlertRules`(저장 차단)와
+    `ruleProblem`(어느 줄이 왜)을 그대로 가져다 쓴다 — 여기서 검사를 새로
+    쓰면 쌍둥이가 하나 더 생긴다.
+  */
+  const blocked = checkAlertRules(draft);
 
   return (
     <div>
@@ -890,34 +905,81 @@ function CycleRuleEditor({
               >
                 <ChevronDown />
               </Button>
+              {/*
+                조건형은 지울 수 없다. 이 편집기도 날짜 알림만 만들 수 있어
+                한 번 지우면 되돌릴 길이 없다 — 설정 화면과 같은 이유다.
+              */}
               <Button
                 variant="ghost"
                 size="icon"
                 className="size-6 text-muted-foreground"
                 onClick={() => setDraft(draft.filter((_, k) => k !== i))}
+                disabled={!anchorWhen(r)}
+                title={anchorWhen(r) ? undefined : '이 알림은 지울 수 없습니다'}
                 aria-label={`${r.label} 삭제`}
               >
                 <Trash2 />
               </Button>
             </div>
             <div className="flex flex-wrap items-center gap-1.5 px-2 pb-2 pl-[30px] text-[11.5px]">
-              <NativeSelect
-                value={r.anchor}
-                onChange={(v) => patch(i, { ...r, anchor: v as AlertAnchor })}
-                options={ANCHOR_OPTIONS}
-                label={`${i + 1}번째 알림 기준일`}
+              {/*
+                시각도 이 차수만 다르게 둘 수 있다. 덮어쓰기는 설정값을
+                복사해 오므로, 시각 칸이 없으면 복사해 온 값을 못 보고
+                고치게 된다.
+              */}
+              <input
+                type="time"
+                value={r.at}
+                onChange={(e) => patch(i, { ...r, at: e.target.value })}
+                aria-label={`${i + 1}번째 알림 시각`}
+                className={cn(
+                  'h-7 rounded-md border bg-background px-2 text-[11.5px] tabular-nums',
+                  !HM_RE.test(r.at) &&
+                    'border-red-500 text-red-700 dark:text-red-300'
+                )}
               />
-              <DayStepper
-                value={r.offset}
-                onChange={(offset) => patch(i, { ...r, offset })}
-                label={`${i + 1}번째 알림 날짜 차이`}
-              />
-              <NativeSelect
-                value={r.shift}
-                onChange={(v) => patch(i, { ...r, shift: v as AlertShift })}
-                options={SHIFT_OPTIONS}
-                label={`${i + 1}번째 알림 주말 처리`}
-              />
+              {anchorWhen(r) ? (
+                <>
+                  <NativeSelect
+                    value={anchorWhen(r)!.anchor}
+                    onChange={(v) =>
+                      patch(i, {
+                        ...r,
+                        when: { ...anchorWhen(r)!, anchor: v as AlertAnchor },
+                      })
+                    }
+                    options={ANCHOR_OPTIONS}
+                    label={`${i + 1}번째 알림 기준일`}
+                  />
+                  <DayStepper
+                    value={anchorWhen(r)!.offset}
+                    onChange={(offset) =>
+                      patch(i, { ...r, when: { ...anchorWhen(r)!, offset } })
+                    }
+                    label={`${i + 1}번째 알림 날짜 차이`}
+                  />
+                  <NativeSelect
+                    value={anchorWhen(r)!.shift}
+                    onChange={(v) =>
+                      patch(i, {
+                        ...r,
+                        when: { ...anchorWhen(r)!, shift: v as AlertShift },
+                      })
+                    }
+                    options={SHIFT_OPTIONS}
+                    label={`${i + 1}번째 알림 주말 처리`}
+                  />
+                </>
+              ) : (
+                /*
+                  조건형(차수가 열려 있는 날 · QA 기간을 못 읽은 날)은
+                  날짜 칸이 없다. 이 차수만 끄거나 시각을 옮기는 것은
+                  되고, 조건 자체를 바꾸는 것은 설정 화면에서도 안 된다.
+                */
+                <span className="rounded border bg-muted/40 px-1.5 py-0.5 text-muted-foreground">
+                  {whenText(r.when)}
+                </span>
+              )}
               <label className="ml-auto flex items-center gap-1.5 text-muted-foreground">
                 <input
                   type="checkbox"
@@ -928,6 +990,11 @@ function CycleRuleEditor({
                 사용
               </label>
             </div>
+            {ruleProblem(r) && (
+              <p className="px-2 pb-2 pl-[30px] text-[11px] text-red-700 dark:text-red-300">
+                {ruleProblem(r)} · 저장되지 않습니다
+              </p>
+            )}
           </div>
         ))}
         <Button
@@ -939,9 +1006,13 @@ function CycleRuleEditor({
               ...draft,
               {
                 id: `cycle${draft.length + 1}_${draft.length}`,
-                anchor: 'prod',
-                offset: -3,
-                shift: 'prev_workday',
+                at: '09:10',
+                when: {
+                  kind: 'anchor',
+                  anchor: 'prod',
+                  offset: -3,
+                  shift: 'prev_workday',
+                },
                 label: '{days}일 뒤 운영 배포',
                 enabled: true,
               },
@@ -966,17 +1037,25 @@ function CycleRuleEditor({
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={saving || empty || noLabel} onClick={onSave}>
+        <Button
+          size="sm"
+          disabled={saving || blocked !== null}
+          onClick={onSave}
+        >
           저장
         </Button>
         <Button variant="ghost" size="sm" disabled={saving} onClick={onCancel}>
           취소
         </Button>
-        {(empty || noLabel) && (
+        {blocked && (
           <span className="text-[11px] text-amber-700 dark:text-amber-400">
+            {/*
+              빈 목록만은 `checkAlertRules` 보다 길게 말한다 — 여기서
+              답은 "하나 만들어라" 가 아니라 "끈 채 남겨라" 다.
+            */}
             {empty
               ? '규칙이 하나도 없습니다 · 안 알리려면 규칙을 남긴 채 사용을 끕니다'
-              : '문구가 빈 줄이 있습니다'}
+              : blocked}
           </span>
         )}
       </div>

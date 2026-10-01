@@ -5,7 +5,6 @@ import { dbServer } from '@/lib/db';
 import { resolveFilterInput } from '@/lib/services/qa-router/api-creds';
 import { parseFilterUrl, parseGadgetUrl } from '@/lib/services/qa-router/derive';
 import {
-  ALERT_KINDS,
   checkAlertRules,
   DEPLOY_KINDS,
   type DeployKind,
@@ -70,7 +69,6 @@ interface Body {
    * `{ startOffset, endOffset, businessDays }` — 운영 배포일 기준 영업일.
    */
   qaScheduleRule?: unknown;
-  alerts?: unknown;
   alertRules?: unknown;
   tickIntervalSeconds?: unknown;
   planIssueTypeName?: unknown;
@@ -140,7 +138,6 @@ export type ConfigField =
   | 'planCollectHours'
   | 'deployKinds'
   | 'qaScheduleRule'
-  | 'alerts'
   | 'alertRules'
   | 'tickIntervalSeconds'
   | 'quietHours';
@@ -511,22 +508,12 @@ function checkPipeline(
     row.tick_interval_seconds = n;
   }
 
-  if (b.alerts !== undefined) {
-    const a = b.alerts;
-    if (typeof a !== 'object' || a === null || Array.isArray(a)) {
-      return { ok: false, error: '알림 설정 형식이 잘못됐습니다.', field: 'alerts' };
-    }
-    /*
-      **모르는 키는 버린다.** 통과시키면 오타난 키가 조용히 저장되고,
-      화면은 그 키를 안 그리니 "껐는데 계속 온다" 로 보인다.
-    */
-    const out: Record<string, boolean> = {};
-    for (const k of ALERT_KINDS) {
-      const v = (a as Record<string, unknown>)[k];
-      if (typeof v === 'boolean') out[k] = v;
-    }
-    row.alerts = out;
-  }
+  /*
+    `alerts` 는 더 이상 받지 않는다. 마이그레이션이 그 컬럼을 지웠다 —
+    알림은 이제 `alertRules` 하나로 합쳐졌다. 예전 화면이 아직 이 값을
+    보내더라도 여기서 조용히 무시한다. 받아 적으면 없는 컬럼에 쓰려다
+    DB 가 통째로 에러를 낸다.
+  */
 
   return null;
 }

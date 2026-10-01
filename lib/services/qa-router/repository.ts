@@ -74,7 +74,8 @@ function fromConfigInput(i: QaRouterConfigInput): Partial<ConfigRow> {
     row.plan_collect_hours = i.planCollectHours;
   if (i.deployKinds !== undefined) row.deploy_kinds = i.deployKinds;
   if (i.judgeTiers !== undefined) row.judge_tiers = i.judgeTiers;
-  if (i.alerts !== undefined) row.alerts = i.alerts;
+  // `alerts` 는 더 이상 없다 — 마이그레이션이 컬럼을 지웠다. 알림은
+  // `alertRules` 한 칸으로 합쳐졌다.
   if (i.alertRules !== undefined) row.alert_rules = i.alertRules;
   if (i.quietHours !== undefined) row.quiet_hours = i.quietHours;
   if (i.tickIntervalSeconds !== undefined)
