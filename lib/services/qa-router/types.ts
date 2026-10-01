@@ -255,6 +255,130 @@ export const TEMPLATE_VAR_NAMES: readonly string[] = TEMPLATE_VARS.map(
   (v) => v.name
 );
 
+/** 차수 이야기. 세 종류가 다 쓴다. */
+const CYCLE_VARS = [
+  '기호',
+  '차수',
+  '진행률',
+  'QA종료일',
+  '운영배포일',
+  '상세링크',
+  '배포대장링크',
+  'fixVersion',
+  '기획건수',
+  '완료건수',
+] as const;
+
+/**
+ * 이 종류가 쓸 수 있는 변수.
+ *
+ * 한 목록으로 두면 날짜 알림 본문에 `{알림건수}` 를 쓸 수 있게 되는데,
+ * 거기서는 값이 비어 `renderTemplate` 규칙에 따라 **그 줄이 통째로
+ * 사라진다.** 저장은 되는데 알림에서 한 줄이 없어지고 아무도 모른다.
+ * 가르면 저장할 때 "모르는 변수" 로 막힌다.
+ */
+export function varsFor(when: AlertWhen): readonly string[] {
+  switch (when.kind) {
+    case 'anchor':
+      return [...CYCLE_VARS, '문구'];
+    case 'activeCycle':
+      return [
+        ...CYCLE_VARS,
+        '대상이름',
+        '상태문구',
+        '알림건수',
+        '재배정건수',
+        '마지막확인',
+        '일정경고이유',
+      ];
+    case 'scheduleUnusable':
+      return [...CYCLE_VARS, '대상이름', '일정경고이유'];
+  }
+}
+
+/**
+ * 이 종류의 본문에 **반드시 있어야 하는** 변수.
+ *
+ * 경고 본문에서 `{일정경고이유}` 를 빼면 "일정 문제" 만 남고 무엇이
+ * 문제인지 사라진다. 조용한 실패로 되돌아가는 길이다.
+ *
+ * 특별 취급이 아니라 이미 있는 저장 차단 장치에 규칙 하나를 더하는 것이다.
+ * 화면도 같고 빨간 문구도 같다.
+ */
+function requiredVars(when: AlertWhen): readonly string[] {
+  return when.kind === 'scheduleUnusable' ? ['일정경고이유'] : [];
+}
+
+const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * 새 모양(`AlertRuleV2`) 알림 규칙 검증. 문제가 없으면 null.
+ *
+ * `checkAlertRules` 는 옛 모양(anchor/offset/shift 를 직접 들고 있는 형태)을
+ * 검증한다 — 그 함수는 손대지 않는다. 이쪽은 `at` + `when` + 종류별 변수
+ * 집합을 검증하는 새 모양 전용이다.
+ */
+export function checkAlertRulesV2(v: unknown): string | null {
+  if (!Array.isArray(v)) return '알림 규칙 형식이 잘못됐습니다.';
+  if (v.length === 0) return '알림 규칙이 하나도 없습니다.';
+  if (v.length > 20) return '알림 규칙은 20개까지입니다.';
+
+  const anchors: AlertAnchor[] = ['qa_start', 'qa_end', 'prod'];
+  const shifts: AlertShift[] = ['none', 'next_workday', 'prev_workday'];
+  const seen = new Set<string>();
+
+  for (const [i, raw] of v.entries()) {
+    const at = `${i + 1}번째 알림`;
+    if (typeof raw !== 'object' || raw === null)
+      return `${at} 형식이 잘못됐습니다.`;
+    const r = raw as Record<string, unknown>;
+
+    const label = typeof r.label === 'string' ? r.label.trim() : '';
+    if (!label) return `${at}의 문구를 입력해 주세요.`;
+
+    const id = typeof r.id === 'string' ? r.id.trim() : '';
+    if (!id) return `${at}의 식별자가 비었습니다.`;
+    if (seen.has(id)) return `알림 식별자가 겹칩니다: ${id}`;
+    seen.add(id);
+
+    if (typeof r.at !== 'string' || !HM_RE.test(r.at))
+      return `${at}의 시각은 09:10 처럼 두 자리씩 적어 주세요.`;
+
+    if (typeof r.enabled !== 'boolean')
+      return `${at}의 사용 여부가 잘못됐습니다.`;
+
+    const w = r.when as AlertWhen | undefined;
+    if (!w || typeof w !== 'object') return `${at}의 조건이 없습니다.`;
+    if (w.kind === 'anchor') {
+      if (!anchors.includes(w.anchor)) return `${at}의 기준일이 잘못됐습니다.`;
+      if (!shifts.includes(w.shift)) return `${at}의 주말 처리가 잘못됐습니다.`;
+      if (!Number.isInteger(w.offset) || w.offset < -60 || w.offset > 60)
+        return `${at}의 날짜 차이는 -60 ~ 60일 사이 정수여야 합니다.`;
+    } else if (w.kind !== 'activeCycle' && w.kind !== 'scheduleUnusable') {
+      return `${at}의 조건 종류가 잘못됐습니다.`;
+    }
+
+    if (r.template !== undefined) {
+      if (typeof r.template !== 'string')
+        return `${at}의 템플릿 형식이 잘못됐습니다.`;
+      if (!r.template.trim()) return `${at}의 본문이 비었습니다.`;
+
+      const allowed = varsFor(w);
+      const used = [
+        ...new Set([...r.template.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1])),
+      ];
+      const bad = used.filter((k) => !allowed.includes(k));
+      if (bad.length)
+        return `${at}에 모르는 변수가 있습니다: ${bad.map((x) => `{${x}}`).join(', ')}`;
+
+      const missing = requiredVars(w).filter((k) => !used.includes(k));
+      if (missing.length)
+        return `${at}에는 ${missing.map((x) => `{${x}}`).join(', ')} 가 반드시 있어야 합니다.`;
+    }
+  }
+  return null;
+}
+
 /**
  * 템플릿 한 줄의 규칙: **값이 빈 변수가 있으면 줄째로 빠진다.**
  *

@@ -58,9 +58,11 @@ import { DEPLOY_KINDS } from '../lib/services/qa-router/types';
 import type { DeployCycle } from '../lib/services/qa-router/types';
 import {
   checkAlertRules,
+  checkAlertRulesV2,
   DEFAULT_ALERT_RULES,
   effectiveAlertRules,
   hasAlertOverride,
+  varsFor,
 } from '../lib/services/qa-router/types';
 import {
   hasProblem,
@@ -2511,6 +2513,96 @@ test('차수 덮어쓰기 — 저장 전에 깨진 규칙을 사람 말로 막�
       '',
     /모르는 변수/
   );
+});
+
+/*
+  ── 왜 종류별로 가르나 ──
+
+  한 목록으로 두면 날짜 알림 본문에 {알림건수} 를 쓸 수 있게 된다. 거기서는
+  값이 비고, renderTemplate 규칙에 따라 **그 줄이 통째로 사라진다.** 저장은
+  되는데 알림에서 한 줄이 없어지고 아무도 모른다.
+*/
+test('변수 집합 — 종류마다 쓸 수 있는 것이 다르다', () => {
+  const anchor = varsFor({
+    kind: 'anchor',
+    anchor: 'prod',
+    offset: 0,
+    shift: 'none',
+  });
+  const cycle = varsFor({ kind: 'activeCycle' });
+  const warn = varsFor({ kind: 'scheduleUnusable' });
+
+  // 차수 이야기는 셋 다 쓴다
+  for (const s of [anchor, cycle, warn]) assert.ok(s.includes('차수'));
+
+  assert.ok(anchor.includes('문구'));
+  assert.ok(!cycle.includes('문구'));
+
+  assert.ok(cycle.includes('알림건수'));
+  assert.ok(
+    !anchor.includes('알림건수'),
+    '날짜 알림이 알림건수를 쓰면 줄이 사라진다'
+  );
+
+  assert.ok(cycle.includes('상태문구'));
+  assert.ok(!warn.includes('상태문구'));
+
+  assert.ok(warn.includes('일정경고이유'));
+  assert.ok(!anchor.includes('일정경고이유'));
+});
+
+test('검증 — 그 종류가 모르는 변수면 막는다', () => {
+  const bad = [
+    {
+      id: 'x',
+      at: '09:10',
+      when: { kind: 'anchor', anchor: 'prod', offset: 0, shift: 'none' },
+      label: 'ㄱ',
+      enabled: true,
+      template: '오늘 알림 {알림건수}건',
+    },
+  ];
+  assert.match(checkAlertRulesV2(bad) ?? '', /알림건수/);
+});
+
+/*
+  경고 본문에서 {일정경고이유} 를 빼면 "일정 문제" 만 남고 무엇이 문제인지
+  사라진다. 조용한 실패로 되돌아가는 길이라 저장을 막는다.
+*/
+test('검증 — 경고 본문에 이유가 없으면 막는다', () => {
+  const noReason = [
+    {
+      id: 'w',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: true,
+      template: '{기호} {대상이름} 일정 문제',
+    },
+  ];
+  assert.match(checkAlertRulesV2(noReason) ?? '', /일정경고이유/);
+
+  const ok = [
+    {
+      id: 'w',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: true,
+      template: '{기호} {대상이름} 일정 문제\n{일정경고이유}',
+    },
+  ];
+  assert.equal(checkAlertRulesV2(ok), null);
+});
+
+test('검증 — 시각 모양이 틀리면 막는다', () => {
+  const mk = (at: string) => [
+    { id: 'x', at, when: { kind: 'activeCycle' }, label: 'ㄱ', enabled: true },
+  ];
+  assert.equal(checkAlertRulesV2(mk('18:00')), null);
+  assert.match(checkAlertRulesV2(mk('1800')) ?? '', /시각/);
+  assert.match(checkAlertRulesV2(mk('25:00')) ?? '', /시각/);
+  assert.match(checkAlertRulesV2(mk('9:10')) ?? '', /시각/);
 });
 
 /*
