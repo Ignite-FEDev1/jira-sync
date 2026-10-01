@@ -9,8 +9,8 @@ import { buildFixVersion, type FixVersionRule } from './derive';
 import { prodDayOf } from './qa-window';
 import { DEPLOY_KINDS } from './types';
 import type {
+  AlertAnchor,
   AlertRule,
-  AlertRuleV2,
   AlertShift,
   AlertWhen,
   ActiveCycle,
@@ -704,18 +704,14 @@ export function ruleDay(
  * 실제로 있다 — 운영 배포일과 QA 종료 다음 근무일이 같은 날일 수 있다.
  * 둘 다 보내면 같은 차수 이야기가 두 번 오므로 순서로 우선순위를 정한다.
  *
- * ── 왜 이름이 `Legacy` 인가 ──
- *
- * `milestoneFrom` 이라는 이름과 옛 모양(`AlertRule[]`)을 그대로 두고, 새
- * 모양(`AlertRuleV2[]`)을 받는 같은 이름의 함수를 아래에 새로 둔다. 이 판은
- * `milestoneFromLegacy` 로 옮겨 **대조 테스트** 전용으로만 남긴다 — 새 판이
- * 옛 판과 같은 답을 내는지 맞대어 보는 것 말고 다른 쓸모가 없다.
- *
- * `DEFAULT_ALERT_RULES` 가 새 모양으로 바뀌는 날(Task 9) 이 함수는 할 일이
- * 없어져 지운다. 그 전까지는 임시다 — 다른 코드가 이 이름을 새로 불러
- * 쓰면 안 된다.
+ * `when.kind` 가 `anchor` 가 아닌 규칙은 건너뛴다. 날짜가 아닌 조건
+ * (`activeCycle` · `scheduleUnusable`)은 크론이 직접 판단하고, 이 함수는
+ * 날짜 마감선만 본다. 마이그레이션이 모든 대상의 목록에 그 둘을 넣었으므로
+ * 섞여 오는 것이 평소 모양이다 — 안 거르면 `when` 안의 앵커를 못 찾아
+ * `undefined` 를 기준일로 삼고, 그 규칙의 문구("마감 요약")가 화면의 마감선
+ * 자리에 튀어나온다.
  */
-export function milestoneFromLegacy(
+export function milestoneFrom(
   rules: readonly AlertRule[],
   s: {
     qaStartYmd: string | null;
@@ -745,7 +741,12 @@ export function milestoneFromLegacy(
       ? s.prodYmd
       : prodDayOf({ deployYmd: s.deployYmd, prodYmd: s.prodYmd });
 
-  const anchorOf = (a: AlertRule['anchor']) =>
+  type AnchorRule = AlertRule & {
+    when: Extract<AlertWhen, { kind: 'anchor' }>;
+  };
+  const anchors = rules.filter((r): r is AnchorRule => r.when.kind === 'anchor');
+
+  const anchorOf = (a: AlertAnchor) =>
     a === 'qa_start' ? s.qaStartYmd : a === 'qa_end' ? s.qaEndYmd : prod;
 
   /*
@@ -763,25 +764,25 @@ export function milestoneFromLegacy(
     배포일이 새 선이 될 뿐이다.
   */
   /*
-    `prod` 앵커 규칙이 여럿 켜져 있을 수도 있다 (`AlertRule[]` 은 유일성을
-    강제하지 않는다). 그런 경우 **배열 순서상 먼저 나오는 첫 규칙**이
-    이긴다 - 임의가 아니라 의도한 선택이다. SQL 쌍둥이
-    `qa_router_hit_rule` 도 같은 선택을 `order by ordinality limit 1` 로
-    표현한다. 여기서 고르는 방식을 바꾸면 그쪽도 같이 바꿔야 한다.
+    `prod` 앵커 규칙이 여럿 켜져 있을 수도 있다 (목록은 유일성을 강제하지
+    않는다). 그런 경우 **배열 순서상 먼저 나오는 첫 규칙**이 이긴다 - 임의가
+    아니라 의도한 선택이다. SQL 쌍둥이 `qa_router_hit_rule` 도 같은 선택을
+    `order by ordinality limit 1` 로 표현한다. 여기서 고르는 방식을 바꾸면
+    그쪽도 같이 바꿔야 한다.
   */
-  const prodRule = rules.find(
-    (r) => r.enabled !== false && r.anchor === 'prod'
+  const prodRule = anchors.find(
+    (r) => r.enabled !== false && r.when.anchor === 'prod'
   );
   const cutoff = prod
     ? prodRule
-      ? ruleDay(prod, prodRule.offset, prodRule.shift)
+      ? ruleDay(prod, prodRule.when.offset, prodRule.when.shift)
       : prod
     : null;
 
-  for (const r of rules) {
+  for (const r of anchors) {
     if (r.enabled === false) continue;
-    const anchor = anchorOf(r.anchor);
-    const day = ruleDay(anchor, r.offset, r.shift);
+    const anchor = anchorOf(r.when.anchor);
+    const day = ruleDay(anchor, r.when.offset, r.when.shift);
     if (day !== todayYmd) continue;
     /*
       당일은 막지 않는다 - `오늘 운영 배포` 가 그날 울려야 한다.
@@ -800,42 +801,6 @@ export function milestoneFromLegacy(
       : r.label.replace('{days}', String(days));
   }
   return null;
-}
-
-/**
- * 오늘 알릴 문구 — 새 모양(`AlertRuleV2[]`) 판.
- *
- * `when.kind !== 'anchor'` 인 규칙은 건너뛴다. 날짜 앵커가 아닌 조건
- * (`activeCycle`, `scheduleUnusable`)은 크론이 직접 판단하고, 이 함수는
- * 날짜 마감선 로직(`milestoneFromLegacy`)만 재사용한다.
- */
-export function milestoneFrom(
-  rules: readonly AlertRuleV2[],
-  s: {
-    qaStartYmd: string | null;
-    qaEndYmd: string | null;
-    prodYmd: string | null;
-    deployYmd?: string;
-  },
-  todayYmd: string
-): string | null {
-  const anchors = rules.filter(
-    (r): r is AlertRuleV2 & { when: Extract<AlertWhen, { kind: 'anchor' }> } =>
-      r.when.kind === 'anchor'
-  );
-  return milestoneFromLegacy(
-    anchors.map((r) => ({
-      id: r.id,
-      anchor: r.when.anchor,
-      offset: r.when.offset,
-      shift: r.when.shift,
-      label: r.label,
-      enabled: r.enabled,
-      template: r.template,
-    })),
-    s,
-    todayYmd
-  );
 }
 
 /**

@@ -5,7 +5,7 @@ import { dbServer } from '@/lib/db';
 import { resolveFilterInput } from '@/lib/services/qa-router/api-creds';
 import { parseFilterUrl, parseGadgetUrl } from '@/lib/services/qa-router/derive';
 import {
-  checkAlertRulesV2,
+  checkAlertRules,
   DEPLOY_KINDS,
   type DeployKind,
 } from '@/lib/services/qa-router/types';
@@ -490,7 +490,7 @@ function checkPipeline(
   }
 
   if (b.alertRules !== undefined) {
-    const bad = checkAlertRulesV2(b.alertRules);
+    const bad = checkAlertRules(b.alertRules);
     if (bad) return { ok: false, error: bad, field: 'alertRules' };
     row.alert_rules = b.alertRules;
   }
@@ -519,7 +519,7 @@ function checkPipeline(
 }
 
 /*
-  ── 알림 규칙 검증은 `types.ts` 의 `checkAlertRulesV2` 하나만 쓴다 ──
+  ── 알림 규칙 검증은 `types.ts` 의 `checkAlertRules` 하나만 쓴다 ──
 
   여기 같은 함수가 한 벌 더 있었다. 실측으로 **세 벌이 서로 다른 답**을
   내고 있었다:

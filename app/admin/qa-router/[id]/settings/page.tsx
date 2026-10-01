@@ -32,7 +32,7 @@ import {
 } from '@/lib/services/qa-router/status';
 import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import {
-  checkAlertRulesV2,
+  checkAlertRules,
   DEFAULT_TEMPLATE,
   DEPLOY_KINDS,
   HM_RE,
@@ -43,7 +43,7 @@ import {
   varPaletteFor,
   varsFor,
   type AlertAnchor,
-  type AlertRuleV2,
+  type AlertRule,
   type AlertShift,
   type AlertWhen,
   type DeployCycle,
@@ -3219,7 +3219,7 @@ function RuleDetail({
   id: string;
   row: AlertRuleRow;
   channelName?: string | null;
-  onChange: (next: AlertRuleV2) => void;
+  onChange: (next: AlertRule) => void;
   onRemove: () => void;
 }) {
   const r = row.rule;
@@ -3318,7 +3318,7 @@ function RuleDetail({
         {/*
           `type="time"` 이 모양을 지킨다. 저장값은 `HH:MM` 문자열이고,
           브라우저가 못 읽는 값을 넣으면 빈 문자열이 되어 아래 빨간 줄과
-          `checkAlertRulesV2` 가 같이 막는다 — 틀린 시각이 조용히 저장되는
+          `checkAlertRules` 가 같이 막는다 — 틀린 시각이 조용히 저장되는
           길은 없다.
         */}
         <input
@@ -3543,12 +3543,12 @@ function WhatEditor({
   onSave,
 }: EditorBase & {
   id: string;
-  rules: AlertRuleV2[];
+  rules: AlertRule[];
   channelName?: string | null;
   /** 이번 차수 날짜. 규칙이 며칠에 울리는지 계산하는 데 쓴다. */
   schedule: AlertSchedule | null;
 }) {
-  const [draftRules, setDraftRules] = useState<AlertRuleV2[]>(rules);
+  const [draftRules, setDraftRules] = useState<AlertRule[]>(rules);
   /** 지금 고른 알림의 id. */
   const [picked, setPicked] = useState<string>(rules[0]?.id ?? '');
 
@@ -3559,7 +3559,7 @@ function WhatEditor({
   const rows = alertRuleRows(draftRules, schedule);
   const groups = groupAlertRows(rows);
 
-  const patchRule = (ruleId: string, next: AlertRuleV2) =>
+  const patchRule = (ruleId: string, next: AlertRule) =>
     setDraftRules((rs) => rs.map((r) => (r.id === ruleId ? next : r)));
 
   const removeRule = (ruleId: string) => {
@@ -3618,7 +3618,7 @@ function WhatEditor({
     따로 만들면 화면은 통과시키는데 서버가 거절하는 짝이 생긴다.
     어느 줄이 문제인지는 왼쪽 목록의 빨간 점과 오른쪽 빨간 줄이 말한다.
   */
-  const blocked = checkAlertRulesV2(draftRules);
+  const blocked = checkAlertRules(draftRules);
 
   const pickedRow = rows.find((x) => x.rule.id === picked);
 

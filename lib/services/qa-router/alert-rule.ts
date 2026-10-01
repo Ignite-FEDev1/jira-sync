@@ -10,7 +10,7 @@
  *
  * 그래서 Jira·DB·React 를 모르는 순수 함수만 둔다. 타입만 import 한다.
  */
-import type { AlertRule, AlertRuleV2 } from './types';
+import type { AlertRule, LegacyAlertRule } from './types';
 
 /**
  * 옛 규칙을 새 모양으로 감싼다. **값을 바꾸지 않는다.**
@@ -19,7 +19,7 @@ import type { AlertRule, AlertRuleV2 } from './types';
  * 그것들만 돌렸기 때문에 시각이 코드에 있었던 것이고, 이제 데이터가 되면서
  * 그 사실을 적어 준다.
  */
-export function toAlertRuleV2(old: AlertRule): AlertRuleV2 {
+export function toAlertRuleV2(old: LegacyAlertRule): AlertRule {
   return {
     id: old.id,
     at: '09:10',
@@ -43,7 +43,7 @@ export interface DueInput {
   /** 규칙 id → 마지막으로 보낸 날. */
   sentOn: Record<string, string | undefined>;
   /** 이 규칙의 `when` 이 지금 참인가. 판단은 부르는 쪽이 한다. */
-  isDue: (rule: AlertRuleV2) => boolean;
+  isDue: (rule: AlertRule) => boolean;
 }
 
 function isWeekend(ymd: string): boolean {
@@ -73,12 +73,12 @@ function isWeekend(ymd: string): boolean {
  * 여기로 온다. 안 옮기면 토요일 아침에 알림이 나간다.
  */
 export function dueRules(
-  rules: readonly AlertRuleV2[],
+  rules: readonly AlertRule[],
   input: DueInput
-): AlertRuleV2[] {
+): AlertRule[] {
   if (isWeekend(input.todayYmd)) return [];
 
-  const byAt = new Map<string, AlertRuleV2>();
+  const byAt = new Map<string, AlertRule>();
   for (const r of rules) {
     if (!r.enabled) continue;
     if (r.at > input.nowHm) continue;

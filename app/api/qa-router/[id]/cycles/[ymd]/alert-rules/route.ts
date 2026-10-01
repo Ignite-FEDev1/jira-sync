@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { dbServer } from '@/lib/db';
-import { checkAlertRulesV2 } from '@/lib/services/qa-router/types';
+import { checkAlertRules } from '@/lib/services/qa-router/types';
 
 /**
  * PATCH /api/qa-router/{id}/cycles/{ymd}/alert-rules
@@ -62,7 +62,7 @@ export async function PATCH(
 
   const next = body.alertRules;
   if (next !== null) {
-    const bad = checkAlertRulesV2(next);
+    const bad = checkAlertRules(next);
     if (bad) return NextResponse.json({ error: bad }, { status: 400 });
   }
 

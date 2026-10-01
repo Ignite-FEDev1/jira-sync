@@ -24,7 +24,7 @@ import type {
   DeployCycle,
   DerivedContext,
   AlertRule,
-  AlertRuleV2,
+  LegacyAlertRule,
   DeployKind,
   JudgeTier,
   QaRouterConfig,
@@ -61,11 +61,11 @@ export type ConfigRow = {
   deploy_kinds?: DeployKind[] | null;
   judge_tiers: JudgeTier[] | null;
   /**
-   * 새 모양(`AlertRuleV2`)으로 저장된다. 그런데 **옛 모양이 섞여 올 수 있다** —
+   * 새 모양(`AlertRule`)으로 저장된다. 그런데 **옛 모양이 섞여 올 수 있다** —
    * 20260930 마이그레이션 이전 백업을 되돌렸거나 손으로 넣은 행이다.
    * 그래서 읽을 때 한 번 더 가른다 (`toConfig`).
    */
-  alert_rules: (AlertRuleV2 | AlertRule)[] | null;
+  alert_rules: (AlertRule | LegacyAlertRule)[] | null;
   quiet_hours: QuietHours;
   tick_interval_seconds: number | null;
   reassign_mode: QaRouterConfig['reassignMode'];
@@ -150,9 +150,13 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
       알림 목록이 통째로 빈칸이 된다.
     */
     alertRules: (r.alert_rules?.length
-      ? r.alert_rules
+      ? (r.alert_rules as unknown[])
       : [...DEFAULT_ALERT_RULES]
-    ).map((x) => ('anchor' in x ? toAlertRuleV2(x) : x)),
+    ).map((x) =>
+      x && typeof x === 'object' && 'anchor' in x
+        ? toAlertRuleV2(x as LegacyAlertRule)
+        : (x as AlertRule)
+    ),
     quietHours: r.quiet_hours,
     tickIntervalSeconds: r.tick_interval_seconds ?? 60,
     reassignMode: r.reassign_mode,

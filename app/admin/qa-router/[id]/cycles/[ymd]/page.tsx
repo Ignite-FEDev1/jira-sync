@@ -44,7 +44,7 @@ import {
 import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   AlertAnchor,
-  AlertRuleV2,
+  AlertRule,
   AlertShift,
   DeployCycle,
   QaScheduleRule,
@@ -52,7 +52,7 @@ import type {
   QaWindowSource,
 } from '@/lib/services/qa-router/types';
 import {
-  checkAlertRulesV2,
+  checkAlertRules,
   effectiveAlertRules,
   hasAlertOverride,
   HM_RE,
@@ -691,9 +691,9 @@ function AlertRulesSection({
 }: {
   /** 저장 대상. 데모에서는 null 이고 편집을 열지 않는다. */
   configId: string | null;
-  configRules: AlertRuleV2[];
+  configRules: AlertRule[];
   /** null 이면 설정값을 쓴다. */
-  override: AlertRuleV2[] | null;
+  override: AlertRule[] | null;
   deployYmd: string;
   schedule: {
     qaStartYmd: string | null;
@@ -704,7 +704,7 @@ function AlertRulesSection({
   className?: string;
 }) {
   /** 편집 중인 규칙. null 이면 읽기 상태다. */
-  const [draft, setDraft] = useState<AlertRuleV2[] | null>(null);
+  const [draft, setDraft] = useState<AlertRule[] | null>(null);
   const [saving, setSaving] = useState(false);
 
   const live = effectiveAlertRules(override, configRules);
@@ -714,7 +714,7 @@ function AlertRulesSection({
     저장은 두 가지 뜻뿐이다 — "이 규칙을 쓴다"(배열) 와 "설정값으로
     되돌린다"(null). 한 함수로 두어 되돌리기가 별도 경로가 되지 않게 한다.
   */
-  const save = async (next: AlertRuleV2[] | null) => {
+  const save = async (next: AlertRule[] | null) => {
     if (!configId) return;
     setSaving(true);
     try {
@@ -835,8 +835,8 @@ function CycleRuleEditor({
   onCancel,
   onSave,
 }: {
-  draft: AlertRuleV2[];
-  setDraft: (next: AlertRuleV2[]) => void;
+  draft: AlertRule[];
+  setDraft: (next: AlertRule[]) => void;
   schedule: {
     qaStartYmd: string | null;
     qaEndYmd: string | null;
@@ -846,7 +846,7 @@ function CycleRuleEditor({
   onCancel: () => void;
   onSave: () => void;
 }) {
-  const patch = (i: number, next: AlertRuleV2) =>
+  const patch = (i: number, next: AlertRule) =>
     setDraft(draft.map((r, k) => (k === i ? next : r)));
   const move = (i: number, d: number) => {
     const j = i + d;
@@ -864,11 +864,11 @@ function CycleRuleEditor({
 
     전에는 여기만 빈 문구만 보고 나머지는 서버 토스트로 알았다. 같은 값이
     한 화면에서는 빨갛고 다른 화면에서는 저장을 눌러야 아는 것은 같은 일을
-    두 가지로 가르치는 셈이다. `checkAlertRulesV2`(저장 차단)와
+    두 가지로 가르치는 셈이다. `checkAlertRules`(저장 차단)와
     `ruleProblem`(어느 줄이 왜)을 그대로 가져다 쓴다 — 여기서 검사를 새로
     쓰면 쌍둥이가 하나 더 생긴다.
   */
-  const blocked = checkAlertRulesV2(draft);
+  const blocked = checkAlertRules(draft);
 
   return (
     <div>
@@ -1050,7 +1050,7 @@ function CycleRuleEditor({
         {blocked && (
           <span className="text-[11px] text-amber-700 dark:text-amber-400">
             {/*
-              빈 목록만은 `checkAlertRulesV2` 보다 길게 말한다 — 여기서
+              빈 목록만은 `checkAlertRules` 보다 길게 말한다 — 여기서
               답은 "하나 만들어라" 가 아니라 "끈 채 남겨라" 다.
             */}
             {empty

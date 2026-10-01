@@ -17,7 +17,6 @@ import {
   describeScope,
   formatClock,
   milestoneFrom,
-  milestoneFromLegacy,
   milestoneOn,
   nextWorkday,
   overdueSlot,
@@ -44,7 +43,7 @@ import {
   statusPhrase,
   toAlertRuleV2,
 } from '@/lib/services/qa-router/alert-rule';
-import type { AlertRuleV2 } from '@/lib/services/qa-router/types';
+import type { AlertRule, AlertWhen } from '@/lib/services/qa-router/types';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
 import { cycleUpsertRow, toState } from '@/lib/services/qa-router/rows';
@@ -63,7 +62,6 @@ import { DEPLOY_KINDS } from '../lib/services/qa-router/types';
 import type { DeployCycle } from '../lib/services/qa-router/types';
 import {
   checkAlertRules,
-  checkAlertRulesV2,
   DEFAULT_ALERT_RULES,
   effectiveAlertRules,
   hasAlertOverride,
@@ -2327,7 +2325,7 @@ test('알림 규칙 — 기본값이 기존 분기점과 다른 날은 뺀 규�
     const day = new Date(Date.UTC(2026, 7, 25) + i * 86_400_000)
       .toISOString()
       .slice(0, 10);
-    const now = milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, day);
+    const now = milestoneFrom(DEFAULT_ALERT_RULES, s, day);
     const legacy = milestoneOn(s, day);
     if (now !== legacy) diffs.push(day);
     else continue;
@@ -2354,15 +2352,15 @@ test('알림 규칙 — 3일 전이라고 넣으면 정확히 3일 전에 울린
   };
   const rules = [
     ...DEFAULT_ALERT_RULES,
-    {
+    toAlertRuleV2({
       id: 'qaSoon',
       anchor: 'qa_start' as const,
       offset: -3,
       shift: 'prev_workday' as const,
       label: '{days}일 뒤 QA 시작',
       enabled: true,
-    },
-  ].map(toAlertRuleV2);
+    }),
+  ];
   assert.equal(milestoneFrom(rules, s, '2026-08-31'), '3일 뒤 QA 시작');
   assert.equal(milestoneFrom(rules, s, '2026-08-28'), null);
 });
@@ -2389,11 +2387,11 @@ test('알림 규칙 — 하루에 둘이 걸리면 위에 있는 것 하나만 �
     prodYmd: '2026-09-14',
   };
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-14'),
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-14'),
     '오늘 운영 배포'
   );
   // 순서를 뒤집으면 반대가 나온다 — 순서가 곧 우선순위다.
-  const flipped = [...DEFAULT_ALERT_RULES].reverse().map(toAlertRuleV2);
+  const flipped = [...DEFAULT_ALERT_RULES].reverse();
   assert.equal(milestoneFrom(flipped, s, '2026-09-14'), 'QA 종료');
 });
 
@@ -2405,7 +2403,7 @@ test('알림 규칙 — 끈 규칙은 울리지 않는다', () => {
   };
   const off = DEFAULT_ALERT_RULES.map((r) =>
     r.id === 'qaStart' ? { ...r, enabled: false } : r
-  ).map(toAlertRuleV2);
+  );
   assert.equal(milestoneFrom(off, s, '2026-09-03'), null);
 });
 
@@ -2429,7 +2427,7 @@ test('차수 덮어쓰기 — null 이면 설정값을 쓴다 (한 날도 다르
     qaEndYmd: '2026-09-09',
     prodYmd: '2026-09-14',
   };
-  const configRules = DEFAULT_ALERT_RULES.map(toAlertRuleV2);
+  const configRules = [...DEFAULT_ALERT_RULES];
 
   // 같은 배열을 그대로 돌려줘야 한다 (복사도 변형도 없다).
   assert.equal(effectiveAlertRules(null, configRules), configRules);
@@ -2459,7 +2457,7 @@ test('차수 덮어쓰기 — 값이 있으면 그것을 쓴다', () => {
     qaEndYmd: '2026-09-09',
     prodYmd: '2026-09-10',
   };
-  const configRules = DEFAULT_ALERT_RULES.map(toAlertRuleV2);
+  const configRules = [...DEFAULT_ALERT_RULES];
   const override = [
     toAlertRuleV2({
       id: 'prodToday',
@@ -2487,37 +2485,36 @@ test('차수 덮어쓰기 — 덮어쓴 차수인지 화면이 알 수 있다', 
   assert.equal(hasAlertOverride({ alertRulesOverride: null }), false);
   assert.equal(
     hasAlertOverride({
-      alertRulesOverride: DEFAULT_ALERT_RULES.map(toAlertRuleV2),
+      alertRulesOverride: [...DEFAULT_ALERT_RULES],
     }),
     true
   );
 });
 
 test('차수 덮어쓰기 — 저장 전에 깨진 규칙을 사람 말로 막는다', () => {
+  /** 기본값 첫 줄(앵커 규칙)에서 한 군데만 망가뜨린다. */
+  const anchor = DEFAULT_ALERT_RULES[0];
+  const when = anchor.when as Extract<AlertWhen, { kind: 'anchor' }>;
+
   assert.equal(checkAlertRules([...DEFAULT_ALERT_RULES]), null);
   // `[]` 는 알림을 통째로 끈 상태가 된다. DB CHECK 도 같은 것을 막는다.
   assert.match(checkAlertRules([]) ?? '', /하나도 없습니다/);
   assert.match(checkAlertRules('nope') ?? '', /형식이 잘못/);
   assert.match(
-    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], anchor: 'nope' }]) ?? '',
+    checkAlertRules([{ ...anchor, when: { ...when, anchor: 'nope' } }]) ?? '',
     /기준일이 잘못/
   );
   assert.match(
-    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], offset: 99 }]) ?? '',
+    checkAlertRules([{ ...anchor, when: { ...when, offset: 99 } }]) ?? '',
     /-60 ~ 60/
   );
-  assert.match(
-    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], label: '  ' }]) ?? '',
-    /문구를 입력/
-  );
+  assert.match(checkAlertRules([{ ...anchor, label: '  ' }]) ?? '', /문구를 입력/);
+  // 시각이 데이터가 되면서 새로 생긴 칸이다. 여기도 사람 말로 막아야 한다.
+  assert.match(checkAlertRules([{ ...anchor, at: '9:10' }]) ?? '', /시각/);
   // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
+  assert.match(checkAlertRules([anchor, anchor]) ?? '', /겹칩니다/);
   assert.match(
-    checkAlertRules([DEFAULT_ALERT_RULES[0], DEFAULT_ALERT_RULES[0]]) ?? '',
-    /겹칩니다/
-  );
-  assert.match(
-    checkAlertRules([{ ...DEFAULT_ALERT_RULES[0], template: '{없는변수}' }]) ??
-      '',
+    checkAlertRules([{ ...anchor, template: '{없는변수}' }]) ?? '',
     /모르는 변수/
   );
 });
@@ -2573,25 +2570,16 @@ test('상태문구 — 여럿이 겹치면 멈춤이 이긴다', () => {
 });
 
 /*
-  옛 규칙으로 돌린 답과 새 모양으로 돌린 답이 같아야 한다. 옮기는 일이지
-  바꾸는 일이 아니다.
+  ── 여기 있던 대조 테스트를 지웠다 ──
+
+  `milestoneFrom` 과 `milestoneFromLegacy` 가 같은 답을 내는지 맞대던
+  테스트다. 옛 판이 사라졌으므로 맞댈 상대가 없다 — 남겨 두면 자기 자신과
+  비교하는 항등식이 된다.
+
+  그 테스트가 지키던 것은 "이사가 답을 안 바꿨다" 이고, 그 역할은 위쪽
+  `milestoneOn` 대조 테스트(갈리는 날이 09-11 하루뿐임을 고정한다)와 아래
+  마감선 테스트들이 그대로 들고 있다. 둘 다 옛 판을 안 쓴다.
 */
-test('알림 판단 — 새 모양이 옛 모양과 같은 답을 낸다', () => {
-  const s = {
-    qaStartYmd: '2026-09-22',
-    qaEndYmd: '2026-09-29',
-    prodYmd: '2026-09-30',
-    deployYmd: '2026-09-30',
-  };
-  const v2 = DEFAULT_ALERT_RULES.map(toAlertRuleV2);
-  for (const day of ['2026-09-22', '2026-09-29', '2026-09-30', '2026-10-01']) {
-    assert.equal(
-      milestoneFrom(v2, s, day),
-      milestoneFromLegacy(DEFAULT_ALERT_RULES, s, day),
-      `${day} 에서 답이 갈린다`
-    );
-  }
-});
 
 /*
   ── 앵커가 아닌 규칙이 섞인 목록 ──
@@ -2612,7 +2600,7 @@ test('마감선 — 앵커가 아닌 규칙은 건너뛴다', () => {
     prodYmd: '2026-09-30',
     deployYmd: '2026-09-30',
   };
-  const notAnchor: AlertRuleV2[] = [
+  const notAnchor: AlertRule[] = [
     {
       id: 'dailySummary',
       at: '18:00',
@@ -2628,7 +2616,7 @@ test('마감선 — 앵커가 아닌 규칙은 건너뛴다', () => {
       enabled: true,
     },
   ];
-  const anchors = DEFAULT_ALERT_RULES.map(toAlertRuleV2);
+  const anchors = DEFAULT_ALERT_RULES.filter((r) => r.when.kind === 'anchor');
   // 섞여 있어도 앵커만 있는 목록과 답이 같아야 한다
   for (const day of ['2026-09-22', '2026-09-29', '2026-09-30', '2026-10-01']) {
     assert.equal(
@@ -2704,7 +2692,7 @@ test('검증 — 그 종류가 모르는 변수면 막는다', () => {
       template: '오늘 알림 {알림건수}건',
     },
   ];
-  assert.match(checkAlertRulesV2(bad) ?? '', /알림건수/);
+  assert.match(checkAlertRules(bad) ?? '', /알림건수/);
 });
 
 /*
@@ -2722,7 +2710,7 @@ test('검증 — 경고 본문에 이유가 없으면 막는다', () => {
       template: '{기호} {대상이름} 일정 문제',
     },
   ];
-  assert.match(checkAlertRulesV2(noReason) ?? '', /일정경고이유/);
+  assert.match(checkAlertRules(noReason) ?? '', /일정경고이유/);
 
   const ok = [
     {
@@ -2734,17 +2722,17 @@ test('검증 — 경고 본문에 이유가 없으면 막는다', () => {
       template: '{기호} {대상이름} 일정 문제\n{일정경고이유}',
     },
   ];
-  assert.equal(checkAlertRulesV2(ok), null);
+  assert.equal(checkAlertRules(ok), null);
 });
 
 test('검증 — 시각 모양이 틀리면 막는다', () => {
   const mk = (at: string) => [
     { id: 'x', at, when: { kind: 'activeCycle' }, label: 'ㄱ', enabled: true },
   ];
-  assert.equal(checkAlertRulesV2(mk('18:00')), null);
-  assert.match(checkAlertRulesV2(mk('1800')) ?? '', /시각/);
-  assert.match(checkAlertRulesV2(mk('25:00')) ?? '', /시각/);
-  assert.match(checkAlertRulesV2(mk('9:10')) ?? '', /시각/);
+  assert.equal(checkAlertRules(mk('18:00')), null);
+  assert.match(checkAlertRules(mk('1800')) ?? '', /시각/);
+  assert.match(checkAlertRules(mk('25:00')) ?? '', /시각/);
+  assert.match(checkAlertRules(mk('9:10')) ?? '', /시각/);
 });
 
 /*
@@ -3971,21 +3959,29 @@ test('알림 규칙 검증 — 저장 경로가 쓰는 함수 하나로 모았�
   */
   assert.match(checkAlertRules([]) ?? '', /하나도 없습니다/);
 
-  const one = (over: Record<string, unknown>) => [
+  const one = (
+    over: Record<string, unknown>,
+    whenOver: Record<string, unknown> = {}
+  ) => [
     {
       id: 'x',
+      at: '09:10',
+      when: {
+        kind: 'anchor',
+        anchor: 'prod',
+        offset: 0,
+        shift: 'none',
+        ...whenOver,
+      },
       label: '테스트',
-      anchor: 'prod',
-      offset: 0,
-      shift: 'none',
       enabled: true,
       ...over,
     },
   ];
   assert.equal(checkAlertRules(one({})), null);
   assert.match(checkAlertRules(one({ enabled: 'yes' })) ?? '', /사용 여부/);
-  assert.match(checkAlertRules(one({ anchor: 'nope' })) ?? '', /기준일/);
-  assert.match(checkAlertRules(one({ offset: 999 })) ?? '', /날짜 차이/);
+  assert.match(checkAlertRules(one({}, { anchor: 'nope' })) ?? '', /기준일/);
+  assert.match(checkAlertRules(one({}, { offset: 999 })) ?? '', /날짜 차이/);
 });
 
 test('전환 대기 — 차수가 끝나면 필터가 그걸 말한다', () => {
@@ -4683,7 +4679,7 @@ test('마감선 — 운영 배포일 다음날부터는 아무것도 안 울린�
   };
   // 10-08 은 qaEnd 당일이지만 배포가 지났으므로 안 울린다
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-10-08'),
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'),
     null
   );
 });
@@ -4696,7 +4692,7 @@ test('마감선 — 운영 배포일 당일은 막지 않는다', () => {
   };
   // '오늘 운영 배포' 가 살아 있어야 한다
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-10-07'),
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-07'),
     '오늘 운영 배포'
   );
 });
@@ -4708,15 +4704,15 @@ test('마감선 — 정상 데이터에서는 아무것도 안 바뀐다', () =>
     prodYmd: '2026-09-30',
   };
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-22'),
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
     '오늘 QA 시작'
   );
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-29'),
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'),
     'QA 종료'
   );
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-30'),
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-30'),
     '오늘 운영 배포'
   );
 });
@@ -4726,7 +4722,7 @@ test('마감선 — 운영 배포일을 모르면 막지 않는다', () => {
   // 마감선 때문에 QA 알림이 통째로 죽으면 안 된다.
   const s = { qaStartYmd: '2026-09-22', qaEndYmd: '2026-09-29', prodYmd: null };
   assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES.map(toAlertRuleV2), s, '2026-09-22'),
+    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
     '오늘 QA 시작'
   );
 });
@@ -5143,6 +5139,47 @@ test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () =>
   // 빈 문자열을 세 곳에서 똑같이 못 찾아 통과하는 길을 막는다.
   assert.ok(invalid[first].length > 20);
   assert.ok(none[first].length > 20);
+});
+
+/*
+  ── SAMPLE_VARS 도 손으로 맞추는 거울이다 ──
+
+  `20261001` 미리보기가 **예시값**으로 채우는 변수 목록과, 설정 화면이
+  "이것들은 예시입니다" 라고 말하는 목록(`SAMPLE_VARS`)이 두 곳에 있다.
+  SQL 에서 빠지면 그 줄이 미리보기에서 사라지고, 화면에서 빠지면 화면이
+  예시를 진짜 값이라고 말한다. 어느 쪽이든 조용하다.
+
+  위 '일정 경고 문장' 테스트와 같은 수법으로 **원문을 직접 맞댄다.**
+  SQL 쪽은 `-- 아래 다섯은 **예시**다` 와 `-- 여기부터는 진짜 값` 사이의
+  키들이 그 목록이다. 주석을 표식으로 쓰는 것이 불안해 보이지만, 표식이
+  사라지면 이 테스트가 먼저 깨진다 — 조용히 통과하는 길이 없다.
+*/
+test('예시 변수 — 화면과 미리보기가 같은 다섯을 가리킨다', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const page = readFileSync(
+    new URL('../app/admin/qa-router/[id]/settings/page.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  const block = sql.match(
+    /아래 다섯은 \*\*예시\*\*다[^\n]*\n([\s\S]*?)-- 여기부터는 진짜 값/
+  );
+  assert.ok(block, 'SQL 에서 예시 블록 표식을 못 찾았다');
+  const fromSql = [...block![1].matchAll(/'([^']+)',\s*'/g)].map((m) => m[1]);
+
+  const row = page.match(/\n  activeCycle: \[([^\]]*)\]/);
+  assert.ok(row, 'SAMPLE_VARS 의 activeCycle 줄을 못 찾았다');
+  const fromPage = [...row![1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+
+  // 빈 목록 둘이 똑같아서 통과하는 길을 막는다.
+  assert.equal(fromSql.length, 5, `SQL 예시가 다섯이 아니다: ${fromSql}`);
+  assert.deepEqual([...fromPage].sort(), [...fromSql].sort());
 });
 
 test('수동 일정 — 둘 다 비우면 지우는 것이다', () => {
@@ -5629,7 +5666,7 @@ test('알림 모델 — 마이그레이션이 크론을 하나로 바꾼다 (SQL
   /*
     기본 경고 문구에 {일정경고이유} 가 반드시 있어야 한다.
 
-    `checkAlertRulesV2` 의 필수 변수 검사는 `template` 을 **덮어썼을 때만** 돈다
+    `checkAlertRules` 의 필수 변수 검사는 `template` 을 **덮어썼을 때만** 돈다
     (`if (r.template !== undefined)`). 안 덮어쓴 대상은 기본 문구를 쓰므로,
     기본 문구에 이유가 없으면 "일정 문제" 만 남고 무엇이 문제인지 사라진다.
     저장 차단이 못 막는 자리라 여기서 막는다.
@@ -5724,7 +5761,7 @@ test('알림 변환 — 본문이 없으면 없는 채로 둔다', () => {
   assert.equal(v2.enabled, false);
 });
 
-const R = (o: Partial<AlertRuleV2> & { id: string }): AlertRuleV2 => ({
+const R = (o: Partial<AlertRule> & { id: string }): AlertRule => ({
   at: '09:10',
   when: { kind: 'activeCycle' },
   label: o.id,

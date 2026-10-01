@@ -46,7 +46,7 @@ import {
   JUDGE_TIERS,
   JUDGE_STEP,
   type AlertAnchor,
-  type AlertRuleV2,
+  type AlertRule,
   type AlertShift,
   type AlertWhen,
   type JudgeStep,
@@ -1011,7 +1011,7 @@ export interface AlertSchedule {
 }
 
 export interface AlertRuleRow {
-  rule: AlertRuleV2;
+  rule: AlertRule;
   /**
    * 이번 차수에 실제로 울리는 날.
    *
@@ -1029,7 +1029,7 @@ export interface AlertRuleRow {
    * `위 알림이 먼저 걸려` 라고만 하면 그 "위" 가 무엇인지 목록을 다시
    * 훑어 짐작해야 한다 — 정작 답은 계산할 때 이미 손에 있었다.
    */
-  shadowedBy: AlertRuleV2 | null;
+  shadowedBy: AlertRule | null;
   /**
    * 차수 마감선(운영 배포일)을 넘어 이 차수에는 안 나간다.
    *
@@ -1059,7 +1059,7 @@ export interface AlertRuleRow {
  * 새 알림을 만들 때는 그게 유일한 단서다. 읽기와 편집이 같은 함수를 쓴다.
  */
 export function alertRuleRows(
-  rules: AlertRuleV2[],
+  rules: AlertRule[],
   schedule: AlertSchedule | null
 ): AlertRuleRow[] {
   const anchorOf = (a: AlertAnchor) =>
@@ -1101,7 +1101,7 @@ export function alertRuleRows(
     조건형(`activeCycle`·`scheduleUnusable`)은 여기 안 낀다. 그 둘이 그날
     나갈지는 보내는 순간의 상태가 정하는 것이라 차수 날짜로는 못 센다.
   */
-  const taken = new Map<string, AlertRuleV2>();
+  const taken = new Map<string, AlertRule>();
   return rules.map((r) => {
     const w = anchorWhen(r);
     const day =
@@ -1123,7 +1123,7 @@ export function alertRuleRows(
 
 /** 앵커 조건이면 그 조건, 아니면 null. 날짜 계산은 앵커에만 있다. */
 export function anchorWhen(
-  r: AlertRuleV2
+  r: AlertRule
 ): Extract<AlertWhen, { kind: 'anchor' }> | null {
   return r.when.kind === 'anchor' ? r.when : null;
 }
@@ -1157,7 +1157,7 @@ export function whenText(w: AlertWhen): string {
  * `offset` 에 이미 있다. 저장되는 라벨은 그대로 둔다 — 날짜가 바뀌면
  * 문구도 따라가야 하므로 템플릿인 게 맞다.
  */
-export function ruleName(r: AlertRuleV2): string {
+export function ruleName(r: AlertRule): string {
   const w = anchorWhen(r);
   return w ? r.label.replace('{days}', String(Math.abs(w.offset))) : r.label;
 }
@@ -1235,7 +1235,7 @@ export function RuleList({
   rules,
   schedule,
 }: {
-  rules: AlertRuleV2[];
+  rules: AlertRule[];
   schedule: AlertSchedule | null;
 }) {
   const rows = alertRuleRows(rules, schedule);

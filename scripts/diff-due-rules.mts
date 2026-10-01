@@ -17,9 +17,9 @@
  */
 import { Client } from 'pg';
 import { dueRules } from '../lib/services/qa-router/alert-rule';
-import type { AlertRuleV2 } from '../lib/services/qa-router/types';
+import type { AlertRule } from '../lib/services/qa-router/types';
 
-const RULES: AlertRuleV2[] = [
+const RULES: AlertRule[] = [
   {
     id: 'a',
     at: '09:10',
