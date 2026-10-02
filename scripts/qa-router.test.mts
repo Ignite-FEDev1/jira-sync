@@ -5514,6 +5514,12 @@ const FAIL_BASE = {
 test('실패 알림 — 단계·언제부터·로그를 함께 든다', () => {
   const t = buildFailText(FAIL_BASE);
   assert.ok(t.includes('3회 연속 실패'));
+  /*
+    어느 대상이 죽었나. 봇이 대상을 여럿 돌리므로 이름이 빠지면 알림을
+    받고도 어디를 볼지 모른다. 이름을 통째로 안 넣어도 나머지 네 줄이
+    다 맞아 테스트가 통과하던 자리였다.
+  */
+  assert.ok(t.includes('CPO BO QA'));
   assert.ok(t.includes('기획티켓 수집 (Jira search)'));
   assert.ok(t.includes('10:03'), 'KST 로 적는다');
   assert.ok(t.includes('3분째'));
@@ -5587,6 +5593,30 @@ test('복구 알림 — 실패 글의 ts 를 남기고, 붙인 뒤 지운다 (ti
   // 안 나간 날의 로그가 나간 날과 똑같이 생기면 안 된다
   assert.match(finish, /posted\s*\?\s*`복구 알림 발송 /);
   assert.match(finish, /:\s*`복구 알림 발송 실패 /);
+});
+
+/*
+  ── 무엇이 봇 상태 채널로 가고 무엇이 안 가나 ──
+
+  이 브랜치의 핵심이 이 갈림 하나다. `#qa-router` 는 차수 스레드만 담기로
+  했으므로 **봇이 고장 났다는 말**(연속 실패·복구)은 전용 채널로 보내고,
+  **사람이 설정을 바꿨다는 말**은 팀이 보는 운영 채널에 남긴다.
+
+  둘 다 `deps.slack.post(<채널>, …)` 한 줄 차이라, 나중에 누가 한쪽을
+  정리하다 채널 변수를 바꿔도 타입은 통과한다 (둘 다 string 이다). 이
+  테스트가 없으면 "실패 알림이 다시 #qa-router 로 돌아갔다" 를
+  아무것도 안 잡는다 - 배선 자체에는 테스트가 붙어 있지 않았다.
+*/
+test('봇 상태 채널 — 실패는 healthChannel 로, 설정 변경은 opsChannel 에 남는다 (tick.ts)', () => {
+  const src = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf8'
+  );
+
+  // 연속 실패 알림: 전용 채널로
+  assert.match(src, /deps\.slack\.post\(\s*healthChannel,\s*buildFailText\(/);
+  // 설정 변경 감지: 운영 채널 그대로. 봇 고장이 아니라 사람이 바꾼 일이다.
+  assert.match(src, /deps\.slack\.post\(opsChannel, msg\.text, msg\.blocks\)/);
 });
 
 /*
@@ -6772,6 +6802,65 @@ test('봇 상태 채널 — 마이그레이션이 칸 둘을 더한다 (SQL)', (
   assert.match(sql, /add column if not exists first_fail_at timestamptz/);
   // 컬럼 추가만 한다 — 함수를 재정의하면 정본이 옮겨간다
   assert.doesNotMatch(sql, /create or replace function/);
+});
+
+/*
+  ── 워치독도 같은 채널로 ──
+
+  `🔴 QA Router 응답 없음` 은 실패·복구와 **같은 성격**의 글이다. 그런데
+  채널을 옮길 때 빠져 있었다 - 운영 두 대상 다 `slack_ops_channel_id` 가
+  null 이라 `coalesce` 가 `slack_channel_id`(= `#qa-router`)로 떨어진다.
+  "차수 스레드만 담는다" 가 절반만 이뤄진 상태였다.
+
+  SQL 은 타입 검사가 없어 이 줄이 조용히 되돌아가도 아무것도 안 잡는다.
+*/
+test('워치독 — 봇 상태 채널을 먼저 본다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261004_qa_router_watchdog_health_channel.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 함정: 파일 안의 rollback 은 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
+  // 세 칸짜리 coalesce. 봇 상태 채널이 맨 앞이다.
+  assert.match(
+    sql,
+    /coalesce\(\s*c\.slack_health_channel_id,\s*c\.slack_ops_channel_id,\s*c\.slack_channel_id\s*\) as alert_channel/
+  );
+
+  /*
+    인자 없는 그대로 다시 만든다. 하나라도 더하면 옛 시그니처가 남아
+    오버로드가 되고, cron 이 부르는 `select public.qa_router_watchdog()` 가
+    `function ... is not unique` 로 멈춘다 (20260917_01 에서 실제로 났다).
+  */
+  assert.match(
+    sql,
+    /create or replace function public\.qa_router_watchdog\(\)\s*\n\s*returns void/
+  );
+
+  /*
+    옮긴 것은 채널 한 줄뿐이다. 20260917_02 가 고쳐 놓은 것들 - 쉬는 구간
+    존중, 유예 시간, 1시간 억제, 메시지 형식 - 이 같이 따라와야 한다.
+    손으로 다시 치다 하나라도 흘리면 그때 잡은 가짜 경보가 되살아난다.
+  */
+  assert.match(sql, /and public\.qa_router_in_qa_window\(c\.id\)/);
+  assert.match(sql, /and public\.qa_router_in_window\(c\.quiet_hours\)/);
+  assert.match(
+    sql,
+    /continue when r\.stale_alerted_at is not null\s+and r\.stale_alerted_at >= now\(\) - interval '1 hour';/
+  );
+  assert.match(sql, /make_interval\(mins => r\.heartbeat_stale_minutes\)/);
+  assert.match(sql, /🔴 QA Router 응답 없음 · %s · 마지막 폴링 %s/);
+  // security definer 함수다. 누가 부를 수 있는지가 이 파일만 읽어서 보여야 한다.
+  assert.match(
+    sql,
+    /revoke execute on function public\.qa_router_watchdog\(\)\s+from public, anon, authenticated;/
+  );
 });
 
 test('봇 상태 채널 — 행에서 읽힌다', () => {
