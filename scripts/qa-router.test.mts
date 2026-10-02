@@ -6388,3 +6388,31 @@ test('차수 머리글 — 일정이 쓸 수 없으면 그 자리에서 말한�
   // 이유가 날짜를 문장 안에 들고 있으므로, 일정 칸을 못 봐도 혼자 말이 된다
   assert.ok(m.text.includes('🚀'), '머리글 text 는 그대로다');
 });
+
+/*
+  일정 경고는 지금까지 **늘** 운영 채널로 갔다. 그런데 `ops_channel` 은
+  `coalesce(slack_ops_channel_id, slack_channel_id)` 라, 운영 두 대상처럼
+  `slack_ops_channel_id` 가 null 이면 결국 같은 채널이다 — "QA 스레드 ≠
+  운영 채널" 이라는 가정이 운영에서 한 번도 참인 적이 없었다. 나누는 이득
+  없이 차수 스레드를 따라가는 사람만 경고를 놓쳤다.
+
+  채널을 **실제로 나눈** 대상에서는 지금 그대로 운영 채널로 간다.
+*/
+test('경고 라우팅 — 채널이 실제로 갈릴 때만 운영 채널 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 함정: 파일 안의 rollback 은 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
+  // 라우팅이 두 채널을 비교한다
+  assert.match(sql, /ops_channel is distinct from r\.slack_channel_id/);
+  // 시그니처를 안 바꾼다 — 인자 없는 함수 그대로 (오버로드 회피)
+  assert.match(sql, /create or replace function public\.qa_router_alerts\(\)/);
+});
