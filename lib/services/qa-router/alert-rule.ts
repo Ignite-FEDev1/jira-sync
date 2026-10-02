@@ -120,3 +120,48 @@ export function statusPhrase(i: StatusInput): string {
     return `오늘 마감 · 연속 실패 ${i.consecutiveFails}회`;
   return '오늘 마감';
 }
+
+/**
+ * 이 대상이 **QA 기간이라는 개념을 쓰는가**.
+ * `qa_router_wants_qa_alerts(jsonb)` 의 쌍둥이다.
+ *
+ * ── 왜 "QA 앵커 규칙이 하나라도 켜져 있나" 가 그 질문인가 ──
+ *
+ * QA 시작·종료 앵커 규칙을 **둘 다 끈 대상**은 "이 대상에 QA 기간 개념이
+ * 없다, 그만 조르라" 고 말한 것이다. SQL 은 그 뜻으로 읽어서, 일정 경고
+ * (`scheduleUnusable` 갈래)와 18:00 요약의 일정 한 줄(`{일정경고이유}`)을
+ * 둘 다 이 문으로 막는다
+ * (`20261002_qa_router_warn_in_thread.sql:185`, `:291`).
+ *
+ * TS 쪽에는 이 문이 없어서, 차수 머리글이 경고를 들기 시작하자 **끈 대상이
+ * 새 차수마다 경고를 한 통씩 받게 됐다.** 알림에서는 조용한데 머리글에서만
+ * 떠드는, 두 입이 다른 말을 하는 모양이다. 그래서 여기에 둔다.
+ *
+ * ── SQL 과 한 줄씩 맞댄 자리 ──
+ *
+ * · `in ('qa_start', 'qa_end')` → `when.kind === 'anchor'` 이면서 앵커가
+ *   그 둘 중 하나. `prod` 는 QA 기간과 무관하므로 안 센다.
+ * · `coalesce((r.value->>'enabled')::boolean, true)` → `enabled !== false`.
+ *   값이 없거나 null 이면 **켜진 것으로 본다** — SQL 의 coalesce 와 같다.
+ *   타입은 boolean 을 요구하지만 DB 에서 온 jsonb 는 그 칸이 빌 수 있다.
+ * · `coalesce(p_rules, '[]')` → `rules ?? []`. 빈 목록이면 거짓이다.
+ *
+ * 옛 모양(`r.value->>'anchor'`, 최상위 앵커)은 여기서 안 본다. SQL 은 raw
+ * jsonb 를 읽어서 그 폴백이 필요하지만, TS 는 `rows.ts` 가 읽는 길목에서
+ * `toAlertRuleV2` 로 이미 새 모양으로 바꿔 놓는다 — 이 함수에 옛 모양이
+ * 도달하지 않는다.
+ *
+ * 차수 덮어쓰기를 반영한 **실제로 쓰는 규칙**을 넘겨야 한다
+ * (`effectiveAlertRules`). SQL 도 `qa_router_alert_rules_for` 를 거친
+ * `rules` 를 넘긴다.
+ */
+export function wantsQaAlerts(
+  rules: readonly AlertRule[] | null | undefined
+): boolean {
+  return (rules ?? []).some(
+    (r) =>
+      r.when.kind === 'anchor' &&
+      (r.when.anchor === 'qa_start' || r.when.anchor === 'qa_end') &&
+      r.enabled !== false
+  );
+}

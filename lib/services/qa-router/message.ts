@@ -184,10 +184,7 @@ function reasonBullets(j: Judgement, jiraBaseUrl: string): string {
   // 결론 도막을 굵게. 표시를 먼저 입히고 나서 끊는다 — 끊고 나면
   // 도막마다 찾아 다녀야 하고, 경계에 걸친 문구를 놓친다.
   const marked = j.highlight
-    ? escapeMrkdwn(j.reason).replace(
-        escapeMrkdwn(j.highlight),
-        (m) => `*${m}*`
-      )
+    ? escapeMrkdwn(j.reason).replace(escapeMrkdwn(j.highlight), (m) => `*${m}*`)
     : escapeMrkdwn(j.reason);
   const parts = marked
     .split(/\s+(?:→|·)\s+/)
@@ -383,15 +380,43 @@ export interface CycleHeaderInput {
   qaStartYmd?: string | null;
   qaEndYmd?: string | null;
   /**
-   * 운영 배포일. 배포대장 본문 값을 그대로 쓴다 (배포대장이 팀 정본 문서).
-   * fixVersion 이름의 날짜와 다를 수 있다 — 배포일이 조정되면 본문과 버전명이 어긋난다.
-   * 사이클 종료 판정은 fixVersion 날짜를 쓰므로 표시와 판정 기준이 갈릴 수 있는데,
-   * 그쪽이 더 보수적(더 오래 폴링)이라 문제되지 않는다.
+   * 운영 배포일. **사다리가 정한 값**(`prodDayOf`)을 넘긴다 — 대장 제목의
+   * 날짜와 본문 값 중 늦은 쪽이다.
+   *
+   * 늦은 쪽을 고르는 이유: 실측 `release_20260914` 는 본문이 9/10 으로 남아
+   * 있었는데 제목·Jira 릴리스·QA 스레드가 모두 9/14 였다. 낡은 본문을 그대로
+   * 적으면 차수 이름과 어긋난 날짜가 채널에 박힌다.
    */
   prodYmd: string;
   deployPageUrl?: string | null;
   filterUrl?: string | null;
+  /**
+   * 차수 화면 주소.
+   *
+   * 스레드 안 알림은 상세 블록을 지우면서 이 링크도 함께 버린다. 그 거래의
+   * 근거가 "루트에 이미 있다" 인데 이 링크만 루트에 없었다. 루트가 들어야
+   * "차수 화면에서 고쳐 주세요" 라는 말에 갈 길이 생긴다.
+   */
+  cycleUrl?: string | null;
+  /**
+   * 사다리가 "이 창은 못 쓴다" 고 한 이유. 쓸 수 있으면 `null`.
+   *
+   * 차수가 열리는 순간이 고치는 비용이 가장 싸다 — 아직 아무도 그 일정으로
+   * 일을 안 했다. 그 순간에 말한다.
+   */
+  scheduleWarn?: { why: string } | null;
 }
+
+/**
+ * 어드민 도메인.
+ *
+ * SQL 쪽 `qa_router_admin_base()`
+ * (`20260911_qa_router_message_board_link.sql`) 와 **같은 값이어야 한다.**
+ * 알림 본문은 SQL 이 만들고 스레드 부모는 여기가 만드는데, 둘이 갈리면
+ * 한쪽 링크만 404 가 된다 — 링크는 눌러 본 사람만 깨진 것을 본다.
+ * 테스트가 두 원문을 맞대고 있다.
+ */
+export const ADMIN_BASE = 'https://fe1-jira-sync.vercel.app';
 
 export function buildCycleHeader(i: CycleHeaderInput): SlackMessage {
   const fields: unknown[] = [];
@@ -415,6 +440,7 @@ export function buildCycleHeader(i: CycleHeaderInput): SlackMessage {
     항상 맞는 말만 남긴다.
   */
   if (i.filterUrl) links.push(`• [QA 필터] ${i.filterUrl}`);
+  if (i.cycleUrl) links.push(`• [차수 현황판] ${i.cycleUrl}`);
 
   const blocks: unknown[] = [
     {
@@ -423,6 +449,24 @@ export function buildCycleHeader(i: CycleHeaderInput): SlackMessage {
     },
     { type: 'section', fields },
   ];
+
+  /*
+    경고는 일정 칸 **바로 아래**에 둔다. 위에 있는 날짜가 왜 이상한지를
+    말하는 글이라 떨어뜨리면 둘을 잇는 일이 읽는 사람 몫이 된다.
+  */
+  if (i.scheduleWarn) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          `:warning: *이 차수의 QA 기간을 쓸 수 없습니다*\n` +
+          `${i.scheduleWarn.why}\n` +
+          `차수 화면에서 직접 넣거나 배포대장을 고쳐 주세요.`,
+      },
+    });
+  }
+
   if (links.length > 0) {
     blocks.push({ type: 'divider' });
     blocks.push({

@@ -50,11 +50,16 @@ import {
   dueRules,
   statusPhrase,
   toAlertRuleV2,
+  wantsQaAlerts,
 } from '@/lib/services/qa-router/alert-rule';
 import type { AlertRule, AlertWhen } from '@/lib/services/qa-router/types';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
-import { cycleUpsertRow, toConfig, toState } from '@/lib/services/qa-router/rows';
+import {
+  cycleUpsertRow,
+  toConfig,
+  toState,
+} from '@/lib/services/qa-router/rows';
 import type { ConfigRow, StateRow } from '@/lib/services/qa-router/rows';
 import {
   extractIssueKeys,
@@ -138,6 +143,7 @@ const {
   buildCycleHeader,
   buildConfigChangedMessage,
   escapeMrkdwn,
+  ADMIN_BASE,
 } = await import('../lib/services/qa-router/message');
 
 const { isQuietHours, parseSchedule, diffDerived } =
@@ -2518,7 +2524,10 @@ test('차수 덮어쓰기 — 저장 전에 깨진 규칙을 사람 말로 막�
     checkAlertRules([{ ...anchor, when: { ...when, offset: 99 } }]) ?? '',
     /-60 ~ 60/
   );
-  assert.match(checkAlertRules([{ ...anchor, label: '  ' }]) ?? '', /문구를 입력/);
+  assert.match(
+    checkAlertRules([{ ...anchor, label: '  ' }]) ?? '',
+    /문구를 입력/
+  );
   // 시각이 데이터가 되면서 새로 생긴 칸이다. 여기도 사람 말로 막아야 한다.
   assert.match(checkAlertRules([{ ...anchor, at: '9:10' }]) ?? '', /시각/);
   // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
@@ -4688,10 +4697,7 @@ test('마감선 — 운영 배포일 다음날부터는 아무것도 안 울린�
     prodYmd: '2026-10-07',
   };
   // 10-08 은 qaEnd 당일이지만 배포가 지났으므로 안 울린다
-  assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'),
-    null
-  );
+  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'), null);
 });
 
 test('마감선 — 운영 배포일 당일은 막지 않는다', () => {
@@ -4717,10 +4723,7 @@ test('마감선 — 정상 데이터에서는 아무것도 안 바뀐다', () =>
     milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
     '오늘 QA 시작'
   );
-  assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'),
-    'QA 종료'
-  );
+  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'), 'QA 종료');
   assert.equal(
     milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-30'),
     '오늘 운영 배포'
@@ -4971,7 +4974,19 @@ test('일정 사다리 — 크론 함수도 사다리를 거친다 (SQL)', () =>
     brief,
     /qa_router_should_warn\(cyc\.schedule_warned_on, today_kst\)/
   );
-  // 경고는 운영 채널로 간다
+  /*
+    경고는 운영 채널로 간다.
+
+    ⚠ **지금 동작에 대한 말이 아니다.** `qa_router_morning_brief()` 는
+    `20260930_qa_router_alert_model.sql:875` 가 `drop function` 으로 지웠고,
+    크론은 `qa_router_alerts()` 하나만 부른다. 이 단언이 지키는 것은 **그
+    파일에 적힌 옛 글자**일 뿐이다.
+
+    실제 라우팅은 `20261002_qa_router_warn_in_thread.sql` 이 정한다 —
+    채널이 **실제로 갈릴 때만** 운영 채널이고, 안 갈리면 차수 스레드 안이다
+    ("경고 라우팅 — 채널이 실제로 갈릴 때만 운영 채널 (SQL)" 참고).
+    여기를 읽고 "경고는 늘 운영 채널" 로 믿지 않도록 적어 둔다.
+  */
   assert.match(brief, /target := r\.ops_channel;/);
   // 경고를 보내면 기록을 남긴다 (차수당 횟수를 묶는 근거)
   assert.match(brief, /set schedule_warned_on = today_kst/);
@@ -5073,7 +5088,13 @@ test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
 
   // 종류를 읽고, 그 종류의 변수를 얹는다
   assert.match(sql, /coalesce\(p_when->>'kind', 'anchor'\)/);
-  for (const v of ['알림건수', '상태문구', '마지막확인', '일정머리말', '참고머리말']) {
+  for (const v of [
+    '알림건수',
+    '상태문구',
+    '마지막확인',
+    '일정머리말',
+    '참고머리말',
+  ]) {
     assert.match(sql, new RegExp(`'${v}'`), `${v} 를 안 채운다`);
   }
 
@@ -5092,7 +5113,7 @@ test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
   `invalid`·`none` 중 **어느 문장을 고를지**는 PL/pgSQL 함수 본문 안에만 있어
   바깥에서 부를 수가 없다. 그래서 같은 `case` 가 세 벌이다:
 
-    · 20260930 디스패처(activeCycle 갈래)   — 실제로 나가는 글자
+    · 20261002 디스패처(activeCycle 갈래)   — 실제로 나가는 글자
     · 20261001 미리보기                      — 화면이 보여주는 글자
     · scripts/record-alert-messages.mts      — 골든을 녹화하는 글자
 
@@ -5107,13 +5128,23 @@ test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
   ※ `20260929_qa_router_schedule_gap.sql` 에 네 번째 사본이 있다 —
      20260930 이 대체한 옛 `qa_router_daily_summary` 의 것이라 더는 안 돈다.
      여기서 안 센다. 나중에 문구를 바꿀 때는 디스패처를 `create or replace`
-     하는 **새 마이그레이션**이 생기므로, 아래 목록의 20260930 자리를 그
+     하는 **새 마이그레이션**이 생기므로, 아래 목록의 디스패처 자리를 그
      파일로 옮긴다.
+
+  ※ 그 일이 실제로 일어났다. `20261002_qa_router_warn_in_thread.sql` 이
+     `qa_router_alerts()` 를 다시 만들었고, 적용 순서가 파일명 정렬순이라
+     **늦은 쪽이 정본**이다 (`supabase/migrations/README.md` 의 "같은 함수를
+     다시 만든 파일이 둘이면 늦은 쪽이 정본입니다" 표). 그래서 디스패처
+     자리를 20261002 로 옮겼다. 20260930 은 그 시점의 역사일 뿐이고,
+     거기를 가리키고 있으면 **정본을 고쳐도 핀 셋이 전부 초록**이 된다 —
+     이 테스트가 막으려던 "같은 질문에 세 답" 그 자체다.
 */
 test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () => {
   const files = {
-    '디스패처(20260930)': '../supabase/migrations/20260930_qa_router_alert_model.sql',
-    '미리보기(20261001)': '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
+    '디스패처(20261002)':
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
+    '미리보기(20261001)':
+      '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
     '녹화(record-alert-messages)': '../scripts/record-alert-messages.mts',
   };
 
@@ -5157,7 +5188,8 @@ test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () =>
   `alert-rule.ts` 의 머리말에는 "이 파일의 함수들은 SQL 쌍둥이와 줄 단위로
   대조해야 한다" 고 적혀 있다. 그런데 `statusPhrase` 는 **실행 코드에서
   아무도 안 부른다** — 18시 요약의 머리말을 실제로 만드는 것은 디스패처의
-  `case head_kind` 뿐이다(20260930). 기존 테스트는 TS 리터럴을 테스트
+  `case head_kind` 뿐이다(정본은 20261002 — 위 '일정 경고 문장' 테스트의
+  두 번째 ※ 참고). 기존 테스트는 TS 리터럴을 테스트
   파일에 적은 리터럴과 맞대므로, SQL 쪽 문장을 한 글자 고쳐도 275개가
   전부 초록이다.
 
@@ -5177,7 +5209,7 @@ test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () =>
 test('18시 머리말 문구 — statusPhrase 와 SQL case 가 한 글자도 다르지 않다', () => {
   const sql = readFileSync(
     new URL(
-      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
       import.meta.url
     ),
     'utf-8'
@@ -6284,5 +6316,383 @@ test('겹침 셈 — 기본 다섯 규칙 배치에서는 겹침이 없다', () 
   assert.deepEqual(
     rows.filter((r) => r.shadowed).map((r) => r.rule.id),
     []
+  );
+});
+
+/*
+  어드민 도메인이 TS 와 SQL 두 곳에 산다.
+
+  SQL 은 `qa_router_admin_base()` 가 정본이고, TS 는 스레드 부모가 차수 화면
+  링크를 들기 위해 같은 값을 안다. 둘이 갈리면 **한쪽 알림의 링크만 조용히
+  깨진다** — 링크는 눌러 본 사람만 404 를 본다.
+
+  그래서 원문으로 맞댄다. 이 레포는 같은 수법을 일정 경고 문장에 이미 쓴다.
+*/
+test('어드민 주소 — TS 와 SQL 이 한 글자도 다르지 않다', () => {
+  const ts = readFileSync(
+    new URL('../lib/services/qa-router/message.ts', import.meta.url),
+    'utf-8'
+  );
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260911_qa_router_message_board_link.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+
+  const tsHit = ts.match(/export const ADMIN_BASE = '([^']+)'/);
+  const sqlHit = sql.match(/select '(https:\/\/[^']+)'\s*\$\$/);
+
+  assert.ok(tsHit, 'message.ts 에 ADMIN_BASE 상수가 없다');
+  assert.ok(sqlHit, 'qa_router_admin_base() 의 값을 못 읽었다');
+  assert.equal(tsHit[1], sqlHit[1]);
+  assert.match(tsHit[1], /^https:\/\//);
+});
+
+const HEADER_BASE = {
+  cycleLabel: '배포 261007',
+  fixVersion: 'release_20261007',
+  qaStartYmd: '2026-09-29',
+  qaEndYmd: '2026-10-08',
+  prodYmd: '2026-10-07',
+  deployPageUrl: 'https://ignitecorp.atlassian.net/wiki/x/1',
+  filterUrl: 'https://ignitecorp.atlassian.net/issues?filter=12571',
+};
+
+/*
+  경고가 없을 때는 지금과 글자가 같아야 한다. 이 태스크는 **더하는** 일이지
+  바꾸는 일이 아니다.
+*/
+test('차수 머리글 — 일정이 멀쩡하면 지금과 같다', () => {
+  const before = buildCycleHeader(HEADER_BASE);
+  const after = buildCycleHeader({ ...HEADER_BASE, scheduleWarn: null });
+  assert.deepEqual(after, before);
+  assert.ok(
+    !JSON.stringify(after).includes('쓸 수 없'),
+    '경고가 없는데 경고 문구가 들어갔다'
+  );
+});
+
+/*
+  ── 왜 루트가 차수 화면 링크를 들어야 하나 ──
+
+  스레드 안 알림은 상세 블록 다섯 줄을 지운다. 근거는 "같은 내용이 루트에
+  이미 있다" 인데, 실측하면 넷은 맞고 **`{상세링크}` 만 루트에 없다.**
+  그래서 18:00 요약이 "차수 화면에서 고쳐 주세요" 라고 하면서 스레드 어디에도
+  그 화면으로 갈 길이 없었다. 루트가 들면 그 거래가 비로소 전부 참이 된다.
+*/
+test('차수 머리글 — 차수 화면 링크를 든다', () => {
+  const m = buildCycleHeader({
+    ...HEADER_BASE,
+    cycleUrl: `${ADMIN_BASE}/admin/qa-router/cfg-1/cycles/2026-10-07`,
+  });
+  const s = JSON.stringify(m.blocks);
+  assert.ok(s.includes('/admin/qa-router/cfg-1/cycles/2026-10-07'));
+  assert.ok(s.includes('차수 현황판'));
+  // 기존 링크 둘은 그대로다
+  assert.ok(s.includes('배포대장'));
+  assert.ok(s.includes('QA 필터'));
+});
+
+test('차수 머리글 — 일정이 쓸 수 없으면 그 자리에서 말한다', () => {
+  const m = buildCycleHeader({
+    ...HEADER_BASE,
+    scheduleWarn: {
+      why: 'QA 종료(2026-10-08)가 운영 배포일(2026-10-07)보다 뒤입니다',
+    },
+  });
+  const s = JSON.stringify(m.blocks);
+  assert.ok(s.includes('QA 기간을 쓸 수 없습니다'));
+  assert.ok(
+    s.includes('QA 종료(2026-10-08)가 운영 배포일(2026-10-07)보다 뒤입니다')
+  );
+  // 이유가 날짜를 문장 안에 들고 있으므로, 일정 칸을 못 봐도 혼자 말이 된다
+  assert.ok(m.text.includes('🚀'), '머리글 text 는 그대로다');
+});
+
+/*
+  일정 경고는 지금까지 **늘** 운영 채널로 갔다. 그런데 `ops_channel` 은
+  `coalesce(slack_ops_channel_id, slack_channel_id)` 라, 운영 두 대상처럼
+  `slack_ops_channel_id` 가 null 이면 결국 같은 채널이다 — "QA 스레드 ≠
+  운영 채널" 이라는 가정이 운영에서 한 번도 참인 적이 없었다. 나누는 이득
+  없이 차수 스레드를 따라가는 사람만 경고를 놓쳤다.
+
+  채널을 **실제로 나눈** 대상에서는 지금 그대로 운영 채널로 간다.
+*/
+test('경고 라우팅 — 채널이 실제로 갈릴 때만 운영 채널 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 함정: 파일 안의 rollback 은 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
+  // 라우팅이 두 채널을 비교한다
+  assert.match(sql, /ops_channel is distinct from r\.slack_channel_id/);
+  // 시그니처를 안 바꾼다 — 인자 없는 함수 그대로 (오버로드 회피)
+  assert.match(sql, /create or replace function public\.qa_router_alerts\(\)/);
+
+  /*
+    "비교가 어딘가 있다" 만 재면 **갈래를 뒤집어도 통과한다.** 실제로 그렇다:
+    두 팔을 맞바꾸거나, thread_ts 를 붙이는 블록을 통째로 지우거나,
+    `in_thread` 를 계산만 하고 안 써도 위 두 줄은 다 녹색이다. 운영에서는
+    두 대상 다 `slack_ops_channel_id` 가 null 이라 **갈래가 뒤집히면 경고가
+    전부 스레드 밖으로 돌아간다** - 이 태스크가 고치려던 바로 그 증상이다.
+
+    로컬 Postgres 실측은 CI 가 재현 못 하므로, 팔의 **방향**을 여기서 박는다.
+    (`/s` 플래그는 이 레포 tsconfig target 이 ES2017 이라 TS1501 로 막힌다.
+     줄바꿈은 `\s+` 로 넘는다.)
+  */
+  // ① 나뉜 쪽 → 운영 채널, 스레드 밖
+  assert.match(
+    sql,
+    /is distinct from r\.slack_channel_id then\s+target := r\.ops_channel;\s+in_thread := false;/
+  );
+  // ② 안 나뉜 쪽 → 차수 채널, 스레드가 있으면 그 안
+  assert.match(
+    sql,
+    /else\s+target := r\.slack_channel_id;\s+in_thread := r\.thread_ts is not null;\s+end if;/
+  );
+  // ③ 정한 값을 실제로 쓴다 — 안 쓰면 ①②가 다 맞아도 아무 데도 안 붙는다
+  assert.match(
+    sql,
+    /if in_thread then\s+payload := payload \|\| jsonb_build_object\('thread_ts', r\.thread_ts\);/
+  );
+  // ④ 선언이 있어야 위 셋이 컴파일된다
+  assert.match(sql, /^\s+in_thread boolean;$/m);
+});
+
+/*
+  ── "QA 기간을 안 쓰는 대상" 이라는 문이 TS 에는 없었다 ──
+
+  SQL 은 일정 경고를 **두 조건**으로 낸다: 창이 못 쓸 상태인가
+  (`win.source in ('none','invalid')`), 그리고 **이 대상이 QA 기간이라는
+  개념을 쓰는가**(`qa_router_wants_qa_alerts`). QA 시작·종료 앵커를 둘 다
+  끈 대상은 "우리는 QA 기간을 안 쓴다, 그만 조르라" 고 말한 것이라
+  경고(`:185`)도 18:00 요약의 일정 한 줄(`:291`)도 안 받는다.
+
+  차수 머리글이 경고를 들기 시작하면서 TS 에 그 문이 필요해졌는데 없었다.
+  그러면 끈 대상이 **알림에서는 조용한데 새 차수 머리글에서만 경고를 받는다**
+  - 안 받기로 한 쪽에 새 메시지를 보내는 것이고, "경고의 목적지만 옮긴다" 는
+  이 브랜치의 전제가 깨진다.
+
+  그래서 `alert-rule.ts` 에 쌍둥이를 둔다. 아래는 그 쌍둥이의 동작이고,
+  SQL 과 글자를 맞대는 핀은 그 다음 테스트다.
+*/
+test('wantsQaAlerts — QA 앵커가 하나라도 켜져 있을 때만 참', () => {
+  const anchor = (
+    anchor: 'qa_start' | 'qa_end' | 'prod',
+    enabled = true
+  ): AlertRule => ({
+    id: `r-${anchor}-${String(enabled)}`,
+    at: '09:10',
+    when: { kind: 'anchor', anchor, offset: 0, shift: 'none' },
+    label: anchor,
+    enabled,
+  });
+
+  // 켜진 QA 앵커 하나면 참이다
+  assert.equal(wantsQaAlerts([anchor('qa_start')]), true);
+  assert.equal(wantsQaAlerts([anchor('qa_end')]), true);
+  assert.equal(wantsQaAlerts([anchor('prod'), anchor('qa_end')]), true);
+
+  // 둘 다 끈 대상이 이 태스크가 지키려는 쪽이다
+  assert.equal(
+    wantsQaAlerts([
+      anchor('qa_start', false),
+      anchor('qa_end', false),
+      anchor('prod'),
+    ]),
+    false
+  );
+
+  // 운영 배포일 앵커는 QA 기간과 무관하다
+  assert.equal(wantsQaAlerts([anchor('prod')]), false);
+
+  // 앵커가 아닌 종류는 안 센다 - SQL 의 `#>>'{when,anchor}'` 가 null 이다
+  const nonAnchor: AlertRule[] = [
+    {
+      id: 'summary',
+      at: '18:00',
+      when: { kind: 'activeCycle' },
+      label: '마감 요약',
+      enabled: true,
+    },
+    {
+      id: 'scheduleWarning',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: true,
+    },
+  ];
+  assert.equal(wantsQaAlerts(nonAnchor), false);
+
+  // 빈 목록·없음 - SQL 의 `coalesce(p_rules, '[]')`
+  assert.equal(wantsQaAlerts([]), false);
+  assert.equal(wantsQaAlerts(null), false);
+  assert.equal(wantsQaAlerts(undefined), false);
+
+  /*
+    `enabled` 칸이 비면 **켜진 것으로 본다** - SQL 의
+    `coalesce((r.value->>'enabled')::boolean, true)` 와 같다. 타입은
+    boolean 을 요구하지만 DB 에서 온 jsonb 는 그 칸이 없을 수 있고,
+    `rows.ts` 는 그대로 캐스팅해 넘긴다.
+  */
+  const noEnabled = { ...anchor('qa_start') } as Partial<AlertRule>;
+  delete noEnabled.enabled;
+  assert.equal(wantsQaAlerts([noEnabled as AlertRule]), true);
+
+  // 기본 규칙 셋은 QA 앵커를 들고 있다 - 운영 대상이 경고를 계속 받는다
+  assert.equal(wantsQaAlerts(DEFAULT_ALERT_RULES), true);
+});
+
+/*
+  ── 그 쌍둥이를 SQL 원문에 묶는다 ──
+
+  `schedule_note` 문장을 세 곳에서 맞대는 것과 같은 수법이다. 동작 테스트만
+  두면 **SQL 쪽을 고쳐도 전부 초록**이라, 쌍둥이가 갈리는 순간을 아무도
+  못 본다. 이 저장소가 이미 그 사고를 겪었다.
+
+  `qa_router_wants_qa_alerts` 의 정본은 `20260930` 이다
+  (`20260929` 가 먼저 만들고 `20260930` 이 새 규칙 모양을 읽게 다시 만들었다 -
+   파일명 정렬이 적용 순서이므로 늦은 쪽이 남는다).
+  부르는 자리는 `20261002` 의 디스패처 둘이다.
+*/
+test('wantsQaAlerts — SQL 쌍둥이와 같은 것을 센다', () => {
+  const sqlFnFile = readFileSync(
+    new URL(
+      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const dispatcher = readFileSync(
+    new URL(
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const ts = readFileSync(
+    new URL('../lib/services/qa-router/alert-rule.ts', import.meta.url),
+    'utf-8'
+  );
+
+  const sqlFn = sqlFnFile.match(
+    /create or replace function public\.qa_router_wants_qa_alerts[\s\S]*?\$\$;/
+  );
+  assert.ok(sqlFn, '20260930 에서 qa_router_wants_qa_alerts 본문을 못 찾았다');
+  const tsFn = ts.match(/export function wantsQaAlerts\([\s\S]*?\n\}\n/);
+  assert.ok(tsFn, 'alert-rule.ts 에서 wantsQaAlerts 본문을 못 찾았다');
+
+  // ① 세는 앵커 이름이 같다
+  const anchorsOf = (src: string) =>
+    [...src.matchAll(/'(qa_[a-z_]+)'/g)].map((m) => m[1]).sort();
+  const fromSql = anchorsOf(sqlFn[0]);
+  const fromTs = anchorsOf(tsFn[0]);
+  assert.deepEqual(fromSql, ['qa_end', 'qa_start'], `SQL: ${fromSql}`);
+  assert.deepEqual(fromTs, fromSql, '세는 앵커가 SQL 과 TS 에서 다르다');
+
+  /*
+    ② `enabled` 가 비었을 때의 답이 같다. 두 언어의 철자는 다르지만 뜻이
+       하나다 - 한쪽만 고치면 "끈 대상" 의 범위가 조용히 달라진다.
+  */
+  assert.match(sqlFn[0], /coalesce\(\(r\.value->>'enabled'\)::boolean, true\)/);
+  assert.match(tsFn[0], /r\.enabled !== false/);
+
+  // ③ 디스패처가 실제로 두 자리에서 이 문을 쓴다 (경고 · 18시 일정 한 줄)
+  assert.match(
+    dispatcher,
+    /win\.source in \('none', 'invalid'\)\s+and public\.qa_router_wants_qa_alerts\(rules\)/
+  );
+  assert.match(
+    dispatcher,
+    /when not public\.qa_router_wants_qa_alerts\(rules\) then null/
+  );
+
+  /*
+    ④ TS 쪽에서도 **실제로 쓰여야** 한다. 함수만 있고 머리글이 안 부르면
+       위 셋이 다 맞아도 끈 대상이 경고를 받는다 - 고치려던 증상 그대로다.
+       차수 덮어쓰기를 반영한 목록을 넘기는 것까지 본다
+       (SQL 은 `qa_router_alert_rules_for` 를 거친 `rules` 를 넘긴다).
+  */
+  const tick = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.match(
+    tick,
+    /wantsQaAlerts\(\s*effectiveAlertRules\(row\?\.alertRulesOverride, cfg\.alertRules\)\s*\)/
+  );
+});
+
+/*
+  ── 차수 화면 링크는 `deploy_ymd` 로 열린다 ──
+
+  어드민 경로가 `qa_router_cycles.deploy_ymd` 로 열리고(`cycles/[ymd]`),
+  SQL 의 `{상세링크}` 도 `cyc.deploy_ymd` 를 쓴다. 머리글만 fixVersion
+  **이름에서 뜯은** 날짜를 쓰면 같은 화면으로 가는 링크 둘이 서로 다른
+  값에서 만들어지고, 갈리는 날 머리글 링크는 빈 화면으로 떨어진다 -
+  하필 "차수 화면에서 고쳐 주세요" 라고 말하는 경고와 같이 나가는 링크다.
+
+  사다리와 그 사다리가 정한 운영 배포일도 같은 값을 받아야 한다. SQL 이
+  사다리(`:121`)와 `prod_day`(`:128`) 둘 다에 `cyc.deploy_ymd` 를 넘긴다.
+*/
+test('차수 머리글 — 링크·사다리가 대장 행의 deploy_ymd 를 쓴다', () => {
+  const tick = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf-8'
+  );
+
+  // 한 칸으로 모으고 대장 행이 없을 때만 이름에서 뜯은 날짜로 돌아간다
+  assert.match(
+    tick,
+    /const cycleYmd = row\?\.deployYmd \?\? parsedFv\.deployYmd;/
+  );
+  // 링크·사다리·운영 배포일 셋이 그 칸을 쓴다
+  assert.match(tick, /\/cycles\/\$\{cycleYmd\}`,/);
+  assert.match(tick, /deployYmd: cycleYmd,/g);
+  assert.equal(
+    [...tick.matchAll(/deployYmd: cycleYmd,/g)].length,
+    2,
+    '사다리와 prodDayOf 둘 다 cycleYmd 를 받아야 한다'
+  );
+
+  /*
+    머리글 블록 안에 이름에서 뜯은 날짜가 다시 새어 들어오지 않는다.
+    `cycleYmd` 를 정하는 줄 **다음**부터 잰다 - 그 줄의 `??` 오른쪽은
+    의도한 폴백이다.
+  */
+  const DECL = 'const cycleYmd = row?.deployYmd ?? parsedFv.deployYmd;';
+  const block = tick.slice(
+    tick.indexOf(DECL) + DECL.length,
+    tick.indexOf('const res = await deps.slack.post(')
+  );
+  assert.ok(block.length > 0, '머리글 블록을 못 잘랐다');
+  assert.doesNotMatch(
+    block,
+    /parsedFv\.deployYmd/,
+    '머리글 블록이 아직 fixVersion 이름의 날짜를 쓴다'
+  );
+
+  // SQL 쪽 근거 - 사다리와 prod_day 가 같은 칸을 받는다
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  assert.match(sql, /cyc\.prod_ymd,\s+cyc\.deploy_ymd,/);
+  assert.match(
+    sql,
+    /prod_day := greatest\(cyc\.deploy_ymd, coalesce\(cyc\.prod_ymd, cyc\.deploy_ymd\)\);/
   );
 });

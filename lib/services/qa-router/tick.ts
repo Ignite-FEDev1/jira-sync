@@ -23,17 +23,18 @@ import {
 } from './derive';
 import { postRecovery } from './fail-alert';
 import { judge, type JudgeResult } from './judge';
-import {
-  collectPlanProgress,
-} from './plan-tickets';
+import { collectPlanProgress } from './plan-tickets';
 import { resolveOutcomes } from './outcome';
 import {
+  ADMIN_BASE,
   buildConfigChangedMessage,
   buildCycleHeader,
   buildRouteMessage,
   type ConfigDiffEntry,
   type ReassignOutcome,
 } from './message';
+import { prodDayOf, resolveQaWindow } from './qa-window';
+import { wantsQaAlerts } from './alert-rule';
 import { readCyclePageTitle, tooSoon } from './status';
 import {
   extractJqlStrings,
@@ -41,13 +42,14 @@ import {
   pickLedgerProjectKey,
 } from './ledger-jql';
 import * as repo from './repository';
-import type {
-  DeployCycle,
-  ActiveCycle,
-  DerivedContext,
-  DerivedMember,
-  QaRouterConfig,
-  QaRouterState,
+import {
+  effectiveAlertRules,
+  type DeployCycle,
+  type ActiveCycle,
+  type DerivedContext,
+  type DerivedMember,
+  type QaRouterConfig,
+  type QaRouterState,
 } from './types';
 import type {
   ConfluenceClient,
@@ -484,14 +486,15 @@ export async function collectCycles(
       names = (await deps.jira.getProjectVersions(resolved)).map((v) => v.name);
     } catch (e) {
       // 버전 조회가 실패해도 차수 목록 자체는 만들 수 있다.
-      deps.log?.(
-        `${projectKey} 버전 목록 조회 실패: ${(e as Error).message}`
-      );
+      deps.log?.(`${projectKey} 버전 목록 조회 실패: ${(e as Error).message}`);
     }
     const set = new Set(names);
     versionsByProject.set(projectKey, set);
     // 같은 목록으로 **이름 규칙**도 뽑는다. 제목 폴백이 쓴다.
-    ruleByProject.set(projectKey, names.length ? inferFixVersionRule(names) : null);
+    ruleByProject.set(
+      projectKey,
+      names.length ? inferFixVersionRule(names) : null
+    );
     return set;
   };
 
@@ -1069,18 +1072,69 @@ export async function runTick(
 
       // ── 사이클 시작 알림 (스레드 부모) ──
       if (!cycle.threadTs) {
+        /*
+          스레드 부모는 차수마다 **한 번만** 만든다. 여기서 대장 행을 한 번
+          더 읽어도 비싸지 않고, 상태 캐시가 아니라 정본을 본다.
+
+          캐시(`cycle`)에는 사람이 차수 화면에 넣은 수동 QA 기간이 없다.
+          그것 없이 머리글을 쓰면, 수동으로 고친 차수가 스레드 부모에서만
+          옛 대장 값을 계속 보여준다.
+        */
+        const row = await repo.getCycle(cfg.id, parsedFv.raw);
+        /*
+          이 차수를 가리키는 날짜. **정본은 `qa_router_cycles.deploy_ymd`**
+          (= 대장 제목의 날짜)이고, `parsedFv.deployYmd` 는 fixVersion
+          **이름에서 뜯어낸** 날짜다. 보통 같지만 같다는 보장이 없다.
+
+          갈리면 두 가지가 동시에 틀어진다.
+
+          · 차수 화면 주소가 `deploy_ymd` 로 열리므로
+            (`app/admin/qa-router/[id]/cycles/[ymd]`), 이름에서 뜯은 날짜로
+            링크를 만들면 **빈 화면**으로 떨어진다. "차수 화면에서 고쳐
+            주세요" 라고 적어 놓고 고칠 데가 없는 자리로 보내는 꼴이고,
+            하필 그 문장이 나가는 때가 "일정을 어디에서도 못 읽었다" 일 때다.
+          · 사다리(`resolveQaWindow`)와 그 사다리가 정한 운영 배포일
+            (`prodDayOf`)이 받는 "제목 날짜" 도 `deploy_ymd` 여야 한다 —
+            SQL 쌍둥이가 사다리에도 `prod_day` 에도 `cyc.deploy_ymd` 를
+            넘긴다 (`20261002_qa_router_warn_in_thread.sql:121`, `:128`).
+            여기만 다른 값을 쓰면 화면·알림·머리글이 또 세 답을 한다.
+
+          그래서 이 블록 안에서는 날짜를 한 칸으로 모아 쓴다.
+
+          ── 폴백의 값과 비용 ──
+
+          대장 행이 없으면(`row` 가 null) 이름에서 뜯은 날짜로 돌아간다.
+          **비용**: 행이 없다는 것은 그 주소에 보여 줄 차수도 없다는 뜻이라
+          링크는 어차피 빈 화면이다. 폴백이 그것을 고치지는 못한다.
+          **그래도 쓰는 이유**: null 로 두면 `{상세링크}` 가 빈 값이 되어
+          머리글에서 그 줄이 통째로 사라진다(빈 변수는 줄째로 빠진다).
+          사라지면 아무 단서가 없지만, 날짜가 박힌 주소는 "이 날짜 차수가
+          안 잡혔다" 를 보여 주고 차수 목록으로 되짚어 갈 손잡이가 된다.
+        */
+        const cycleYmd = row?.deployYmd ?? parsedFv.deployYmd;
+        const win = resolveQaWindow({
+          manualStartYmd: row?.qaStartYmdManual ?? null,
+          manualEndYmd: row?.qaEndYmdManual ?? null,
+          ledgerStartYmd: cycle.schedule?.qaStartYmd ?? null,
+          ledgerEndYmd: cycle.schedule?.qaEndYmd ?? null,
+          prodYmd: cycle.schedule?.prodYmd ?? null,
+          deployYmd: cycleYmd,
+          rule: cfg.qaScheduleRule,
+        });
         const header = buildCycleHeader({
           cycleLabel: cycle.schedule?.cycleLabel ?? parsedFv.raw,
           fixVersion: parsedFv.raw,
-          qaStartYmd: cycle.schedule?.qaStartYmd ?? null,
-          qaEndYmd: cycle.schedule?.qaEndYmd ?? null,
+          qaStartYmd: win.qaStartYmd,
+          qaEndYmd: win.qaEndYmd,
           /*
-          배포대장 본문이 아니라 차수 이름(release_YYYYMMDD)의 날짜를 쓴다.
-          실측 release_20260914 은 본문이 9/10 으로 남아 있었는데 제목·Jira
-          릴리스·QA 팀 스레드가 모두 9/14 였다. 스레드 머리글에 본문 값을
-          적으면 차수 이름과 어긋난 날짜가 채널에 박힌다.
-        */
-          prodYmd: parsedFv.deployYmd,
+            사다리가 정한 운영 배포일. `prodDayOf` 가 제목 날짜와 본문 값 중
+            늦은 쪽을 고르므로, 본문이 낡아 이른 날짜를 찍던 사고
+            (`release_20260914`: 본문 9/10 vs 제목 9/14)는 계속 막힌다.
+          */
+          prodYmd: prodDayOf({
+            deployYmd: cycleYmd,
+            prodYmd: cycle.schedule?.prodYmd ?? null,
+          }),
           /*
           스페이스를 안 박는다. `/wiki/spaces/CPO/…` 로 두면 CPO 가 아닌
           대상은 없는 경로를 가리키는데, 링크는 깨져도 조용하다 — 누른
@@ -1091,6 +1145,30 @@ export async function runTick(
             ? `${deps.jiraBaseUrl}/wiki/pages/viewpage.action?pageId=${cycle.deployPageId}`
             : null,
           filterUrl: `${deps.jiraBaseUrl}/issues?filter=${cfg.jiraFilterId}`,
+          cycleUrl: `${ADMIN_BASE}/admin/qa-router/${cfg.id}/cycles/${cycleYmd}`,
+          /*
+            경고를 들지 말지는 **창이 못 쓸 상태인가**(`invalid`·`none`)와
+            **이 대상이 QA 기간 개념을 쓰는가**(`wantsQaAlerts`) 둘 다를
+            본다. SQL 이 꼭 그렇게 한다 — 일정 경고 갈래
+            (`20261002_qa_router_warn_in_thread.sql:185`)와 18:00 요약의
+            `{일정경고이유}`(`:291`)가 같은 짝을 쓴다.
+
+            뒤의 조건이 없으면, QA 시작·종료 앵커를 **둘 다 끈 대상**
+            (= "우리는 QA 기간이라는 걸 안 쓴다") 이 알림에서는 조용한데
+            **새 차수 머리글에서만 경고를 받는다.** 안 받기로 한 쪽에
+            새 메시지를 보내는 것이라, 이 브랜치가 "경고의 목적지만
+            옮긴다" 고 한 전제가 깨진다.
+
+            규칙은 차수 덮어쓰기를 반영한 것을 넘긴다 — SQL 도
+            `qa_router_alert_rules_for` 를 거친 목록을 본다.
+          */
+          scheduleWarn:
+            (win.source === 'invalid' || win.source === 'none') &&
+            wantsQaAlerts(
+              effectiveAlertRules(row?.alertRulesOverride, cfg.alertRules)
+            )
+              ? { why: win.why ?? 'QA 시작·종료일을 어디에서도 못 읽었습니다' }
+              : null,
         });
         const res = await deps.slack.post(
           cfg.slackChannelId,
@@ -1174,21 +1252,24 @@ export async function runTick(
       담당자"를 볼 수가 없었다 — 답이 티켓에 있는데 레이블로 추측만 했다.
       보고자는 "QA 가 자기 티켓을 도로 가져간 상태"를 알아보는 데 쓴다.
     */
-    const found = await deps.jira.searchAll(jql, [
-      'summary',
-      'labels',
-      'issuetype',
-      'assignee',
-      'reporter',
-      /*
+    const found = await deps.jira.searchAll(
+      jql,
+      [
+        'summary',
+        'labels',
+        'issuetype',
+        'assignee',
+        'reporter',
+        /*
         차수를 가르는 칸. 판정 ③이 "같은 차수의 형제" 를 찾을 때 이 값으로
         범위를 잡는다. 어떤 칸인지는 필터 JQL 이 정한다 — KQ 는 fixVersion,
         GW 는 parent(`차세대 그룹웨어 0917 비정기배포 QA 요청의 건`)다.
         안 읽어 오면 형제를 찾을 범위가 아예 없어진다.
       */
-      derived.cycleAxisField,
-      cfg.coAssigneeField,
-    ].filter((f): f is string => Boolean(f)));
+        derived.cycleAxisField,
+        cfg.coAssigneeField,
+      ].filter((f): f is string => Boolean(f))
+    );
     log(`${cfg.name} · 트리아지 배정 활성 티켓 ${found.length}건`);
 
     /*
