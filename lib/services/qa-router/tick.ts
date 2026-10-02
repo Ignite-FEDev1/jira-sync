@@ -21,7 +21,7 @@ import {
   parseFixVersion,
   type FixVersionRule,
 } from './derive';
-import { postRecovery } from './fail-alert';
+import { buildFailText, postRecovery } from './fail-alert';
 import { judge, type JudgeResult } from './judge';
 import { collectPlanProgress } from './plan-tickets';
 import { resolveOutcomes } from './outcome';
@@ -74,6 +74,19 @@ const SCHEDULE_TTL_MS = 12 * 3_600_000;
 export const FAIL_ALERT_THRESHOLD = 3;
 
 /**
+ * 이 실행의 GitHub Actions 로그 주소. 로컬 실행이면 null.
+ *
+ * 워크플로에 아무것도 안 더해도 된다 — Actions 가 모든 스텝에 이 둘을
+ * 기본으로 넣는다.
+ */
+function githubRunUrl(): string | null {
+  const id = process.env.GITHUB_RUN_ID;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!id || !repo) return null;
+  return `https://github.com/${repo}/actions/runs/${id}`;
+}
+
+/**
  * 재시도로 해결되지 않는 Slack 오류.
  *
  * 이 오류들은 봇이 영구히 아무것도 못 보내는 상태를 뜻한다. 그런데 폴링 자체는
@@ -117,7 +130,8 @@ export type TickOutcome =
       notified: number;
       failed: number;
     }
-  | { status: 'error'; message: string; consecutiveFails: number };
+  /** `consecutiveFails` 가 null 이면 집계를 못 읽은 것이다 (0 과 다르다). */
+  | { status: 'error'; message: string; consecutiveFails: number | null };
 
 // ─────────────────────────────────────────────────────────────
 // quiet hours
@@ -253,8 +267,21 @@ export async function deriveContext(
   */
   const channelNames: Record<string, string> = {};
   const channelProblems: string[] = [];
+  /*
+    봇 상태 채널도 같이 본다. 빠뜨리면 두 가지가 깨진다.
+
+    ① 설정 화면이 이름 대신 `C0BT1FPET4Y` 같은 날 ID 를 보여준다
+       (화면은 여기서 만든 `channelNames` 를 읽는다).
+    ② 봇이 그 채널에 없으면 **실패 알림 자체가 조용히 안 나간다.**
+       봇이 고장 났다고 알리는 통로가 같이 고장 나는 자리라, 빠뜨렸을 때
+       값이 가장 비싼 채널이다.
+  */
   for (const id of new Set(
-    [cfg.slackChannelId, cfg.slackOpsChannelId].filter((v): v is string => !!v)
+    [
+      cfg.slackChannelId,
+      cfg.slackOpsChannelId,
+      cfg.slackHealthChannelId,
+    ].filter((v): v is string => !!v)
   )) {
     const info = await deps.slack.getChannelInfo(id);
     if (info.name) channelNames[id] = info.name;
@@ -267,6 +294,11 @@ export async function deriveContext(
         `missing_scope` 로 막혀 있었고, **여태 한 번도 성공한 적이 없다.**
         그래서 설정 화면에 `#fe1-tool-alert` 대신 `C0BVDJEJ19C` 가 떴다 —
         아무도 몰랐다. 이것도 결과를 버리던 코드가 숨긴 고장이다.
+
+        그 뒤 이 채널은 `#qa-router` 로 이름이 바뀌었고, 지금의
+        `#fe1-tool-alert` 는 `C0BT1FPET4Y` 다. 위 문단은 그때의 기록이라
+        그대로 둔다 — `C0BVDJEJ19C` 를 오늘의 봇 상태 채널로 읽지 않도록
+        여기에 적어 둔다.
       */
       const scopeIssue =
         info.error === 'missing_scope' ||
@@ -699,6 +731,13 @@ export async function runTick(
   const log = deps.log ?? (() => {});
   const now = () => deps.now?.() ?? new Date();
   const opsChannel = cfg.slackOpsChannelId ?? cfg.slackChannelId;
+  /*
+    봇 상태(연속 실패·복구)만 여기로. 안 정했으면 운영 채널로 떨어진다.
+
+    설정 변경 감지는 `opsChannel` 에 그대로 남는다 — 그건 봇이 고장 난 게
+    아니라 사람이 설정을 바꿔 팀이 알아야 하는 일이다.
+  */
+  const healthChannel = cfg.slackHealthChannelId ?? opsChannel;
 
   // ── 리스 ──
   if (!(await repo.acquireLease(cfg.id, holder))) {
@@ -707,11 +746,20 @@ export async function runTick(
     return { status: 'lease_held', holder: st.lockedBy ?? undefined };
   }
 
+  /*
+    어느 구간에서 죽었나. `catch` 가 마지막 값을 읽는다.
+
+    `runAside` 를 넓히지 않는 이유: 그것은 **치명적이지 않은** 구간 전용이라
+    실패해도 흐름이 이어진다. 치명 경로까지 그 모양으로 감싸면 실패했을 때
+    계속 진행하게 되어 뜻이 달라진다. 여기선 변수 하나로 충분하다.
+  */
+  let step = '시작';
+
   try {
     const state = await repo.getOrCreateState(cfg.id);
 
     if (isQuietHours(cfg, now())) {
-      await finishOk(cfg, state, log, deps, opsChannel);
+      await finishOk(cfg, state, log, deps, healthChannel);
       return { status: 'quiet_hours' };
     }
 
@@ -741,6 +789,7 @@ export async function runTick(
     // 배포대장은 하루에 몇 번씩 바뀌는 문서가 아니다. 매 tick 마다 트리를 훑으면
     // 월 폴더 6개 × 자식 조회 + 페이지 본문까지 읽어 10분마다 수십 번 호출이 된다.
     // 실패해도 tick 본체(알림)를 막지 않는다 — 목록은 부가 정보다.
+    step = '차수 수집';
     await runAside(cfg.id, 'cycles', log, '차수 목록 수집', async () => {
       const lastAt = await repo.lastCycleCollectedAt(cfg.id);
       const stale =
@@ -770,6 +819,7 @@ export async function runTick(
       now().getTime() - new Date(state.filterCache.checkedAt).getTime() <
         FILTER_TTL_MS;
 
+    step = '필터 조회';
     if (!derivedFresh || !filterFresh) {
       const fresh = await deriveContext(cfg, deps);
       const { changed, unchanged } = diffDerived(derived, fresh.ctx);
@@ -854,6 +904,7 @@ export async function runTick(
       17시 슬롯이 통째로 막힌다 — 마지막 수집이 **그 슬롯 시작 이후**인지를
       본다.
     */
+    step = '기획티켓 수집';
     await runAside(cfg.id, 'plan', log, '기획티켓 진행 수집', async () => {
       const activeFv = state.activeCycle?.fixVersion;
       const today = kstYmd(now());
@@ -968,6 +1019,7 @@ export async function runTick(
       ①번 기능(판정 알림)은 차수를 몰라도 답할 수 있다. 여기서 던지면
       차수를 안 쓰는 팀은 봇을 아예 못 쓴다.
     */
+    step = '차수 수집';
     const parsedFv = fixVersion ? parseFixVersion(fixVersion, { rule }) : null;
     if (fixVersion && !parsedFv) {
       throw new Error(
@@ -1020,7 +1072,7 @@ export async function runTick(
           state.activeCycle = null;
           await repo.saveState(cfg.id, { activeCycle: null });
         }
-        await finishOk(cfg, state, log, deps, opsChannel);
+        await finishOk(cfg, state, log, deps, healthChannel);
         return { status: 'cycle_ended', fixVersion: parsedFv.raw };
       }
 
@@ -1062,7 +1114,7 @@ export async function runTick(
       const qaStart = cycle.schedule?.qaStartYmd;
       if (qaStart && kstYmd(now()) < qaStart) {
         log(`개발 단계 · QA 시작 ${qaStart} · 조용히 종료`);
-        await finishOk(cfg, state, log, deps, opsChannel);
+        await finishOk(cfg, state, log, deps, healthChannel);
         return {
           status: 'not_started',
           fixVersion: parsedFv.raw,
@@ -1170,6 +1222,7 @@ export async function runTick(
               ? { why: win.why ?? 'QA 시작·종료일을 어디에서도 못 읽었습니다' }
               : null,
         });
+        step = 'Slack 발송';
         const res = await deps.slack.post(
           cfg.slackChannelId,
           header.text,
@@ -1252,6 +1305,7 @@ export async function runTick(
       담당자"를 볼 수가 없었다 — 답이 티켓에 있는데 레이블로 추측만 했다.
       보고자는 "QA 가 자기 티켓을 도로 가져간 상태"를 알아보는 데 쓴다.
     */
+    step = '필터 조회';
     const found = await deps.jira.searchAll(
       jql,
       [
@@ -1313,6 +1367,7 @@ export async function runTick(
     // 채널·토큰 문제는 루프를 다 돌아 이력을 남긴 뒤 tick 을 실패시킨다.
     let fatalSlackError: string | null = null;
 
+    step = '판정';
     for (const issue of fresh) {
       try {
         const result = await judge(issue, deps.jira, {
@@ -1474,13 +1529,14 @@ export async function runTick(
       }
     }
 
+    step = 'Slack 발송';
     if (fatalSlackError) {
       throw new Error(
         `Slack 발송 불가: ${fatalSlackError} · 채널 ${cfg.slackChannelId} 에 봇이 없거나 토큰이 무효합니다`
       );
     }
 
-    await finishOk(cfg, state, log, deps, opsChannel);
+    await finishOk(cfg, state, log, deps, healthChannel);
     return {
       status: 'done',
       scanned: found.length,
@@ -1488,16 +1544,57 @@ export async function runTick(
       failed,
     };
   } catch (e) {
-    const fails = (await repo.getOrCreateState(cfg.id)).consecutiveFails + 1;
-    await repo.saveState(cfg.id, { consecutiveFails: fails });
-    log(`치명적 오류 ${fails}회 연속: ${(e as Error).message}`);
+    /*
+      ── 집계가 실패해도 알림은 나간다 ──
 
-    // 임계값에 닿을 때만 알린다 (일시적 단절 오탐 억제)
-    if (fails === FAIL_ALERT_THRESHOLD) {
+      이 catch 가 있는 이유는 하나다: 봇이 고장 났다는 말을 사람에게
+      전하는 것. 그 앞에 놓인 상태 읽기·쓰기가 던지면 알림까지 같이
+      삼켜져, 봇이 조용히 죽는다.
+
+      가상의 걱정이 아니다. `main` push 가 Vercel 빌드와 `db-migrate`
+      워크플로를 동시에 깨우므로, `first_fail_at` 이 아직 없는 스키마에
+      새 코드가 붙어 있는 몇 분이 실제로 있다. 그 창에서 `saveState` 는
+      PGRST204(unknown column)로 던진다. 읽기 쪽은 `rows.ts` 가 `?? null`
+      로 이미 막아 뒀는데(거기 주석이 같은 창을 가리킨다) 쓰기 쪽에는
+      짝이 없었다.
+
+      그래서 집계는 통째로 감싸고, 실패하면 횟수를 `null` 로 둔다.
+      `buildFailText` 가 그 null 을 "횟수 미상" 으로 적는다 - 못 읽은
+      값을 지어내지 않는다.
+    */
+    let fails: number | null = null;
+    let firstFailAt: string | null = null;
+    try {
+      const prev = await repo.getOrCreateState(cfg.id);
+      fails = prev.consecutiveFails + 1;
+      // 0 → 1 에서만 찍는다. 그 뒤 실패는 "언제부터" 를 안 바꾼다.
+      firstFailAt = prev.firstFailAt ?? now().toISOString();
+      await repo.saveState(cfg.id, { consecutiveFails: fails, firstFailAt });
+    } catch (bookkeepingError) {
+      // 집계가 안 됐다는 사실 자체가 단서다. 삼키지 말고 로그에 남긴다.
+      log(`실패 집계 기록 불가: ${(bookkeepingError as Error).message}`);
+    }
+    log(
+      `치명적 오류 ${fails === null ? '횟수 미상' : `${fails}회 연속`} (${step}): ${(e as Error).message}`
+    );
+
+    /*
+      임계값에 닿을 때만 알린다 (일시적 단절 오탐 억제). 횟수를 못 읽었으면
+      억제할 근거가 없다 - 모르는 채로 입을 다무는 쪽이 더 비싸므로 보낸다.
+    */
+    if (fails === null || fails === FAIL_ALERT_THRESHOLD) {
       try {
         const res = await deps.slack.post(
-          opsChannel,
-          `❌ QA Router · ${cfg.name} · ${fails}회 연속 실패: ${(e as Error).message}`
+          healthChannel,
+          buildFailText({
+            name: cfg.name,
+            fails,
+            step,
+            message: (e as Error).message,
+            firstFailAt,
+            now: now(),
+            runUrl: githubRunUrl(),
+          })
         );
         /*
           이 글의 ts 를 들고 있는다. 복구 알림을 그 댓글로 달기 위한 것이다
@@ -1527,10 +1624,23 @@ async function finishOk(
   state: QaRouterState,
   log: Logger,
   deps: TickDeps,
-  opsChannel: string
+  healthChannel: string
 ): Promise<void> {
   await repo.saveState(cfg.id, {
     consecutiveFails: 0,
+    /*
+      성공했으면 "언제부터" 도 같이 지운다. 안 지우면 다음 장애가 지난
+      장애의 시작 시각을 들고 "3시간째" 라고 운다.
+
+      **지울 게 있을 때만 보낸다.** `saveState` 는 던지는 함수고,
+      `first_fail_at` 은 이 브랜치가 새로 만든 칸이다. 코드 배포와
+      `db-migrate` 가 같은 `main` push 에서 동시에 도므로 컬럼이 아직 없는
+      DB 에 새 코드가 붙는 창이 있고, 거기서 이 칸을 매 tick 무조건 쓰면
+      PGRST204 로 던져 **성공한 tick 이 통째로 실패로 뒤집힌다.** 흔한
+      경로(계속 성공)에서는 지울 게 없으니, 안 쓰는 것으로 그 창을 관리
+      대상이 아니라 아예 없는 것으로 만든다.
+    */
+    ...(state.firstFailAt === null ? {} : { firstFailAt: null }),
     lastPollAt: (deps.now?.() ?? new Date()).toISOString(),
     staleAlertedAt: null,
   });
@@ -1542,7 +1652,7 @@ async function finishOk(
     */
     const { posted } = await postRecovery(
       (c, t, b, ts) => deps.slack.post(c, t, b, ts),
-      opsChannel,
+      healthChannel,
       `✅ QA Router · ${cfg.name} 복구됨 (직전 ${state.consecutiveFails}회 연속 실패)`,
       state.failAlertTs
     );

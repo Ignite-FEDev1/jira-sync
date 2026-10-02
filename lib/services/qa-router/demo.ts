@@ -295,7 +295,12 @@ const FAILURE_CASES: {
 }[] = [
   // ── 판정은 됐고 발송도 됐는데, 결과가 달랐다 ──────────────────────────
   { note: '예상 빗나감', kind: 'ours', error: null, outcome: 'other_team' },
-  { note: '놓침·타팀으로 오판', kind: 'other', error: null, outcome: 'our_team' },
+  {
+    note: '놓침·타팀으로 오판',
+    kind: 'other',
+    error: null,
+    outcome: 'our_team',
+  },
   {
     note: '놓침·담당자 식별 실패',
     kind: 'unknown',
@@ -371,7 +376,12 @@ const FAILURE_CASES: {
   // 끝난 차수에 이게 남아 있으면 위 어떤 것보다 큰 사건이다. 위 난수 루프는
   // 끝난 차수에 미배정을 안 만들지만(그게 평범해 보이면 안 되므로),
   // 갈래를 보여 주려면 한 건은 있어야 한다.
-  { note: '미배정·우리 팀 판정', kind: 'ours', error: null, outcome: 'pending' },
+  {
+    note: '미배정·우리 팀 판정',
+    kind: 'ours',
+    error: null,
+    outcome: 'pending',
+  },
   {
     note: '미배정·판정 불가',
     kind: 'unknown',
@@ -580,7 +590,11 @@ export function demoEvents(
           갔는지 자체가 기록되지 않는다. 'none'(다 봤지만 못 찾음)과
           다르므로 null 로 둔다.
         */
-        via: crash ? null : f.kind === 'unknown' ? 'none' : (picked?.via ?? null),
+        via: crash
+          ? null
+          : f.kind === 'unknown'
+            ? 'none'
+            : (picked?.via ?? null),
         reason: crash
           ? null
           : f.kind === 'unknown'
@@ -625,7 +639,7 @@ export function demoDerived(): DerivedContext {
     excludeStatuses: ['Done', 'CLOSE', '완료'],
     members: MEMBERS.map((m) => ({ ...m })),
     fixVersionRule: 'release_YYYYMMDD',
-    channelNames: { C0BVDJEJ19C: 'fe1-tool-alert' },
+    channelNames: { C0BVDJEJ19C: 'qa-router' },
     derivedAt: new Date(Date.now() - 42 * 60_000).toISOString(),
   };
 }
@@ -639,6 +653,7 @@ export function demoState(activeFixVersion: string): QaRouterState {
     derived: demoDerived(),
     lastPollAt: new Date(Date.now() - 35_000).toISOString(),
     consecutiveFails: 0,
+    firstFailAt: null,
     lockedUntil: null,
     lockedBy: null,
     staleAlertedAt: null,
@@ -681,6 +696,7 @@ export function demoConfig(
     slackChannelId: 'C0BVDJEJ19C',
     slackFallbackChannelId: 'C0BVDJEJ19C',
     slackOpsChannelId: null,
+    slackHealthChannelId: null,
     planIssueTypeId: '10001',
     devIssueTypeId: '10205',
     planIssueTypeName: '스토리',

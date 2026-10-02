@@ -52,6 +52,7 @@ export type ConfigRow = {
   slack_channel_id: string;
   slack_fallback_channel_id: string | null;
   slack_ops_channel_id: string | null;
+  slack_health_channel_id: string | null;
   plan_issue_type_id: string | null;
   dev_issue_type_id: string | null;
   plan_issue_type_name: string | null;
@@ -83,6 +84,7 @@ export type StateRow = {
   derived: DerivedContext | null;
   last_poll_at: string | null;
   consecutive_fails: number;
+  first_fail_at: string | null;
   locked_until: string | null;
   locked_by: string | null;
   stale_alerted_at: string | null;
@@ -152,6 +154,7 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
     slackChannelId: r.slack_channel_id,
     slackFallbackChannelId: r.slack_fallback_channel_id,
     slackOpsChannelId: r.slack_ops_channel_id,
+    slackHealthChannelId: r.slack_health_channel_id ?? null,
     /*
       아래 폴백은 "있을 수 없는 경우" 를 막는 게 아니다. 코드와 마이그레이션이
       따로 나가므로, 컬럼이 아직 없는 DB 에 새 코드가 붙는 창이 실제로 있다.
@@ -201,6 +204,7 @@ export function toState(r: StateRow): QaRouterState {
     derived: r.derived,
     lastPollAt: r.last_poll_at,
     consecutiveFails: r.consecutive_fails,
+    firstFailAt: r.first_fail_at ?? null,
     lockedUntil: r.locked_until,
     lockedBy: r.locked_by,
     staleAlertedAt: r.stale_alerted_at,

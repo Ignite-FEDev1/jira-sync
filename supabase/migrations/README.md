@@ -58,8 +58,27 @@ update public._migrations set checksum = '<새 해시>' where filename = '<파�
 
 적용 순서가 파일명 정렬순이므로, 같은 함수를 `create or replace` 하는 파일이
 여럿이면 **마지막에 도는 파일의 내용이 DB 에 남습니다.** 앞 파일의 정의는
-그 시점의 역사일 뿐이고, 거기를 고쳐도 뒤 파일이 곧바로 덮어씁니다 —
-적용 로그에는 "적용됨" 이 찍히는데 DB 함수는 안 바뀌는, 알아채기 어려운 모양입니다.
+그 시점의 역사일 뿐입니다.
+
+> **앞 파일을 고치면 뒤 파일이 덮어써 주지 않습니다. 조용히 과거로
+> 되돌아갑니다.**
+>
+> `db-migrate.sh` 는 전부 다시 돌리지 않습니다. `public._migrations` 의 해시와
+> 맞춰 보고 **내용이 안 바뀐 파일은 건너뜁니다** (`scripts/db-migrate.sh` 의
+> `if [[ "$prev" == "$sum" ]]; then skipped`). 그래서 앞 파일만 고치면:
+>
+> - 고친 앞 파일: 해시가 달라져 **재적용** → 옛 정의가 DB 에 다시 올라갑니다
+> - 뒤 정본 파일: 해시가 그대로라 **건너뜀** → 덮어쓸 기회가 없습니다
+>
+> 적용 로그에는 `완료 · 새로 적용 0건 · 재적용 1건 · 변경 없음 N건` 이 찍히고
+> 실패는 없습니다. 알아채기 어려운 쪽은 이 모양입니다.
+>
+> 지금 걸려 있는 것: `20260917_02_qa_router_watchdog_respects_idle.sql` 한 줄만
+> 고쳐도 워치독이 `slack_health_channel_id` 를 모르던 정의로 돌아가, 봇 상태
+> 알림이 다시 판정 알림 채널(`#qa-router`)로 쏟아집니다.
+>
+> 앞 파일을 꼭 고쳐야 하면 **정본 파일도 함께 건드려 해시를 바꾸거나**, 아예
+> 새 파일을 하나 더 쌓으세요.
 
 ```bash
 # 이 함수의 정본이 어느 파일인지 — 맨 아래 줄이 정본입니다
@@ -71,9 +90,16 @@ grep -ln "function public.<함수이름>" supabase/migrations/*.sql | LC_ALL=C s
 | 함수 | 정본 (여기를 고칩니다) | 얼어붙은 역사 |
 |---|---|---|
 | `public.qa_router_alerts()` | `20261002_qa_router_warn_in_thread.sql` | `20260930_qa_router_alert_model.sql` |
+| `public.qa_router_watchdog()` | `20261004_qa_router_watchdog_health_channel.sql` | `20260917_02_qa_router_watchdog_respects_idle.sql`, `20260909_qa_router_summary_in_thread.sql`, `20260908_qa_router_window_single_source.sql`, `20260907_qa_router_pg_cron.sql`, `20260907_qa_router_ops_channel.sql`, `20260907_qa_router.sql` |
 
 `20260930` 은 그 밖에도 한 번만 적용되는 파일이라 **더더욱 고치면 안 됩니다**
 (아래 "한 번만 적용되는 파일이 있습니다" 참고).
+
+워치독은 얼어붙은 역사가 여섯입니다. 초기 구축 때 파일마다 함수를 통째로
+다시 만들었기 때문이고, 위 `grep | sort` 가 그 일곱 줄을 그대로 보여 줍니다.
+그중 **직전 정본은 `20260917_02`** 입니다 — 쉬는 구간을 장애로 읽던 가짜
+경보를 그 파일이 고쳤으므로, 이 함수를 다시 만들 때 글자를 가져올 곳도
+거기입니다.
 
 ## 무엇이 적용되는지 판단하는 기준
 

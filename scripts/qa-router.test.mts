@@ -53,7 +53,10 @@ import {
   wantsQaAlerts,
 } from '@/lib/services/qa-router/alert-rule';
 import type { AlertRule, AlertWhen } from '@/lib/services/qa-router/types';
-import { postRecovery } from '@/lib/services/qa-router/fail-alert';
+import {
+  buildFailText,
+  postRecovery,
+} from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
 import {
   cycleUpsertRow,
@@ -5491,6 +5494,152 @@ test('18시 요약 — 스레드 안에서는 일정·참고를 뺀다 (SQL)', (
 });
 
 /*
+  ── 실패 알림 본문 ──
+
+  실측. Supabase 풀러가 끊겨 마이그레이션이 실패한 날, 알림은
+  `3회 연속 실패: <message>` 한 줄이었다. 그걸로는 Jira 문제인지 DB
+  문제인지 구분이 안 됐다. 되짚는 사람이 묻는 세 가지(어디서 · 언제부터 ·
+  로그 어디)를 메시지가 바로 답하는지 고정한다.
+*/
+const FAIL_BASE = {
+  name: 'CPO BO QA (개발)',
+  fails: 3,
+  step: '기획티켓 수집 (Jira search)',
+  message: 'Jira 503 /search/jql :: {"errorCode": "MAINTENANCE"}',
+  firstFailAt: '2026-10-02T01:03:00Z',
+  now: new Date('2026-10-02T01:06:00Z'),
+  runUrl: 'https://github.com/x/y/actions/runs/36832902072',
+};
+
+test('실패 알림 — 단계·언제부터·로그를 함께 든다', () => {
+  const t = buildFailText(FAIL_BASE);
+  assert.ok(t.includes('3회 연속 실패'));
+  /*
+    어느 대상이 죽었나. 봇이 대상을 여럿 돌리므로 이름이 빠지면 알림을
+    받고도 어디를 볼지 모른다. 이름을 통째로 안 넣어도 나머지 네 줄이
+    다 맞아 테스트가 통과하던 자리였다.
+  */
+  assert.ok(t.includes('CPO BO QA'));
+  assert.ok(t.includes('기획티켓 수집 (Jira search)'));
+  assert.ok(t.includes('10:03'), 'KST 로 적는다');
+  assert.ok(t.includes('3분째'));
+  assert.ok(t.includes('MAINTENANCE'));
+  assert.ok(t.includes('actions/runs/36832902072'));
+});
+
+/*
+  로컬 실행에는 GITHUB_RUN_ID 가 없다. 빈 링크를 내는 대신 그 줄을 통째로
+  민다 — SQL 쪽 `qa_router_render` 의 "빈 변수가 있는 줄은 버린다" 와 같은
+  규칙을 TS 에서 손으로 지킨다.
+*/
+test('실패 알림 — 로그 링크가 없으면 그 줄이 통째로 빠진다', () => {
+  const t = buildFailText({ ...FAIL_BASE, runUrl: null });
+  assert.ok(!t.includes('로그'), '빈 링크 줄이 남았다');
+  assert.ok(t.includes('기획티켓 수집'), '나머지는 그대로다');
+});
+
+test('실패 알림 — 첫 실패 시각이 없으면 경과를 안 적는다', () => {
+  const t = buildFailText({ ...FAIL_BASE, firstFailAt: null });
+  assert.ok(!t.includes('분째'));
+  assert.ok(!t.includes('첫 실패'));
+  assert.ok(t.includes('3회 연속 실패'));
+});
+
+test('실패 알림 — 한 시간을 넘으면 시간으로 적는다', () => {
+  const t = buildFailText({
+    ...FAIL_BASE,
+    now: new Date('2026-10-02T03:33:00Z'),
+  });
+  assert.ok(t.includes('2시간 30분째'), `실제: ${t}`);
+});
+
+/*
+  ── 배포 레이스: 집계가 실패해도 알림은 나간다 ──
+
+  `main` push 하나가 Vercel 빌드와 `db-migrate` 워크플로를 동시에 깨운다.
+  그래서 `first_fail_at` 이 아직 없는 스키마에 새 코드가 붙어 있는 몇 분이
+  실제로 있다. 그 창에서 `saveState` 는 PGRST204 로 **던진다**
+  (`repository.ts` 가 error 를 throw 로 올린다).
+
+  고치기 전 모양: catch 안의 첫 두 줄이 그 throw 를 그대로 올려 보내,
+  바로 아래 Slack 발송까지 같이 날아갔다. 봇이 완전히 죽은 채 아무 말도
+  안 하는 창이 생긴다 - 이 catch 가 존재하는 단 하나의 이유가 그 말을
+  하는 것인데.
+
+  읽기 쪽은 `rows.ts` 가 `?? null` 로 같은 창을 이미 막아 뒀다. 쓰기 쪽에
+  짝이 없던 것이고, 여기가 그 짝이다.
+*/
+test('실패 알림 — 횟수를 못 읽었으면 지어내지 않고 미상이라 적는다', () => {
+  const t = buildFailText({ ...FAIL_BASE, fails: null, firstFailAt: null });
+
+  // 모른다고 적는다
+  assert.ok(t.includes('횟수 미상'), `실제: ${t}`);
+  assert.ok(t.includes('상태를 못 읽었습니다'), `실제: ${t}`);
+
+  /*
+    0 으로도 3 으로도 뭉개지 않는다. `0회 연속 실패` 는 "실패가 없다" 는
+    거짓말이고, 임계값을 지어내면 받는 사람이 없는 사실을 믿는다.
+  */
+  assert.ok(!/\d+회 연속 실패/.test(t), `횟수를 지어냈다: ${t}`);
+
+  // 나머지 단서는 그대로 들고 간다 - 이게 지금 유일한 신호다
+  assert.ok(t.includes('CPO BO QA'), `실제: ${t}`);
+  assert.ok(t.includes('기획티켓 수집 (Jira search)'), `실제: ${t}`);
+  assert.ok(t.includes('MAINTENANCE'), `실제: ${t}`);
+  assert.ok(t.includes('actions/runs/36832902072'), `실제: ${t}`);
+});
+
+test('배포 레이스 — 집계는 감싸고, 성공 경로는 지울 게 있을 때만 쓴다 (tick.ts)', () => {
+  const src = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf8'
+  );
+
+  /*
+    ① catch 의 집계(읽기 + 쓰기)가 try 안에 있어야 한다. 밖에 있으면
+    throw 가 Slack 발송 앞에서 함수를 떠난다.
+  */
+  const catchStart = src.indexOf('let fails: number | null = null;');
+  assert.ok(catchStart > 0, 'catch 의 집계 블록을 못 찾았다');
+  // `status: 'error'` 는 TickOutcome 타입에도 있다. catch 뒤에서부터 찾는다.
+  const catchBody = src.slice(
+    catchStart,
+    src.indexOf("status: 'error'", catchStart)
+  );
+  assert.ok(catchBody.length > 0, 'catch 의 끝을 못 찾았다');
+  assert.match(
+    catchBody,
+    /try \{\s+const prev = await repo\.getOrCreateState\(cfg\.id\);[\s\S]*?await repo\.saveState\(cfg\.id, \{ consecutiveFails: fails, firstFailAt \}\);\s+\} catch \(/,
+    '집계가 try 로 감싸여 있지 않다'
+  );
+
+  /*
+    ② 횟수를 못 읽었어도 알린다. `fails === FAIL_ALERT_THRESHOLD` 만
+    보면 null 일 때 조용히 지나가, 고치려던 침묵이 그대로 남는다.
+  */
+  assert.match(
+    catchBody,
+    /if \(fails === null \|\| fails === FAIL_ALERT_THRESHOLD\)/,
+    '횟수 미상일 때 알림이 안 나간다'
+  );
+
+  /*
+    ③ 성공 경로는 `first_fail_at` 을 무조건 쓰지 않는다. 지울 게 없는
+    흔한 tick 이 새 컬럼을 건드리지 않으면 레이스 창 자체가 없어진다.
+  */
+  const finish = src.slice(src.indexOf('async function finishOk'));
+  assert.ok(
+    !/^\s+firstFailAt: null,$/m.test(finish),
+    'finishOk 가 firstFailAt 을 무조건 쓴다'
+  );
+  assert.match(
+    finish,
+    /\.\.\.\(state\.firstFailAt === null \? \{\} : \{ firstFailAt: null \}\)/,
+    'finishOk 의 조건부 지우기가 없다'
+  );
+});
+
+/*
   ── 복구 알림은 실패 알림의 댓글로 ──
 
   실측. 7분짜리 일시 장애에 최상위 글이 둘 생겼다.
@@ -5530,6 +5679,30 @@ test('복구 알림 — 실패 글의 ts 를 남기고, 붙인 뒤 지운다 (ti
   // 안 나간 날의 로그가 나간 날과 똑같이 생기면 안 된다
   assert.match(finish, /posted\s*\?\s*`복구 알림 발송 /);
   assert.match(finish, /:\s*`복구 알림 발송 실패 /);
+});
+
+/*
+  ── 무엇이 봇 상태 채널로 가고 무엇이 안 가나 ──
+
+  이 브랜치의 핵심이 이 갈림 하나다. `#qa-router` 는 차수 스레드만 담기로
+  했으므로 **봇이 고장 났다는 말**(연속 실패·복구)은 전용 채널로 보내고,
+  **사람이 설정을 바꿨다는 말**은 팀이 보는 운영 채널에 남긴다.
+
+  둘 다 `deps.slack.post(<채널>, …)` 한 줄 차이라, 나중에 누가 한쪽을
+  정리하다 채널 변수를 바꿔도 타입은 통과한다 (둘 다 string 이다). 이
+  테스트가 없으면 "실패 알림이 다시 #qa-router 로 돌아갔다" 를
+  아무것도 안 잡는다 - 배선 자체에는 테스트가 붙어 있지 않았다.
+*/
+test('봇 상태 채널 — 실패는 healthChannel 로, 설정 변경은 opsChannel 에 남는다 (tick.ts)', () => {
+  const src = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf8'
+  );
+
+  // 연속 실패 알림: 전용 채널로
+  assert.match(src, /deps\.slack\.post\(\s*healthChannel,\s*buildFailText\(/);
+  // 설정 변경 감지: 운영 채널 그대로. 봇 고장이 아니라 사람이 바꾼 일이다.
+  assert.match(src, /deps\.slack\.post\(opsChannel, msg\.text, msg\.blocks\)/);
 });
 
 /*
@@ -5624,6 +5797,7 @@ test('상태 행 — 실패 알림 ts 를 도메인 값으로 옮긴다', () => 
     derived: null,
     last_poll_at: null,
     consecutive_fails: 3,
+    first_fail_at: null,
     locked_until: null,
     locked_by: null,
     stale_alerted_at: null,
@@ -6695,4 +6869,111 @@ test('차수 머리글 — 링크·사다리가 대장 행의 deploy_ymd 를 쓴
     sql,
     /prod_day := greatest\(cyc\.deploy_ymd, coalesce\(cyc\.prod_ymd, cyc\.deploy_ymd\)\);/
   );
+});
+
+test('봇 상태 채널 — 마이그레이션이 칸 둘을 더한다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261003_qa_router_health_channel.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 함정: 파일 안의 rollback 은 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
+  assert.match(sql, /add column if not exists slack_health_channel_id text/);
+  assert.match(sql, /add column if not exists first_fail_at timestamptz/);
+  // 컬럼 추가만 한다 — 함수를 재정의하면 정본이 옮겨간다
+  assert.doesNotMatch(sql, /create or replace function/);
+});
+
+/*
+  ── 워치독도 같은 채널로 ──
+
+  `🔴 QA Router 응답 없음` 은 실패·복구와 **같은 성격**의 글이다. 그런데
+  채널을 옮길 때 빠져 있었다 - 운영 두 대상 다 `slack_ops_channel_id` 가
+  null 이라 `coalesce` 가 `slack_channel_id`(= `#qa-router`)로 떨어진다.
+  "차수 스레드만 담는다" 가 절반만 이뤄진 상태였다.
+
+  SQL 은 타입 검사가 없어 이 줄이 조용히 되돌아가도 아무것도 안 잡는다.
+*/
+test('워치독 — 봇 상태 채널을 먼저 본다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261004_qa_router_watchdog_health_channel.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 함정: 파일 안의 rollback 은 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
+  // 세 칸짜리 coalesce. 봇 상태 채널이 맨 앞이다.
+  assert.match(
+    sql,
+    /coalesce\(\s*c\.slack_health_channel_id,\s*c\.slack_ops_channel_id,\s*c\.slack_channel_id\s*\) as alert_channel/
+  );
+
+  /*
+    인자 없는 그대로 다시 만든다. 하나라도 더하면 옛 시그니처가 남아
+    오버로드가 되고, cron 이 부르는 `select public.qa_router_watchdog()` 가
+    `function ... is not unique` 로 멈춘다 (20260917_01 에서 실제로 났다).
+  */
+  assert.match(
+    sql,
+    /create or replace function public\.qa_router_watchdog\(\)\s*\n\s*returns void/
+  );
+
+  /*
+    옮긴 것은 채널 한 줄뿐이다. 20260917_02 가 고쳐 놓은 것들 - 쉬는 구간
+    존중, 유예 시간, 1시간 억제, 메시지 형식 - 이 같이 따라와야 한다.
+    손으로 다시 치다 하나라도 흘리면 그때 잡은 가짜 경보가 되살아난다.
+  */
+  assert.match(sql, /and public\.qa_router_in_qa_window\(c\.id\)/);
+  assert.match(sql, /and public\.qa_router_in_window\(c\.quiet_hours\)/);
+  assert.match(
+    sql,
+    /continue when r\.stale_alerted_at is not null\s+and r\.stale_alerted_at >= now\(\) - interval '1 hour';/
+  );
+  assert.match(sql, /make_interval\(mins => r\.heartbeat_stale_minutes\)/);
+  assert.match(sql, /🔴 QA Router 응답 없음 · %s · 마지막 폴링 %s/);
+  // security definer 함수다. 누가 부를 수 있는지가 이 파일만 읽어서 보여야 한다.
+  assert.match(
+    sql,
+    /revoke execute on function public\.qa_router_watchdog\(\)\s+from public, anon, authenticated;/
+  );
+});
+
+test('봇 상태 채널 — 행에서 읽힌다', () => {
+  const c = toConfig({
+    id: 'c1',
+    name: 'ㄱ',
+    slack_channel_id: 'C_QA',
+    slack_ops_channel_id: null,
+    slack_health_channel_id: 'C_HEALTH',
+  } as never);
+  assert.equal(c.slackHealthChannelId, 'C_HEALTH');
+});
+
+test('봇 상태 채널 — 칸이 비면 null 이다', () => {
+  const c = toConfig({
+    id: 'c1',
+    name: 'ㄱ',
+    slack_channel_id: 'C_QA',
+  } as never);
+  assert.equal(c.slackHealthChannelId, null);
+});
+
+test('첫 실패 시각 — 상태에서 읽힌다', () => {
+  const s = toState({
+    config_id: 'c1',
+    first_fail_at: '2026-10-02T01:03:00Z',
+  } as never);
+  assert.equal(s.firstFailAt, '2026-10-02T01:03:00Z');
+  assert.equal(toState({ config_id: 'c1' } as never).firstFailAt, null);
 });

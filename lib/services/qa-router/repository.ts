@@ -61,6 +61,8 @@ function fromConfigInput(i: QaRouterConfigInput): Partial<ConfigRow> {
     row.slack_fallback_channel_id = i.slackFallbackChannelId;
   if (i.slackOpsChannelId !== undefined)
     row.slack_ops_channel_id = i.slackOpsChannelId;
+  if (i.slackHealthChannelId !== undefined)
+    row.slack_health_channel_id = i.slackHealthChannelId;
   if (i.planIssueTypeId !== undefined)
     row.plan_issue_type_id = i.planIssueTypeId;
   if (i.devIssueTypeId !== undefined) row.dev_issue_type_id = i.devIssueTypeId;
@@ -360,6 +362,8 @@ export interface StatePatch {
   derived?: DerivedContext | null;
   lastPollAt?: string | null;
   consecutiveFails?: number;
+  /** 연속 실패가 시작된 시각. 성공하면 null 로 지운다. */
+  firstFailAt?: string | null;
   staleAlertedAt?: string | null;
   failAlertTs?: string | null;
 }
@@ -378,6 +382,7 @@ export async function saveState(
   if (patch.lastPollAt !== undefined) row.last_poll_at = patch.lastPollAt;
   if (patch.consecutiveFails !== undefined)
     row.consecutive_fails = patch.consecutiveFails;
+  if (patch.firstFailAt !== undefined) row.first_fail_at = patch.firstFailAt;
   if (patch.staleAlertedAt !== undefined)
     row.stale_alerted_at = patch.staleAlertedAt;
   if (patch.failAlertTs !== undefined) row.fail_alert_ts = patch.failAlertTs;
