@@ -71,9 +71,16 @@ grep -ln "function public.<함수이름>" supabase/migrations/*.sql | LC_ALL=C s
 | 함수 | 정본 (여기를 고칩니다) | 얼어붙은 역사 |
 |---|---|---|
 | `public.qa_router_alerts()` | `20261002_qa_router_warn_in_thread.sql` | `20260930_qa_router_alert_model.sql` |
+| `public.qa_router_watchdog()` | `20261004_qa_router_watchdog_health_channel.sql` | `20260917_02_qa_router_watchdog_respects_idle.sql`, `20260909_qa_router_summary_in_thread.sql`, `20260908_qa_router_window_single_source.sql`, `20260907_qa_router_pg_cron.sql`, `20260907_qa_router_ops_channel.sql`, `20260907_qa_router.sql` |
 
 `20260930` 은 그 밖에도 한 번만 적용되는 파일이라 **더더욱 고치면 안 됩니다**
 (아래 "한 번만 적용되는 파일이 있습니다" 참고).
+
+워치독은 얼어붙은 역사가 여섯입니다. 초기 구축 때 파일마다 함수를 통째로
+다시 만들었기 때문이고, 위 `grep | sort` 가 그 일곱 줄을 그대로 보여 줍니다.
+그중 **직전 정본은 `20260917_02`** 입니다 — 쉬는 구간을 장애로 읽던 가짜
+경보를 그 파일이 고쳤으므로, 이 함수를 다시 만들 때 글자를 가져올 곳도
+거기입니다.
 
 ## 무엇이 적용되는지 판단하는 기준
 
