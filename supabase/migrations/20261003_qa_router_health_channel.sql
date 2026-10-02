@@ -28,7 +28,7 @@ alter table public.qa_router_configs
   add column if not exists slack_health_channel_id text;
 
 comment on column public.qa_router_configs.slack_health_channel_id is
-  '봇 상태 알림(연속 실패·복구) 채널. 비우면 운영 채널로 떨어진다 - 설정 변경 감지는 여기로 안 온다.';
+  '봇 상태 알림(워치독 응답 없음·연속 실패·복구) 채널. 비우면 slack_ops_channel_id → slack_channel_id 순으로 떨어진다 - 설정 변경 감지는 여기로 안 오고 늘 운영 채널에 남는다.';
 
 alter table public.qa_router_state
   add column if not exists first_fail_at timestamptz;

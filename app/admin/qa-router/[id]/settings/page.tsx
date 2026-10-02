@@ -2997,7 +2997,13 @@ function WhereEditor({
           label="운영 알림 채널"
           knownName={knownNames?.[ops.trim()]}
         />
-        <Hint>워치독·실패·설정 변경 알림이 갑니다.</Hint>
+        <Hint>
+          설정 변경 감지: 항상 여기로
+          <br />
+          워치독 응답 없음·연속 실패·복구: 봇 상태 채널이 비었을 때만 여기로
+          <br />
+          비우면 판정 알림 채널로 떨어집니다
+        </Hint>
       </div>
       <div>
         <FieldLabel>봇 상태 채널</FieldLabel>
@@ -3010,8 +3016,11 @@ function WhereEditor({
           knownName={knownNames?.[health.trim()]}
         />
         <Hint>
-          연속 실패·복구만 여기로 · 설정 변경 감지는 운영 알림 채널에
-          남습니다
+          워치독 응답 없음·연속 실패·복구가 여기로
+          <br />
+          설정 변경 감지는 운영 알림 채널에 남습니다
+          <br />
+          비우면 운영 알림 채널 → 판정 알림 채널 순으로 떨어집니다
         </Hint>
       </div>
       <StageActions

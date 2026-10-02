@@ -702,19 +702,29 @@ export interface QaRouterConfig {
   slackChannelId: string;
   slackFallbackChannelId: string | null;
   /**
-   * 워치독·실패·설정변경 알림 채널. null 이면 slackChannelId 로 폴백한다.
+   * 운영 알림 채널. null 이면 slackChannelId 로 폴백한다.
    *
-   * 화면에서 편집할 수 없다 — 알림을 다른 채널로 보낼 일이 없다는 판단이다.
-   * 컬럼은 남겨 두었으니 나중에 분리가 필요해지면 UI 만 붙이면 된다.
+   * 여기로 오는 것:
+   * - 설정 변경 감지 — 항상. 봇이 고장 난 게 아니라 사람이 바꾼 일이라
+   *   팀이 보는 자리에 남긴다.
+   * - 워치독 응답 없음 · 연속 실패 · 복구 — `slackHealthChannelId` 가
+   *   비었을 때만. 셋은 봇 상태 채널을 먼저 본다.
+   *
+   * 폴백 순서: slackHealthChannelId → slackOpsChannelId → slackChannelId
+   * (`tick.ts` 의 `opsChannel` · `healthChannel`, SQL 쪽 `coalesce` 도 같다).
+   *
+   * 화면에서 편집한다 (설정 > ③ 어디로 알리나, `WhereEditor`). 한동안
+   * "편집할 수 없다" 고 적혀 있었는데 오래전부터 사실이 아니었다.
    */
   slackOpsChannelId: string | null;
 
   /**
-   * 봇 상태 알림(연속 실패·복구) 채널. 없으면 운영 채널로 떨어진다.
+   * 봇 상태 알림(워치독 응답 없음 · 연속 실패 · 복구) 채널. 없으면 운영
+   * 채널로 떨어진다.
    *
    * 운영 채널과 가르는 이유: 설정 변경 감지는 사람이 바꾼 일이라 팀이 봐야
-   * 하고, 연속 실패는 봇이 죽은 일이라 봇을 고치는 사람이 봐야 한다. 한
-   * 채널에 두면 차수 스레드만 있어야 할 자리에 봇 상태 글이 쌓인다.
+   * 하고, 셋은 봇이 죽은 일이라 봇을 고치는 사람이 봐야 한다. 한 채널에
+   * 두면 차수 스레드만 있어야 할 자리에 봇 상태 글이 쌓인다.
    */
   slackHealthChannelId: string | null;
 
