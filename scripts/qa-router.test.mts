@@ -5554,6 +5554,92 @@ test('실패 알림 — 한 시간을 넘으면 시간으로 적는다', () => {
 });
 
 /*
+  ── 배포 레이스: 집계가 실패해도 알림은 나간다 ──
+
+  `main` push 하나가 Vercel 빌드와 `db-migrate` 워크플로를 동시에 깨운다.
+  그래서 `first_fail_at` 이 아직 없는 스키마에 새 코드가 붙어 있는 몇 분이
+  실제로 있다. 그 창에서 `saveState` 는 PGRST204 로 **던진다**
+  (`repository.ts` 가 error 를 throw 로 올린다).
+
+  고치기 전 모양: catch 안의 첫 두 줄이 그 throw 를 그대로 올려 보내,
+  바로 아래 Slack 발송까지 같이 날아갔다. 봇이 완전히 죽은 채 아무 말도
+  안 하는 창이 생긴다 - 이 catch 가 존재하는 단 하나의 이유가 그 말을
+  하는 것인데.
+
+  읽기 쪽은 `rows.ts` 가 `?? null` 로 같은 창을 이미 막아 뒀다. 쓰기 쪽에
+  짝이 없던 것이고, 여기가 그 짝이다.
+*/
+test('실패 알림 — 횟수를 못 읽었으면 지어내지 않고 미상이라 적는다', () => {
+  const t = buildFailText({ ...FAIL_BASE, fails: null, firstFailAt: null });
+
+  // 모른다고 적는다
+  assert.ok(t.includes('횟수 미상'), `실제: ${t}`);
+  assert.ok(t.includes('상태를 못 읽었습니다'), `실제: ${t}`);
+
+  /*
+    0 으로도 3 으로도 뭉개지 않는다. `0회 연속 실패` 는 "실패가 없다" 는
+    거짓말이고, 임계값을 지어내면 받는 사람이 없는 사실을 믿는다.
+  */
+  assert.ok(!/\d+회 연속 실패/.test(t), `횟수를 지어냈다: ${t}`);
+
+  // 나머지 단서는 그대로 들고 간다 - 이게 지금 유일한 신호다
+  assert.ok(t.includes('CPO BO QA'), `실제: ${t}`);
+  assert.ok(t.includes('기획티켓 수집 (Jira search)'), `실제: ${t}`);
+  assert.ok(t.includes('MAINTENANCE'), `실제: ${t}`);
+  assert.ok(t.includes('actions/runs/36832902072'), `실제: ${t}`);
+});
+
+test('배포 레이스 — 집계는 감싸고, 성공 경로는 지울 게 있을 때만 쓴다 (tick.ts)', () => {
+  const src = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf8'
+  );
+
+  /*
+    ① catch 의 집계(읽기 + 쓰기)가 try 안에 있어야 한다. 밖에 있으면
+    throw 가 Slack 발송 앞에서 함수를 떠난다.
+  */
+  const catchStart = src.indexOf('let fails: number | null = null;');
+  assert.ok(catchStart > 0, 'catch 의 집계 블록을 못 찾았다');
+  // `status: 'error'` 는 TickOutcome 타입에도 있다. catch 뒤에서부터 찾는다.
+  const catchBody = src.slice(
+    catchStart,
+    src.indexOf("status: 'error'", catchStart)
+  );
+  assert.ok(catchBody.length > 0, 'catch 의 끝을 못 찾았다');
+  assert.match(
+    catchBody,
+    /try \{\s+const prev = await repo\.getOrCreateState\(cfg\.id\);[\s\S]*?await repo\.saveState\(cfg\.id, \{ consecutiveFails: fails, firstFailAt \}\);\s+\} catch \(/,
+    '집계가 try 로 감싸여 있지 않다'
+  );
+
+  /*
+    ② 횟수를 못 읽었어도 알린다. `fails === FAIL_ALERT_THRESHOLD` 만
+    보면 null 일 때 조용히 지나가, 고치려던 침묵이 그대로 남는다.
+  */
+  assert.match(
+    catchBody,
+    /if \(fails === null \|\| fails === FAIL_ALERT_THRESHOLD\)/,
+    '횟수 미상일 때 알림이 안 나간다'
+  );
+
+  /*
+    ③ 성공 경로는 `first_fail_at` 을 무조건 쓰지 않는다. 지울 게 없는
+    흔한 tick 이 새 컬럼을 건드리지 않으면 레이스 창 자체가 없어진다.
+  */
+  const finish = src.slice(src.indexOf('async function finishOk'));
+  assert.ok(
+    !/^\s+firstFailAt: null,$/m.test(finish),
+    'finishOk 가 firstFailAt 을 무조건 쓴다'
+  );
+  assert.match(
+    finish,
+    /\.\.\.\(state\.firstFailAt === null \? \{\} : \{ firstFailAt: null \}\)/,
+    'finishOk 의 조건부 지우기가 없다'
+  );
+});
+
+/*
   ── 복구 알림은 실패 알림의 댓글로 ──
 
   실측. 7분짜리 일시 장애에 최상위 글이 둘 생겼다.

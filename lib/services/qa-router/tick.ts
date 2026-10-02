@@ -130,7 +130,8 @@ export type TickOutcome =
       notified: number;
       failed: number;
     }
-  | { status: 'error'; message: string; consecutiveFails: number };
+  /** `consecutiveFails` 가 null 이면 집계를 못 읽은 것이다 (0 과 다르다). */
+  | { status: 'error'; message: string; consecutiveFails: number | null };
 
 // ─────────────────────────────────────────────────────────────
 // quiet hours
@@ -1543,15 +1544,45 @@ export async function runTick(
       failed,
     };
   } catch (e) {
-    const prev = await repo.getOrCreateState(cfg.id);
-    const fails = prev.consecutiveFails + 1;
-    // 0 → 1 에서만 찍는다. 그 뒤 실패는 "언제부터" 를 안 바꾼다.
-    const firstFailAt = prev.firstFailAt ?? now().toISOString();
-    await repo.saveState(cfg.id, { consecutiveFails: fails, firstFailAt });
-    log(`치명적 오류 ${fails}회 연속 (${step}): ${(e as Error).message}`);
+    /*
+      ── 집계가 실패해도 알림은 나간다 ──
 
-    // 임계값에 닿을 때만 알린다 (일시적 단절 오탐 억제)
-    if (fails === FAIL_ALERT_THRESHOLD) {
+      이 catch 가 있는 이유는 하나다: 봇이 고장 났다는 말을 사람에게
+      전하는 것. 그 앞에 놓인 상태 읽기·쓰기가 던지면 알림까지 같이
+      삼켜져, 봇이 조용히 죽는다.
+
+      가상의 걱정이 아니다. `main` push 가 Vercel 빌드와 `db-migrate`
+      워크플로를 동시에 깨우므로, `first_fail_at` 이 아직 없는 스키마에
+      새 코드가 붙어 있는 몇 분이 실제로 있다. 그 창에서 `saveState` 는
+      PGRST204(unknown column)로 던진다. 읽기 쪽은 `rows.ts` 가 `?? null`
+      로 이미 막아 뒀는데(거기 주석이 같은 창을 가리킨다) 쓰기 쪽에는
+      짝이 없었다.
+
+      그래서 집계는 통째로 감싸고, 실패하면 횟수를 `null` 로 둔다.
+      `buildFailText` 가 그 null 을 "횟수 미상" 으로 적는다 - 못 읽은
+      값을 지어내지 않는다.
+    */
+    let fails: number | null = null;
+    let firstFailAt: string | null = null;
+    try {
+      const prev = await repo.getOrCreateState(cfg.id);
+      fails = prev.consecutiveFails + 1;
+      // 0 → 1 에서만 찍는다. 그 뒤 실패는 "언제부터" 를 안 바꾼다.
+      firstFailAt = prev.firstFailAt ?? now().toISOString();
+      await repo.saveState(cfg.id, { consecutiveFails: fails, firstFailAt });
+    } catch (bookkeepingError) {
+      // 집계가 안 됐다는 사실 자체가 단서다. 삼키지 말고 로그에 남긴다.
+      log(`실패 집계 기록 불가: ${(bookkeepingError as Error).message}`);
+    }
+    log(
+      `치명적 오류 ${fails === null ? '횟수 미상' : `${fails}회 연속`} (${step}): ${(e as Error).message}`
+    );
+
+    /*
+      임계값에 닿을 때만 알린다 (일시적 단절 오탐 억제). 횟수를 못 읽었으면
+      억제할 근거가 없다 - 모르는 채로 입을 다무는 쪽이 더 비싸므로 보낸다.
+    */
+    if (fails === null || fails === FAIL_ALERT_THRESHOLD) {
       try {
         const res = await deps.slack.post(
           healthChannel,
@@ -1597,9 +1628,19 @@ async function finishOk(
 ): Promise<void> {
   await repo.saveState(cfg.id, {
     consecutiveFails: 0,
-    // 성공했으면 "언제부터" 도 같이 지운다. 안 지우면 다음 장애가
-    // 지난 장애의 시작 시각을 들고 "3시간째" 라고 운다.
-    firstFailAt: null,
+    /*
+      성공했으면 "언제부터" 도 같이 지운다. 안 지우면 다음 장애가 지난
+      장애의 시작 시각을 들고 "3시간째" 라고 운다.
+
+      **지울 게 있을 때만 보낸다.** `saveState` 는 던지는 함수고,
+      `first_fail_at` 은 이 브랜치가 새로 만든 칸이다. 코드 배포와
+      `db-migrate` 가 같은 `main` push 에서 동시에 도므로 컬럼이 아직 없는
+      DB 에 새 코드가 붙는 창이 있고, 거기서 이 칸을 매 tick 무조건 쓰면
+      PGRST204 로 던져 **성공한 tick 이 통째로 실패로 뒤집힌다.** 흔한
+      경로(계속 성공)에서는 지울 게 없으니, 안 쓰는 것으로 그 창을 관리
+      대상이 아니라 아예 없는 것으로 만든다.
+    */
+    ...(state.firstFailAt === null ? {} : { firstFailAt: null }),
     lastPollAt: (deps.now?.() ?? new Date()).toISOString(),
     staleAlertedAt: null,
   });

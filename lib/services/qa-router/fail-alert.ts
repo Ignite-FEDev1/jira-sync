@@ -84,8 +84,13 @@ async function tryPost(
 export interface FailTextInput {
   /** 대상 이름. */
   name: string;
-  /** 연속 실패 횟수. */
-  fails: number;
+  /**
+   * 연속 실패 횟수. `null` 이면 상태를 못 읽어 **모른다**.
+   *
+   * 0 으로 뭉개지 않는다 - 0 은 "실패가 없다" 는 거짓말이고, 여기 서 있는
+   * 이상 실패는 분명히 있었다.
+   */
+  fails: number | null;
   /** 어느 구간에서 죽었나. `tick.ts` 가 진행하며 갱신한 값. */
   step: string;
   /** 던진 오류의 message. */
@@ -113,10 +118,18 @@ export interface FailTextInput {
  * 로컬 실행에는 `GITHUB_RUN_ID` 가 없고, 옛 상태에는 `first_fail_at` 이
  * 없다. 그때 `로그 ` 나 `첫 실패 ` 만 적힌 줄을 내는 대신 줄을 통째로
  * 뺀다. SQL 쪽 `qa_router_render` 가 같은 규칙을 쓴다.
+ *
+ * ── 횟수를 모르면 모른다고 적는다 ──
+ *
+ * 상태 읽기·쓰기가 던지면 `tick.ts` 는 횟수를 `null` 로 넘긴다. 그때
+ * `0회` 나 `3회` 를 지어내면 읽는 사람이 없는 사실을 믿는다. 대신 모른다고
+ * 적고, 그 자체가 **DB 를 못 건드리고 있다**는 두 번째 신호가 된다.
  */
 export function buildFailText(i: FailTextInput): string {
   const lines = [
-    `❌ QA Router · ${i.name} · ${i.fails}회 연속 실패`,
+    i.fails === null
+      ? `❌ QA Router · ${i.name} · 연속 실패 (횟수 미상 · 상태를 못 읽었습니다)`
+      : `❌ QA Router · ${i.name} · ${i.fails}회 연속 실패`,
     `단계   ${i.step}`,
   ];
 
