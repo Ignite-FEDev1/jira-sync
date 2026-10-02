@@ -23,17 +23,17 @@ import {
 } from './derive';
 import { postRecovery } from './fail-alert';
 import { judge, type JudgeResult } from './judge';
-import {
-  collectPlanProgress,
-} from './plan-tickets';
+import { collectPlanProgress } from './plan-tickets';
 import { resolveOutcomes } from './outcome';
 import {
+  ADMIN_BASE,
   buildConfigChangedMessage,
   buildCycleHeader,
   buildRouteMessage,
   type ConfigDiffEntry,
   type ReassignOutcome,
 } from './message';
+import { prodDayOf, resolveQaWindow } from './qa-window';
 import { readCyclePageTitle, tooSoon } from './status';
 import {
   extractJqlStrings,
@@ -484,14 +484,15 @@ export async function collectCycles(
       names = (await deps.jira.getProjectVersions(resolved)).map((v) => v.name);
     } catch (e) {
       // 버전 조회가 실패해도 차수 목록 자체는 만들 수 있다.
-      deps.log?.(
-        `${projectKey} 버전 목록 조회 실패: ${(e as Error).message}`
-      );
+      deps.log?.(`${projectKey} 버전 목록 조회 실패: ${(e as Error).message}`);
     }
     const set = new Set(names);
     versionsByProject.set(projectKey, set);
     // 같은 목록으로 **이름 규칙**도 뽑는다. 제목 폴백이 쓴다.
-    ruleByProject.set(projectKey, names.length ? inferFixVersionRule(names) : null);
+    ruleByProject.set(
+      projectKey,
+      names.length ? inferFixVersionRule(names) : null
+    );
     return set;
   };
 
@@ -1069,18 +1070,38 @@ export async function runTick(
 
       // ── 사이클 시작 알림 (스레드 부모) ──
       if (!cycle.threadTs) {
+        /*
+          스레드 부모는 차수마다 **한 번만** 만든다. 여기서 대장 행을 한 번
+          더 읽어도 비싸지 않고, 상태 캐시가 아니라 정본을 본다.
+
+          캐시(`cycle`)에는 사람이 차수 화면에 넣은 수동 QA 기간이 없다.
+          그것 없이 머리글을 쓰면, 수동으로 고친 차수가 스레드 부모에서만
+          옛 대장 값을 계속 보여준다.
+        */
+        const row = await repo.getCycle(cfg.id, parsedFv.raw);
+        const win = resolveQaWindow({
+          manualStartYmd: row?.qaStartYmdManual ?? null,
+          manualEndYmd: row?.qaEndYmdManual ?? null,
+          ledgerStartYmd: cycle.schedule?.qaStartYmd ?? null,
+          ledgerEndYmd: cycle.schedule?.qaEndYmd ?? null,
+          prodYmd: cycle.schedule?.prodYmd ?? null,
+          deployYmd: parsedFv.deployYmd,
+          rule: cfg.qaScheduleRule,
+        });
         const header = buildCycleHeader({
           cycleLabel: cycle.schedule?.cycleLabel ?? parsedFv.raw,
           fixVersion: parsedFv.raw,
-          qaStartYmd: cycle.schedule?.qaStartYmd ?? null,
-          qaEndYmd: cycle.schedule?.qaEndYmd ?? null,
+          qaStartYmd: win.qaStartYmd,
+          qaEndYmd: win.qaEndYmd,
           /*
-          배포대장 본문이 아니라 차수 이름(release_YYYYMMDD)의 날짜를 쓴다.
-          실측 release_20260914 은 본문이 9/10 으로 남아 있었는데 제목·Jira
-          릴리스·QA 팀 스레드가 모두 9/14 였다. 스레드 머리글에 본문 값을
-          적으면 차수 이름과 어긋난 날짜가 채널에 박힌다.
-        */
-          prodYmd: parsedFv.deployYmd,
+            사다리가 정한 운영 배포일. `prodDayOf` 가 제목 날짜와 본문 값 중
+            늦은 쪽을 고르므로, 본문이 낡아 이른 날짜를 찍던 사고
+            (`release_20260914`: 본문 9/10 vs 제목 9/14)는 계속 막힌다.
+          */
+          prodYmd: prodDayOf({
+            deployYmd: parsedFv.deployYmd,
+            prodYmd: cycle.schedule?.prodYmd ?? null,
+          }),
           /*
           스페이스를 안 박는다. `/wiki/spaces/CPO/…` 로 두면 CPO 가 아닌
           대상은 없는 경로를 가리키는데, 링크는 깨져도 조용하다 — 누른
@@ -1091,6 +1112,11 @@ export async function runTick(
             ? `${deps.jiraBaseUrl}/wiki/pages/viewpage.action?pageId=${cycle.deployPageId}`
             : null,
           filterUrl: `${deps.jiraBaseUrl}/issues?filter=${cfg.jiraFilterId}`,
+          cycleUrl: `${ADMIN_BASE}/admin/qa-router/${cfg.id}/cycles/${parsedFv.deployYmd}`,
+          scheduleWarn:
+            win.source === 'invalid' || win.source === 'none'
+              ? { why: win.why ?? 'QA 시작·종료일을 어디에서도 못 읽었습니다' }
+              : null,
         });
         const res = await deps.slack.post(
           cfg.slackChannelId,
@@ -1174,21 +1200,24 @@ export async function runTick(
       담당자"를 볼 수가 없었다 — 답이 티켓에 있는데 레이블로 추측만 했다.
       보고자는 "QA 가 자기 티켓을 도로 가져간 상태"를 알아보는 데 쓴다.
     */
-    const found = await deps.jira.searchAll(jql, [
-      'summary',
-      'labels',
-      'issuetype',
-      'assignee',
-      'reporter',
-      /*
+    const found = await deps.jira.searchAll(
+      jql,
+      [
+        'summary',
+        'labels',
+        'issuetype',
+        'assignee',
+        'reporter',
+        /*
         차수를 가르는 칸. 판정 ③이 "같은 차수의 형제" 를 찾을 때 이 값으로
         범위를 잡는다. 어떤 칸인지는 필터 JQL 이 정한다 — KQ 는 fixVersion,
         GW 는 parent(`차세대 그룹웨어 0917 비정기배포 QA 요청의 건`)다.
         안 읽어 오면 형제를 찾을 범위가 아예 없어진다.
       */
-      derived.cycleAxisField,
-      cfg.coAssigneeField,
-    ].filter((f): f is string => Boolean(f)));
+        derived.cycleAxisField,
+        cfg.coAssigneeField,
+      ].filter((f): f is string => Boolean(f))
+    );
     log(`${cfg.name} · 트리아지 배정 활성 티켓 ${found.length}건`);
 
     /*
