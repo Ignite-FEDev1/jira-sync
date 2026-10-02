@@ -72,7 +72,10 @@ jobs:
         if: failure()
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_QA_ROUTER_BOT_TOKEN || secrets.SLACK_BOT_TOKEN }}
-          ALERT_CHANNEL: C0BVDJEJ19C
+          # 봇 상태 채널(#fe1-tool-alert). 설정 칸을 안 쓰는 이유: 이 알림은
+          # **DB 에 못 붙어서** 우는 것이다. 채널을 DB 에서 읽게 만들면 가장
+          # 필요한 순간에 어디로 보낼지 모른다.
+          ALERT_CHANNEL: C0BT1FPET4Y
           ALERT_TEXT: |
             :rotating_light: DB 마이그레이션 적용 실패
             <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|실행 로그> · ${{ github.sha }}
