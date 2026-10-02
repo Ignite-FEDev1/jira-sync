@@ -80,3 +80,67 @@ async function tryPost(
     return null;
   }
 }
+
+export interface FailTextInput {
+  /** 대상 이름. */
+  name: string;
+  /** 연속 실패 횟수. */
+  fails: number;
+  /** 어느 구간에서 죽었나. `tick.ts` 가 진행하며 갱신한 값. */
+  step: string;
+  /** 던진 오류의 message. */
+  message: string;
+  /** 연속 실패가 시작된 시각 (ISO). 없으면 경과를 안 적는다. */
+  firstFailAt: string | null;
+  /** 지금. 테스트가 고정값을 넣는다. */
+  now: Date;
+  /** 실행 로그 주소. 로컬 실행이면 null. */
+  runUrl: string | null;
+}
+
+/**
+ * 실패 알림 본문.
+ *
+ * ── 왜 이걸 따로 조립하나 ──
+ *
+ * 전에는 `3회 연속 실패: <error.message>` 한 줄이었다. 실측으로 모자랐다 -
+ * Supabase 풀러가 끊겨 마이그레이션이 실패한 날, 그 메시지만 봐서는 Jira
+ * 문제인지 DB 문제인지 구분이 안 됐다. 되짚는 사람이 묻는 세 가지(어디서 ·
+ * 언제부터 · 로그 어디)를 메시지가 바로 답하게 한다.
+ *
+ * ── 빈 줄을 안 낸다 ──
+ *
+ * 로컬 실행에는 `GITHUB_RUN_ID` 가 없고, 옛 상태에는 `first_fail_at` 이
+ * 없다. 그때 `로그 ` 나 `첫 실패 ` 만 적힌 줄을 내는 대신 줄을 통째로
+ * 뺀다. SQL 쪽 `qa_router_render` 가 같은 규칙을 쓴다.
+ */
+export function buildFailText(i: FailTextInput): string {
+  const lines = [
+    `❌ QA Router · ${i.name} · ${i.fails}회 연속 실패`,
+    `단계   ${i.step}`,
+  ];
+
+  if (i.firstFailAt) {
+    const from = new Date(i.firstFailAt);
+    const mins = Math.max(
+      0,
+      Math.round((i.now.getTime() - from.getTime()) / 60_000)
+    );
+    const span =
+      mins >= 60
+        ? `${Math.floor(mins / 60)}시간 ${mins % 60}분째`
+        : `${mins}분째`;
+    const hhmm = new Intl.DateTimeFormat('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(from);
+    lines.push(`첫 실패 ${hhmm} · ${span}`);
+  }
+
+  lines.push(`오류   ${i.message}`);
+  if (i.runUrl) lines.push(`로그   <${i.runUrl}|실행 로그>`);
+
+  return lines.join('\n');
+}

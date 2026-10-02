@@ -53,7 +53,10 @@ import {
   wantsQaAlerts,
 } from '@/lib/services/qa-router/alert-rule';
 import type { AlertRule, AlertWhen } from '@/lib/services/qa-router/types';
-import { postRecovery } from '@/lib/services/qa-router/fail-alert';
+import {
+  buildFailText,
+  postRecovery,
+} from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
 import {
   cycleUpsertRow,
@@ -5488,6 +5491,60 @@ test('18시 요약 — 스레드 안에서는 일정·참고를 뺀다 (SQL)', (
     /if r\.thread_ts is null then\s+detail_lines := public\.qa_router_detail_lines\(/
   );
   assert.match(sum, /else\s+detail_lines := null;\s+end if;/);
+});
+
+/*
+  ── 실패 알림 본문 ──
+
+  실측. Supabase 풀러가 끊겨 마이그레이션이 실패한 날, 알림은
+  `3회 연속 실패: <message>` 한 줄이었다. 그걸로는 Jira 문제인지 DB
+  문제인지 구분이 안 됐다. 되짚는 사람이 묻는 세 가지(어디서 · 언제부터 ·
+  로그 어디)를 메시지가 바로 답하는지 고정한다.
+*/
+const FAIL_BASE = {
+  name: 'CPO BO QA (개발)',
+  fails: 3,
+  step: '기획티켓 수집 (Jira search)',
+  message: 'Jira 503 /search/jql :: {"errorCode": "MAINTENANCE"}',
+  firstFailAt: '2026-10-02T01:03:00Z',
+  now: new Date('2026-10-02T01:06:00Z'),
+  runUrl: 'https://github.com/x/y/actions/runs/36832902072',
+};
+
+test('실패 알림 — 단계·언제부터·로그를 함께 든다', () => {
+  const t = buildFailText(FAIL_BASE);
+  assert.ok(t.includes('3회 연속 실패'));
+  assert.ok(t.includes('기획티켓 수집 (Jira search)'));
+  assert.ok(t.includes('10:03'), 'KST 로 적는다');
+  assert.ok(t.includes('3분째'));
+  assert.ok(t.includes('MAINTENANCE'));
+  assert.ok(t.includes('actions/runs/36832902072'));
+});
+
+/*
+  로컬 실행에는 GITHUB_RUN_ID 가 없다. 빈 링크를 내는 대신 그 줄을 통째로
+  민다 — SQL 쪽 `qa_router_render` 의 "빈 변수가 있는 줄은 버린다" 와 같은
+  규칙을 TS 에서 손으로 지킨다.
+*/
+test('실패 알림 — 로그 링크가 없으면 그 줄이 통째로 빠진다', () => {
+  const t = buildFailText({ ...FAIL_BASE, runUrl: null });
+  assert.ok(!t.includes('로그'), '빈 링크 줄이 남았다');
+  assert.ok(t.includes('기획티켓 수집'), '나머지는 그대로다');
+});
+
+test('실패 알림 — 첫 실패 시각이 없으면 경과를 안 적는다', () => {
+  const t = buildFailText({ ...FAIL_BASE, firstFailAt: null });
+  assert.ok(!t.includes('분째'));
+  assert.ok(!t.includes('첫 실패'));
+  assert.ok(t.includes('3회 연속 실패'));
+});
+
+test('실패 알림 — 한 시간을 넘으면 시간으로 적는다', () => {
+  const t = buildFailText({
+    ...FAIL_BASE,
+    now: new Date('2026-10-02T03:33:00Z'),
+  });
+  assert.ok(t.includes('2시간 30분째'), `실제: ${t}`);
 });
 
 /*
