@@ -293,6 +293,11 @@ export async function deriveContext(
         `missing_scope` 로 막혀 있었고, **여태 한 번도 성공한 적이 없다.**
         그래서 설정 화면에 `#fe1-tool-alert` 대신 `C0BVDJEJ19C` 가 떴다 —
         아무도 몰랐다. 이것도 결과를 버리던 코드가 숨긴 고장이다.
+
+        그 뒤 이 채널은 `#qa-router` 로 이름이 바뀌었고, 지금의
+        `#fe1-tool-alert` 는 `C0BT1FPET4Y` 다. 위 문단은 그때의 기록이라
+        그대로 둔다 — `C0BVDJEJ19C` 를 오늘의 봇 상태 채널로 읽지 않도록
+        여기에 적어 둔다.
       */
       const scopeIssue =
         info.error === 'missing_scope' ||

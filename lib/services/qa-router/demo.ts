@@ -639,7 +639,7 @@ export function demoDerived(): DerivedContext {
     excludeStatuses: ['Done', 'CLOSE', '완료'],
     members: MEMBERS.map((m) => ({ ...m })),
     fixVersionRule: 'release_YYYYMMDD',
-    channelNames: { C0BVDJEJ19C: 'fe1-tool-alert' },
+    channelNames: { C0BVDJEJ19C: 'qa-router' },
     derivedAt: new Date(Date.now() - 42 * 60_000).toISOString(),
   };
 }
