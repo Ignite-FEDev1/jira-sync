@@ -5112,7 +5112,7 @@ test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
   `invalid`·`none` 중 **어느 문장을 고를지**는 PL/pgSQL 함수 본문 안에만 있어
   바깥에서 부를 수가 없다. 그래서 같은 `case` 가 세 벌이다:
 
-    · 20260930 디스패처(activeCycle 갈래)   — 실제로 나가는 글자
+    · 20261002 디스패처(activeCycle 갈래)   — 실제로 나가는 글자
     · 20261001 미리보기                      — 화면이 보여주는 글자
     · scripts/record-alert-messages.mts      — 골든을 녹화하는 글자
 
@@ -5127,13 +5127,21 @@ test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
   ※ `20260929_qa_router_schedule_gap.sql` 에 네 번째 사본이 있다 —
      20260930 이 대체한 옛 `qa_router_daily_summary` 의 것이라 더는 안 돈다.
      여기서 안 센다. 나중에 문구를 바꿀 때는 디스패처를 `create or replace`
-     하는 **새 마이그레이션**이 생기므로, 아래 목록의 20260930 자리를 그
+     하는 **새 마이그레이션**이 생기므로, 아래 목록의 디스패처 자리를 그
      파일로 옮긴다.
+
+  ※ 그 일이 실제로 일어났다. `20261002_qa_router_warn_in_thread.sql` 이
+     `qa_router_alerts()` 를 다시 만들었고, 적용 순서가 파일명 정렬순이라
+     **늦은 쪽이 정본**이다 (`supabase/migrations/README.md` 의 "같은 함수를
+     다시 만든 파일이 둘이면 늦은 쪽이 정본입니다" 표). 그래서 디스패처
+     자리를 20261002 로 옮겼다. 20260930 은 그 시점의 역사일 뿐이고,
+     거기를 가리키고 있으면 **정본을 고쳐도 핀 셋이 전부 초록**이 된다 —
+     이 테스트가 막으려던 "같은 질문에 세 답" 그 자체다.
 */
 test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () => {
   const files = {
-    '디스패처(20260930)':
-      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+    '디스패처(20261002)':
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
     '미리보기(20261001)':
       '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
     '녹화(record-alert-messages)': '../scripts/record-alert-messages.mts',
@@ -5179,7 +5187,8 @@ test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () =>
   `alert-rule.ts` 의 머리말에는 "이 파일의 함수들은 SQL 쌍둥이와 줄 단위로
   대조해야 한다" 고 적혀 있다. 그런데 `statusPhrase` 는 **실행 코드에서
   아무도 안 부른다** — 18시 요약의 머리말을 실제로 만드는 것은 디스패처의
-  `case head_kind` 뿐이다(20260930). 기존 테스트는 TS 리터럴을 테스트
+  `case head_kind` 뿐이다(정본은 20261002 — 위 '일정 경고 문장' 테스트의
+  두 번째 ※ 참고). 기존 테스트는 TS 리터럴을 테스트
   파일에 적은 리터럴과 맞대므로, SQL 쪽 문장을 한 글자 고쳐도 275개가
   전부 초록이다.
 
@@ -5199,7 +5208,7 @@ test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () =>
 test('18시 머리말 문구 — statusPhrase 와 SQL case 가 한 글자도 다르지 않다', () => {
   const sql = readFileSync(
     new URL(
-      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
       import.meta.url
     ),
     'utf-8'
