@@ -142,6 +142,7 @@ const {
   buildCycleHeader,
   buildConfigChangedMessage,
   escapeMrkdwn,
+  ADMIN_BASE,
 } = await import('../lib/services/qa-router/message');
 
 const { isQuietHours, parseSchedule, diffDerived } =
@@ -6325,4 +6326,65 @@ test('어드민 주소 — TS 와 SQL 이 한 글자도 다르지 않다', () =>
   assert.ok(sqlHit, 'qa_router_admin_base() 의 값을 못 읽었다');
   assert.equal(tsHit[1], sqlHit[1]);
   assert.match(tsHit[1], /^https:\/\//);
+});
+
+const HEADER_BASE = {
+  cycleLabel: '배포 261007',
+  fixVersion: 'release_20261007',
+  qaStartYmd: '2026-09-29',
+  qaEndYmd: '2026-10-08',
+  prodYmd: '2026-10-07',
+  deployPageUrl: 'https://ignitecorp.atlassian.net/wiki/x/1',
+  filterUrl: 'https://ignitecorp.atlassian.net/issues?filter=12571',
+};
+
+/*
+  경고가 없을 때는 지금과 글자가 같아야 한다. 이 태스크는 **더하는** 일이지
+  바꾸는 일이 아니다.
+*/
+test('차수 머리글 — 일정이 멀쩡하면 지금과 같다', () => {
+  const before = buildCycleHeader(HEADER_BASE);
+  const after = buildCycleHeader({ ...HEADER_BASE, scheduleWarn: null });
+  assert.deepEqual(after, before);
+  assert.ok(
+    !JSON.stringify(after).includes('쓸 수 없'),
+    '경고가 없는데 경고 문구가 들어갔다'
+  );
+});
+
+/*
+  ── 왜 루트가 차수 화면 링크를 들어야 하나 ──
+
+  스레드 안 알림은 상세 블록 다섯 줄을 지운다. 근거는 "같은 내용이 루트에
+  이미 있다" 인데, 실측하면 넷은 맞고 **`{상세링크}` 만 루트에 없다.**
+  그래서 18:00 요약이 "차수 화면에서 고쳐 주세요" 라고 하면서 스레드 어디에도
+  그 화면으로 갈 길이 없었다. 루트가 들면 그 거래가 비로소 전부 참이 된다.
+*/
+test('차수 머리글 — 차수 화면 링크를 든다', () => {
+  const m = buildCycleHeader({
+    ...HEADER_BASE,
+    cycleUrl: `${ADMIN_BASE}/admin/qa-router/cfg-1/cycles/2026-10-07`,
+  });
+  const s = JSON.stringify(m.blocks);
+  assert.ok(s.includes('/admin/qa-router/cfg-1/cycles/2026-10-07'));
+  assert.ok(s.includes('차수 현황판'));
+  // 기존 링크 둘은 그대로다
+  assert.ok(s.includes('배포대장'));
+  assert.ok(s.includes('QA 필터'));
+});
+
+test('차수 머리글 — 일정이 쓸 수 없으면 그 자리에서 말한다', () => {
+  const m = buildCycleHeader({
+    ...HEADER_BASE,
+    scheduleWarn: {
+      why: 'QA 종료(2026-10-08)가 운영 배포일(2026-10-07)보다 뒤입니다',
+    },
+  });
+  const s = JSON.stringify(m.blocks);
+  assert.ok(s.includes('QA 기간을 쓸 수 없습니다'));
+  assert.ok(
+    s.includes('QA 종료(2026-10-08)가 운영 배포일(2026-10-07)보다 뒤입니다')
+  );
+  // 이유가 날짜를 문장 안에 들고 있으므로, 일정 칸을 못 봐도 혼자 말이 된다
+  assert.ok(m.text.includes('🚀'), '머리글 text 는 그대로다');
 });

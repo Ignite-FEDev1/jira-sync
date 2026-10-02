@@ -380,14 +380,31 @@ export interface CycleHeaderInput {
   qaStartYmd?: string | null;
   qaEndYmd?: string | null;
   /**
-   * 운영 배포일. 배포대장 본문 값을 그대로 쓴다 (배포대장이 팀 정본 문서).
-   * fixVersion 이름의 날짜와 다를 수 있다 — 배포일이 조정되면 본문과 버전명이 어긋난다.
-   * 사이클 종료 판정은 fixVersion 날짜를 쓰므로 표시와 판정 기준이 갈릴 수 있는데,
-   * 그쪽이 더 보수적(더 오래 폴링)이라 문제되지 않는다.
+   * 운영 배포일. **사다리가 정한 값**(`prodDayOf`)을 넘긴다 — 대장 제목의
+   * 날짜와 본문 값 중 늦은 쪽이다.
+   *
+   * 늦은 쪽을 고르는 이유: 실측 `release_20260914` 는 본문이 9/10 으로 남아
+   * 있었는데 제목·Jira 릴리스·QA 스레드가 모두 9/14 였다. 낡은 본문을 그대로
+   * 적으면 차수 이름과 어긋난 날짜가 채널에 박힌다.
    */
   prodYmd: string;
   deployPageUrl?: string | null;
   filterUrl?: string | null;
+  /**
+   * 차수 화면 주소.
+   *
+   * 스레드 안 알림은 상세 블록을 지우면서 이 링크도 함께 버린다. 그 거래의
+   * 근거가 "루트에 이미 있다" 인데 이 링크만 루트에 없었다. 루트가 들어야
+   * "차수 화면에서 고쳐 주세요" 라는 말에 갈 길이 생긴다.
+   */
+  cycleUrl?: string | null;
+  /**
+   * 사다리가 "이 창은 못 쓴다" 고 한 이유. 쓸 수 있으면 `null`.
+   *
+   * 차수가 열리는 순간이 고치는 비용이 가장 싸다 — 아직 아무도 그 일정으로
+   * 일을 안 했다. 그 순간에 말한다.
+   */
+  scheduleWarn?: { why: string } | null;
 }
 
 /**
@@ -423,6 +440,7 @@ export function buildCycleHeader(i: CycleHeaderInput): SlackMessage {
     항상 맞는 말만 남긴다.
   */
   if (i.filterUrl) links.push(`• [QA 필터] ${i.filterUrl}`);
+  if (i.cycleUrl) links.push(`• [차수 현황판] ${i.cycleUrl}`);
 
   const blocks: unknown[] = [
     {
@@ -431,6 +449,24 @@ export function buildCycleHeader(i: CycleHeaderInput): SlackMessage {
     },
     { type: 'section', fields },
   ];
+
+  /*
+    경고는 일정 칸 **바로 아래**에 둔다. 위에 있는 날짜가 왜 이상한지를
+    말하는 글이라 떨어뜨리면 둘을 잇는 일이 읽는 사람 몫이 된다.
+  */
+  if (i.scheduleWarn) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          `:warning: *이 차수의 QA 기간을 쓸 수 없습니다*\n` +
+          `${i.scheduleWarn.why}\n` +
+          `차수 화면에서 직접 넣거나 배포대장을 고쳐 주세요.`,
+      },
+    });
+  }
+
   if (links.length > 0) {
     blocks.push({ type: 'divider' });
     blocks.push({
