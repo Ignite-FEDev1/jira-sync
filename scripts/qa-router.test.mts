@@ -6696,3 +6696,22 @@ test('차수 머리글 — 링크·사다리가 대장 행의 deploy_ymd 를 쓴
     /prod_day := greatest\(cyc\.deploy_ymd, coalesce\(cyc\.prod_ymd, cyc\.deploy_ymd\)\);/
   );
 });
+
+test('봇 상태 채널 — 마이그레이션이 칸 둘을 더한다 (SQL)', () => {
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261003_qa_router_health_channel.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  // 함정: 파일 안의 rollback 은 바깥 트랜잭션까지 되돌리는데
+  // _migrations 기록은 커밋된다 — 적용 안 된 채 '적용됨' 으로 남는다.
+  assert.doesNotMatch(sql, /^\s*rollback;/m);
+  assert.doesNotMatch(sql, /^\s*begin;/m);
+
+  assert.match(sql, /add column if not exists slack_health_channel_id text/);
+  assert.match(sql, /add column if not exists first_fail_at timestamptz/);
+  // 컬럼 추가만 한다 — 함수를 재정의하면 정본이 옮겨간다
+  assert.doesNotMatch(sql, /create or replace function/);
+});
