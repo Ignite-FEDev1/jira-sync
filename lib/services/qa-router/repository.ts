@@ -61,6 +61,8 @@ function fromConfigInput(i: QaRouterConfigInput): Partial<ConfigRow> {
     row.slack_fallback_channel_id = i.slackFallbackChannelId;
   if (i.slackOpsChannelId !== undefined)
     row.slack_ops_channel_id = i.slackOpsChannelId;
+  if (i.slackHealthChannelId !== undefined)
+    row.slack_health_channel_id = i.slackHealthChannelId;
   if (i.planIssueTypeId !== undefined)
     row.plan_issue_type_id = i.planIssueTypeId;
   if (i.devIssueTypeId !== undefined) row.dev_issue_type_id = i.devIssueTypeId;

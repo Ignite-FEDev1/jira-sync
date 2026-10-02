@@ -5624,6 +5624,7 @@ test('상태 행 — 실패 알림 ts 를 도메인 값으로 옮긴다', () => 
     derived: null,
     last_poll_at: null,
     consecutive_fails: 3,
+    first_fail_at: null,
     locked_until: null,
     locked_by: null,
     stale_alerted_at: null,
@@ -6714,4 +6715,33 @@ test('봇 상태 채널 — 마이그레이션이 칸 둘을 더한다 (SQL)', (
   assert.match(sql, /add column if not exists first_fail_at timestamptz/);
   // 컬럼 추가만 한다 — 함수를 재정의하면 정본이 옮겨간다
   assert.doesNotMatch(sql, /create or replace function/);
+});
+
+test('봇 상태 채널 — 행에서 읽힌다', () => {
+  const c = toConfig({
+    id: 'c1',
+    name: 'ㄱ',
+    slack_channel_id: 'C_QA',
+    slack_ops_channel_id: null,
+    slack_health_channel_id: 'C_HEALTH',
+  } as never);
+  assert.equal(c.slackHealthChannelId, 'C_HEALTH');
+});
+
+test('봇 상태 채널 — 칸이 비면 null 이다', () => {
+  const c = toConfig({
+    id: 'c1',
+    name: 'ㄱ',
+    slack_channel_id: 'C_QA',
+  } as never);
+  assert.equal(c.slackHealthChannelId, null);
+});
+
+test('첫 실패 시각 — 상태에서 읽힌다', () => {
+  const s = toState({
+    config_id: 'c1',
+    first_fail_at: '2026-10-02T01:03:00Z',
+  } as never);
+  assert.equal(s.firstFailAt, '2026-10-02T01:03:00Z');
+  assert.equal(toState({ config_id: 'c1' } as never).firstFailAt, null);
 });

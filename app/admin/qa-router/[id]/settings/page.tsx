@@ -752,6 +752,16 @@ export default function QaRouterSettingsPage() {
                   }
                   fallback="판정 알림 채널로"
                 />
+                <ChannelLine
+                  label="봇 상태"
+                  id={config.slackHealthChannelId}
+                  name={
+                    config.slackHealthChannelId
+                      ? names[config.slackHealthChannelId]
+                      : undefined
+                  }
+                  fallback="운영 알림 채널로"
+                />
               </div>
               {/*
                 형식 검사(`^C[A-Z0-9]{6,}$`)는 오타를 못 걸러 준다 — 형식이
@@ -2958,6 +2968,7 @@ function WhereEditor({
 }) {
   const [channel, setChannel] = useState(config.slackChannelId);
   const [ops, setOps] = useState(config.slackOpsChannelId ?? '');
+  const [health, setHealth] = useState(config.slackHealthChannelId ?? '');
 
   return (
     <div className="flex flex-col gap-3">
@@ -2988,6 +2999,21 @@ function WhereEditor({
         />
         <Hint>워치독·실패·설정 변경 알림이 갑니다.</Hint>
       </div>
+      <div>
+        <FieldLabel>봇 상태 채널</FieldLabel>
+        <ChannelInput
+          configId={config.id}
+          value={health}
+          onChange={setHealth}
+          placeholder="비우면 운영 알림 채널로"
+          label="봇 상태 채널"
+          knownName={knownNames?.[health.trim()]}
+        />
+        <Hint>
+          연속 실패·복구만 여기로 · 설정 변경 감지는 운영 알림 채널에
+          남습니다
+        </Hint>
+      </div>
       <StageActions
         saving={saving}
         onCancel={onCancel}
@@ -2995,6 +3021,7 @@ function WhereEditor({
           void onSave({
             slackChannelId: channel,
             slackOpsChannelId: ops,
+            slackHealthChannelId: health,
           })
         }
       />

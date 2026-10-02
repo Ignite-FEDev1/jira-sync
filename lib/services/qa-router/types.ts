@@ -709,6 +709,15 @@ export interface QaRouterConfig {
    */
   slackOpsChannelId: string | null;
 
+  /**
+   * 봇 상태 알림(연속 실패·복구) 채널. 없으면 운영 채널로 떨어진다.
+   *
+   * 운영 채널과 가르는 이유: 설정 변경 감지는 사람이 바꾼 일이라 팀이 봐야
+   * 하고, 연속 실패는 봇이 죽은 일이라 봇을 고치는 사람이 봐야 한다. 한
+   * 채널에 두면 차수 스레드만 있어야 할 자리에 봇 상태 글이 쌓인다.
+   */
+  slackHealthChannelId: string | null;
+
   quietHours: QuietHours;
   /**
    * 한 번 확인하고 다음까지 쉬는 초.
@@ -769,6 +778,7 @@ export type QaRouterConfigInput = Pick<
       | 'fixVersionPattern'
       | 'slackFallbackChannelId'
       | 'slackOpsChannelId'
+      | 'slackHealthChannelId'
       | 'quietHours'
       | 'tickIntervalSeconds'
       | 'judgeTiers'
@@ -874,6 +884,13 @@ export interface QaRouterState {
   derived: DerivedContext | null;
   lastPollAt: string | null;
   consecutiveFails: number;
+  /**
+   * 연속 실패가 시작된 시각. 성공하면 지운다.
+   *
+   * `consecutiveFails` 는 횟수만 알아 "3회" 가 3분인지 3시간인지 모른다.
+   * 폴링 주기를 아는 사람만 환산할 수 있는 숫자는 알림에서 쓸모가 적다.
+   */
+  firstFailAt: string | null;
   lockedUntil: string | null;
   lockedBy: string | null;
   staleAlertedAt: string | null;

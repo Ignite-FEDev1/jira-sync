@@ -58,6 +58,7 @@ interface Body {
    */
   coAssigneeField?: unknown;
   slackOpsChannelId?: unknown;
+  slackHealthChannelId?: unknown;
   planIssueTypeId?: unknown;
   devIssueTypeId?: unknown;
   confluenceDeployRootId?: unknown;
@@ -132,6 +133,7 @@ export type ConfigField =
   | 'coAssigneeField'
   | 'slackChannelId'
   | 'slackOpsChannelId'
+  | 'slackHealthChannelId'
   | 'planIssueTypeId'
   | 'devIssueTypeId'
   | 'confluenceDeployRootId'
@@ -394,6 +396,7 @@ function checkPipeline(
   // ── 운영 채널. 비우면 폴백(알림 채널)을 쓰라는 뜻이라 null 로 저장한다. ──
   for (const [key, column, label] of [
     ['slackOpsChannelId', 'slack_ops_channel_id', '운영 채널'],
+    ['slackHealthChannelId', 'slack_health_channel_id', '봇 상태 채널'],
   ] as const) {
     if (b[key] === undefined) continue;
     const v = typeof b[key] === 'string' ? (b[key] as string).trim() : '';
