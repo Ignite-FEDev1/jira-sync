@@ -4973,7 +4973,19 @@ test('일정 사다리 — 크론 함수도 사다리를 거친다 (SQL)', () =>
     brief,
     /qa_router_should_warn\(cyc\.schedule_warned_on, today_kst\)/
   );
-  // 경고는 운영 채널로 간다
+  /*
+    경고는 운영 채널로 간다.
+
+    ⚠ **지금 동작에 대한 말이 아니다.** `qa_router_morning_brief()` 는
+    `20260930_qa_router_alert_model.sql:875` 가 `drop function` 으로 지웠고,
+    크론은 `qa_router_alerts()` 하나만 부른다. 이 단언이 지키는 것은 **그
+    파일에 적힌 옛 글자**일 뿐이다.
+
+    실제 라우팅은 `20261002_qa_router_warn_in_thread.sql` 이 정한다 —
+    채널이 **실제로 갈릴 때만** 운영 채널이고, 안 갈리면 차수 스레드 안이다
+    ("경고 라우팅 — 채널이 실제로 갈릴 때만 운영 채널 (SQL)" 참고).
+    여기를 읽고 "경고는 늘 운영 채널" 로 믿지 않도록 적어 둔다.
+  */
   assert.match(brief, /target := r\.ops_channel;/);
   // 경고를 보내면 기록을 남긴다 (차수당 횟수를 묶는 근거)
   assert.match(brief, /set schedule_warned_on = today_kst/);
@@ -6415,4 +6427,33 @@ test('경고 라우팅 — 채널이 실제로 갈릴 때만 운영 채널 (SQL)
   assert.match(sql, /ops_channel is distinct from r\.slack_channel_id/);
   // 시그니처를 안 바꾼다 — 인자 없는 함수 그대로 (오버로드 회피)
   assert.match(sql, /create or replace function public\.qa_router_alerts\(\)/);
+
+  /*
+    "비교가 어딘가 있다" 만 재면 **갈래를 뒤집어도 통과한다.** 실제로 그렇다:
+    두 팔을 맞바꾸거나, thread_ts 를 붙이는 블록을 통째로 지우거나,
+    `in_thread` 를 계산만 하고 안 써도 위 두 줄은 다 녹색이다. 운영에서는
+    두 대상 다 `slack_ops_channel_id` 가 null 이라 **갈래가 뒤집히면 경고가
+    전부 스레드 밖으로 돌아간다** - 이 태스크가 고치려던 바로 그 증상이다.
+
+    로컬 Postgres 실측은 CI 가 재현 못 하므로, 팔의 **방향**을 여기서 박는다.
+    (`/s` 플래그는 이 레포 tsconfig target 이 ES2017 이라 TS1501 로 막힌다.
+     줄바꿈은 `\s+` 로 넘는다.)
+  */
+  // ① 나뉜 쪽 → 운영 채널, 스레드 밖
+  assert.match(
+    sql,
+    /is distinct from r\.slack_channel_id then\s+target := r\.ops_channel;\s+in_thread := false;/
+  );
+  // ② 안 나뉜 쪽 → 차수 채널, 스레드가 있으면 그 안
+  assert.match(
+    sql,
+    /else\s+target := r\.slack_channel_id;\s+in_thread := r\.thread_ts is not null;\s+end if;/
+  );
+  // ③ 정한 값을 실제로 쓴다 — 안 쓰면 ①②가 다 맞아도 아무 데도 안 붙는다
+  assert.match(
+    sql,
+    /if in_thread then\s+payload := payload \|\| jsonb_build_object\('thread_ts', r\.thread_ts\);/
+  );
+  // ④ 선언이 있어야 위 셋이 컴파일된다
+  assert.match(sql, /^\s+in_thread boolean;$/m);
 });

@@ -54,6 +54,27 @@ end $$;
 update public._migrations set checksum = '<새 해시>' where filename = '<파일명>';
 ```
 
+### 같은 함수를 다시 만든 파일이 둘이면 **늦은 쪽이 정본입니다**
+
+적용 순서가 파일명 정렬순이므로, 같은 함수를 `create or replace` 하는 파일이
+여럿이면 **마지막에 도는 파일의 내용이 DB 에 남습니다.** 앞 파일의 정의는
+그 시점의 역사일 뿐이고, 거기를 고쳐도 뒤 파일이 곧바로 덮어씁니다 —
+적용 로그에는 "적용됨" 이 찍히는데 DB 함수는 안 바뀌는, 알아채기 어려운 모양입니다.
+
+```bash
+# 이 함수의 정본이 어느 파일인지 — 맨 아래 줄이 정본입니다
+grep -ln "function public.<함수이름>" supabase/migrations/*.sql | LC_ALL=C sort
+```
+
+지금 그런 짝:
+
+| 함수 | 정본 (여기를 고칩니다) | 얼어붙은 역사 |
+|---|---|---|
+| `public.qa_router_alerts()` | `20261002_qa_router_warn_in_thread.sql` | `20260930_qa_router_alert_model.sql` |
+
+`20260930` 은 그 밖에도 한 번만 적용되는 파일이라 **더더욱 고치면 안 됩니다**
+(아래 "한 번만 적용되는 파일이 있습니다" 참고).
+
 ## 무엇이 적용되는지 판단하는 기준
 
 `public._migrations` 테이블에 파일명과 내용 해시(SHA-256)가 남습니다.
@@ -120,6 +141,49 @@ $ ls *.sql | LC_ALL=C sort | grep 20260908_qa_router_cycle
 DB 가 그 파일을 다시 적용하려 듭니다. 위 한 줄은 신선한 복제본에만 쓰는
 보정이고 마이그레이션의 일부가 아닙니다.
 
+### 한 바퀴로는 안 끝납니다 — **수렴할 때까지 돌리세요**
+
+파일명 정렬순이 의존성 순서와 다릅니다(위 "파일 규칙" 의 `20260911_qa_router_message_*`
+아홉 개). 운영은 과거에 다른 순서로 돌아 멀쩡하지만, 신선한 DB 에 정렬순으로 한 바퀴
+돌리면 **40개 가까이 죽습니다** — 2026-10-02 실측 86개 중 39개 실패.
+
+```
+function public.qa_router_admin_base() does not exist
+function public.qa_router_rule_day(date, integer, text) does not exist
+column c.alert_rules does not exist
+...
+```
+
+모든 파일이 `create or replace`/`if exists` 라 **여러 번 돌려도 안전**합니다.
+성공한 파일을 기억해 두고 새로 성공하는 것이 없을 때까지 반복하세요. 실측:
+
+```
+pass1: +47 (누적 47)    pass2: +21 (누적 68)
+pass3: +2  (누적 70)    pass4: +0  → 수렴
+```
+
+- `20260410_deploy_room.sql` 은 `publication "supabase_realtime" does not exist`
+  로 죽습니다. `create publication supabase_realtime;` 를 먼저 세우면 이 묶음이 풉니다
+- `teams`·`projects`·`sync_profiles`·`deploy_room_checklist_user_status` 를 참조하는
+  옛 파일 아홉 개는 **끝내 안 올라갑니다.** 그 테이블을 만드는 마이그레이션이
+  레포에 없습니다(도입 전에 손으로 만든 것들). QA Router 와 무관합니다
+
+### `qa_router_progress_line` 2-arg 오버로드를 손으로 지워야 합니다
+
+```sql
+drop function if exists public.qa_router_progress_line(jsonb, timestamptz);
+```
+
+- 운영에서는 `20260911_qa_router_message_board_link.sql:150` 이 이것을 지웠습니다
+- 그런데 정렬 재생에서는 `board_link` 가 **먼저** 돌고, 그 뒤 `lines`·`polish`·
+  `readability`·`shape` 가 2-arg 를 다시 만듭니다 — 그 drop 이 헛돕니다
+- 그래서 `20260915_qa_router_drop_orphan_overloads.sql` 이 자기 검사에서 멈춥니다:
+  `오버로드가 아직 남아 있습니다: qa_router_progress_line × 2`
+- 위 한 줄을 돌린 뒤 그 파일을 다시 적용하면 통과합니다. 최종 상태는 운영과 같습니다
+  (`qa_router_progress_line(jsonb, timestamptz, date)` 한 벌)
+- `qa_router_alerts()` 는 3-arg 로 부르므로 그냥 둬도 호출은 안 깨지지만,
+  남겨 두면 그 파일이 영영 "적용 안 됨" 으로 남습니다
+
 ### 한 번만 적용되는 파일이 있습니다
 
 `20260930_qa_router_alert_model.sql` 은 옛 `alerts` 컬럼을 읽은 **뒤에** 그
@@ -130,9 +194,15 @@ DB 가 그 파일을 다시 적용하려 듭니다. 위 한 줄은 신선한 복
 ### 그 밖에 필요한 것
 
 - `pg_cron`·`pg_net` 확장과 `vault`·`cron`·`net` 스키마 (로컬에는 없으므로
-  스텁으로 대신합니다)
+  스텁으로 대신합니다). 확장 자체는 설치할 수 없으므로 적용 직전에
+  `create extension if not exists pg_cron|pg_net;` 줄만 주석 처리해 흘려보내고
+  (`sed` 로 임시 사본에만 — **레포 파일은 안 건드립니다**), `cron.job` 테이블과
+  `cron.schedule`·`cron.unschedule`·`net.http_post`·`vault.decrypted_secrets` 를
+  손으로 세웁니다
 - `anon`·`authenticated` 롤 — 없으면 `grant` 가 죽고 `--single-transaction`
   탓에 **파일 전체가 롤백**됩니다. "적용했는데 옛 함수가 남아 있다" 로 보입니다
+- `psql` 오류는 `grep -iE "^ERROR"` 로 안 잡힙니다 — `psql:<파일>:<줄>: ERROR:`
+  모양이라 줄 머리가 아닙니다. 전체 로그를 보세요
 
 ## 이 스크립트를 새 DB 에 처음 붙일 때
 
