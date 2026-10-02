@@ -34,6 +34,7 @@ import {
   type ReassignOutcome,
 } from './message';
 import { prodDayOf, resolveQaWindow } from './qa-window';
+import { wantsQaAlerts } from './alert-rule';
 import { readCyclePageTitle, tooSoon } from './status';
 import {
   extractJqlStrings,
@@ -41,13 +42,14 @@ import {
   pickLedgerProjectKey,
 } from './ledger-jql';
 import * as repo from './repository';
-import type {
-  DeployCycle,
-  ActiveCycle,
-  DerivedContext,
-  DerivedMember,
-  QaRouterConfig,
-  QaRouterState,
+import {
+  effectiveAlertRules,
+  type DeployCycle,
+  type ActiveCycle,
+  type DerivedContext,
+  type DerivedMember,
+  type QaRouterConfig,
+  type QaRouterState,
 } from './types';
 import type {
   ConfluenceClient,
@@ -1144,8 +1146,27 @@ export async function runTick(
             : null,
           filterUrl: `${deps.jiraBaseUrl}/issues?filter=${cfg.jiraFilterId}`,
           cycleUrl: `${ADMIN_BASE}/admin/qa-router/${cfg.id}/cycles/${cycleYmd}`,
+          /*
+            경고를 들지 말지는 **창이 못 쓸 상태인가**(`invalid`·`none`)와
+            **이 대상이 QA 기간 개념을 쓰는가**(`wantsQaAlerts`) 둘 다를
+            본다. SQL 이 꼭 그렇게 한다 — 일정 경고 갈래
+            (`20261002_qa_router_warn_in_thread.sql:185`)와 18:00 요약의
+            `{일정경고이유}`(`:291`)가 같은 짝을 쓴다.
+
+            뒤의 조건이 없으면, QA 시작·종료 앵커를 **둘 다 끈 대상**
+            (= "우리는 QA 기간이라는 걸 안 쓴다") 이 알림에서는 조용한데
+            **새 차수 머리글에서만 경고를 받는다.** 안 받기로 한 쪽에
+            새 메시지를 보내는 것이라, 이 브랜치가 "경고의 목적지만
+            옮긴다" 고 한 전제가 깨진다.
+
+            규칙은 차수 덮어쓰기를 반영한 것을 넘긴다 — SQL 도
+            `qa_router_alert_rules_for` 를 거친 목록을 본다.
+          */
           scheduleWarn:
-            win.source === 'invalid' || win.source === 'none'
+            (win.source === 'invalid' || win.source === 'none') &&
+            wantsQaAlerts(
+              effectiveAlertRules(row?.alertRulesOverride, cfg.alertRules)
+            )
               ? { why: win.why ?? 'QA 시작·종료일을 어디에서도 못 읽었습니다' }
               : null,
         });

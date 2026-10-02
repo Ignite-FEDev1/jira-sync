@@ -50,6 +50,7 @@ import {
   dueRules,
   statusPhrase,
   toAlertRuleV2,
+  wantsQaAlerts,
 } from '@/lib/services/qa-router/alert-rule';
 import type { AlertRule, AlertWhen } from '@/lib/services/qa-router/types';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
@@ -6465,6 +6466,171 @@ test('경고 라우팅 — 채널이 실제로 갈릴 때만 운영 채널 (SQL)
   );
   // ④ 선언이 있어야 위 셋이 컴파일된다
   assert.match(sql, /^\s+in_thread boolean;$/m);
+});
+
+/*
+  ── "QA 기간을 안 쓰는 대상" 이라는 문이 TS 에는 없었다 ──
+
+  SQL 은 일정 경고를 **두 조건**으로 낸다: 창이 못 쓸 상태인가
+  (`win.source in ('none','invalid')`), 그리고 **이 대상이 QA 기간이라는
+  개념을 쓰는가**(`qa_router_wants_qa_alerts`). QA 시작·종료 앵커를 둘 다
+  끈 대상은 "우리는 QA 기간을 안 쓴다, 그만 조르라" 고 말한 것이라
+  경고(`:185`)도 18:00 요약의 일정 한 줄(`:291`)도 안 받는다.
+
+  차수 머리글이 경고를 들기 시작하면서 TS 에 그 문이 필요해졌는데 없었다.
+  그러면 끈 대상이 **알림에서는 조용한데 새 차수 머리글에서만 경고를 받는다**
+  - 안 받기로 한 쪽에 새 메시지를 보내는 것이고, "경고의 목적지만 옮긴다" 는
+  이 브랜치의 전제가 깨진다.
+
+  그래서 `alert-rule.ts` 에 쌍둥이를 둔다. 아래는 그 쌍둥이의 동작이고,
+  SQL 과 글자를 맞대는 핀은 그 다음 테스트다.
+*/
+test('wantsQaAlerts — QA 앵커가 하나라도 켜져 있을 때만 참', () => {
+  const anchor = (
+    anchor: 'qa_start' | 'qa_end' | 'prod',
+    enabled = true
+  ): AlertRule => ({
+    id: `r-${anchor}-${String(enabled)}`,
+    at: '09:10',
+    when: { kind: 'anchor', anchor, offset: 0, shift: 'none' },
+    label: anchor,
+    enabled,
+  });
+
+  // 켜진 QA 앵커 하나면 참이다
+  assert.equal(wantsQaAlerts([anchor('qa_start')]), true);
+  assert.equal(wantsQaAlerts([anchor('qa_end')]), true);
+  assert.equal(wantsQaAlerts([anchor('prod'), anchor('qa_end')]), true);
+
+  // 둘 다 끈 대상이 이 태스크가 지키려는 쪽이다
+  assert.equal(
+    wantsQaAlerts([
+      anchor('qa_start', false),
+      anchor('qa_end', false),
+      anchor('prod'),
+    ]),
+    false
+  );
+
+  // 운영 배포일 앵커는 QA 기간과 무관하다
+  assert.equal(wantsQaAlerts([anchor('prod')]), false);
+
+  // 앵커가 아닌 종류는 안 센다 - SQL 의 `#>>'{when,anchor}'` 가 null 이다
+  const nonAnchor: AlertRule[] = [
+    {
+      id: 'summary',
+      at: '18:00',
+      when: { kind: 'activeCycle' },
+      label: '마감 요약',
+      enabled: true,
+    },
+    {
+      id: 'scheduleWarning',
+      at: '09:10',
+      when: { kind: 'scheduleUnusable' },
+      label: '일정 경고',
+      enabled: true,
+    },
+  ];
+  assert.equal(wantsQaAlerts(nonAnchor), false);
+
+  // 빈 목록·없음 - SQL 의 `coalesce(p_rules, '[]')`
+  assert.equal(wantsQaAlerts([]), false);
+  assert.equal(wantsQaAlerts(null), false);
+  assert.equal(wantsQaAlerts(undefined), false);
+
+  /*
+    `enabled` 칸이 비면 **켜진 것으로 본다** - SQL 의
+    `coalesce((r.value->>'enabled')::boolean, true)` 와 같다. 타입은
+    boolean 을 요구하지만 DB 에서 온 jsonb 는 그 칸이 없을 수 있고,
+    `rows.ts` 는 그대로 캐스팅해 넘긴다.
+  */
+  const noEnabled = { ...anchor('qa_start') } as Partial<AlertRule>;
+  delete noEnabled.enabled;
+  assert.equal(wantsQaAlerts([noEnabled as AlertRule]), true);
+
+  // 기본 규칙 셋은 QA 앵커를 들고 있다 - 운영 대상이 경고를 계속 받는다
+  assert.equal(wantsQaAlerts(DEFAULT_ALERT_RULES), true);
+});
+
+/*
+  ── 그 쌍둥이를 SQL 원문에 묶는다 ──
+
+  `schedule_note` 문장을 세 곳에서 맞대는 것과 같은 수법이다. 동작 테스트만
+  두면 **SQL 쪽을 고쳐도 전부 초록**이라, 쌍둥이가 갈리는 순간을 아무도
+  못 본다. 이 저장소가 이미 그 사고를 겪었다.
+
+  `qa_router_wants_qa_alerts` 의 정본은 `20260930` 이다
+  (`20260929` 가 먼저 만들고 `20260930` 이 새 규칙 모양을 읽게 다시 만들었다 -
+   파일명 정렬이 적용 순서이므로 늦은 쪽이 남는다).
+  부르는 자리는 `20261002` 의 디스패처 둘이다.
+*/
+test('wantsQaAlerts — SQL 쌍둥이와 같은 것을 센다', () => {
+  const sqlFnFile = readFileSync(
+    new URL(
+      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const dispatcher = readFileSync(
+    new URL(
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  const ts = readFileSync(
+    new URL('../lib/services/qa-router/alert-rule.ts', import.meta.url),
+    'utf-8'
+  );
+
+  const sqlFn = sqlFnFile.match(
+    /create or replace function public\.qa_router_wants_qa_alerts[\s\S]*?\$\$;/
+  );
+  assert.ok(sqlFn, '20260930 에서 qa_router_wants_qa_alerts 본문을 못 찾았다');
+  const tsFn = ts.match(/export function wantsQaAlerts\([\s\S]*?\n\}\n/);
+  assert.ok(tsFn, 'alert-rule.ts 에서 wantsQaAlerts 본문을 못 찾았다');
+
+  // ① 세는 앵커 이름이 같다
+  const anchorsOf = (src: string) =>
+    [...src.matchAll(/'(qa_[a-z_]+)'/g)].map((m) => m[1]).sort();
+  const fromSql = anchorsOf(sqlFn[0]);
+  const fromTs = anchorsOf(tsFn[0]);
+  assert.deepEqual(fromSql, ['qa_end', 'qa_start'], `SQL: ${fromSql}`);
+  assert.deepEqual(fromTs, fromSql, '세는 앵커가 SQL 과 TS 에서 다르다');
+
+  /*
+    ② `enabled` 가 비었을 때의 답이 같다. 두 언어의 철자는 다르지만 뜻이
+       하나다 - 한쪽만 고치면 "끈 대상" 의 범위가 조용히 달라진다.
+  */
+  assert.match(sqlFn[0], /coalesce\(\(r\.value->>'enabled'\)::boolean, true\)/);
+  assert.match(tsFn[0], /r\.enabled !== false/);
+
+  // ③ 디스패처가 실제로 두 자리에서 이 문을 쓴다 (경고 · 18시 일정 한 줄)
+  assert.match(
+    dispatcher,
+    /win\.source in \('none', 'invalid'\)\s+and public\.qa_router_wants_qa_alerts\(rules\)/
+  );
+  assert.match(
+    dispatcher,
+    /when not public\.qa_router_wants_qa_alerts\(rules\) then null/
+  );
+
+  /*
+    ④ TS 쪽에서도 **실제로 쓰여야** 한다. 함수만 있고 머리글이 안 부르면
+       위 셋이 다 맞아도 끈 대상이 경고를 받는다 - 고치려던 증상 그대로다.
+       차수 덮어쓰기를 반영한 목록을 넘기는 것까지 본다
+       (SQL 은 `qa_router_alert_rules_for` 를 거친 `rules` 를 넘긴다).
+  */
+  const tick = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.match(
+    tick,
+    /wantsQaAlerts\(\s*effectiveAlertRules\(row\?\.alertRulesOverride, cfg\.alertRules\)\s*\)/
+  );
 });
 
 /*
