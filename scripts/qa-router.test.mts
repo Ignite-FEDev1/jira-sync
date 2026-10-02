@@ -6466,3 +6466,67 @@ test('경고 라우팅 — 채널이 실제로 갈릴 때만 운영 채널 (SQL)
   // ④ 선언이 있어야 위 셋이 컴파일된다
   assert.match(sql, /^\s+in_thread boolean;$/m);
 });
+
+/*
+  ── 차수 화면 링크는 `deploy_ymd` 로 열린다 ──
+
+  어드민 경로가 `qa_router_cycles.deploy_ymd` 로 열리고(`cycles/[ymd]`),
+  SQL 의 `{상세링크}` 도 `cyc.deploy_ymd` 를 쓴다. 머리글만 fixVersion
+  **이름에서 뜯은** 날짜를 쓰면 같은 화면으로 가는 링크 둘이 서로 다른
+  값에서 만들어지고, 갈리는 날 머리글 링크는 빈 화면으로 떨어진다 -
+  하필 "차수 화면에서 고쳐 주세요" 라고 말하는 경고와 같이 나가는 링크다.
+
+  사다리와 그 사다리가 정한 운영 배포일도 같은 값을 받아야 한다. SQL 이
+  사다리(`:121`)와 `prod_day`(`:128`) 둘 다에 `cyc.deploy_ymd` 를 넘긴다.
+*/
+test('차수 머리글 — 링크·사다리가 대장 행의 deploy_ymd 를 쓴다', () => {
+  const tick = readFileSync(
+    new URL('../lib/services/qa-router/tick.ts', import.meta.url),
+    'utf-8'
+  );
+
+  // 한 칸으로 모으고 대장 행이 없을 때만 이름에서 뜯은 날짜로 돌아간다
+  assert.match(
+    tick,
+    /const cycleYmd = row\?\.deployYmd \?\? parsedFv\.deployYmd;/
+  );
+  // 링크·사다리·운영 배포일 셋이 그 칸을 쓴다
+  assert.match(tick, /\/cycles\/\$\{cycleYmd\}`,/);
+  assert.match(tick, /deployYmd: cycleYmd,/g);
+  assert.equal(
+    [...tick.matchAll(/deployYmd: cycleYmd,/g)].length,
+    2,
+    '사다리와 prodDayOf 둘 다 cycleYmd 를 받아야 한다'
+  );
+
+  /*
+    머리글 블록 안에 이름에서 뜯은 날짜가 다시 새어 들어오지 않는다.
+    `cycleYmd` 를 정하는 줄 **다음**부터 잰다 - 그 줄의 `??` 오른쪽은
+    의도한 폴백이다.
+  */
+  const DECL = 'const cycleYmd = row?.deployYmd ?? parsedFv.deployYmd;';
+  const block = tick.slice(
+    tick.indexOf(DECL) + DECL.length,
+    tick.indexOf('const res = await deps.slack.post(')
+  );
+  assert.ok(block.length > 0, '머리글 블록을 못 잘랐다');
+  assert.doesNotMatch(
+    block,
+    /parsedFv\.deployYmd/,
+    '머리글 블록이 아직 fixVersion 이름의 날짜를 쓴다'
+  );
+
+  // SQL 쪽 근거 - 사다리와 prod_day 가 같은 칸을 받는다
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20261002_qa_router_warn_in_thread.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+  assert.match(sql, /cyc\.prod_ymd,\s+cyc\.deploy_ymd,/);
+  assert.match(
+    sql,
+    /prod_day := greatest\(cyc\.deploy_ymd, coalesce\(cyc\.prod_ymd, cyc\.deploy_ymd\)\);/
+  );
+});

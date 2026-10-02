@@ -1079,13 +1079,44 @@ export async function runTick(
           옛 대장 값을 계속 보여준다.
         */
         const row = await repo.getCycle(cfg.id, parsedFv.raw);
+        /*
+          이 차수를 가리키는 날짜. **정본은 `qa_router_cycles.deploy_ymd`**
+          (= 대장 제목의 날짜)이고, `parsedFv.deployYmd` 는 fixVersion
+          **이름에서 뜯어낸** 날짜다. 보통 같지만 같다는 보장이 없다.
+
+          갈리면 두 가지가 동시에 틀어진다.
+
+          · 차수 화면 주소가 `deploy_ymd` 로 열리므로
+            (`app/admin/qa-router/[id]/cycles/[ymd]`), 이름에서 뜯은 날짜로
+            링크를 만들면 **빈 화면**으로 떨어진다. "차수 화면에서 고쳐
+            주세요" 라고 적어 놓고 고칠 데가 없는 자리로 보내는 꼴이고,
+            하필 그 문장이 나가는 때가 "일정을 어디에서도 못 읽었다" 일 때다.
+          · 사다리(`resolveQaWindow`)와 그 사다리가 정한 운영 배포일
+            (`prodDayOf`)이 받는 "제목 날짜" 도 `deploy_ymd` 여야 한다 —
+            SQL 쌍둥이가 사다리에도 `prod_day` 에도 `cyc.deploy_ymd` 를
+            넘긴다 (`20261002_qa_router_warn_in_thread.sql:121`, `:128`).
+            여기만 다른 값을 쓰면 화면·알림·머리글이 또 세 답을 한다.
+
+          그래서 이 블록 안에서는 날짜를 한 칸으로 모아 쓴다.
+
+          ── 폴백의 값과 비용 ──
+
+          대장 행이 없으면(`row` 가 null) 이름에서 뜯은 날짜로 돌아간다.
+          **비용**: 행이 없다는 것은 그 주소에 보여 줄 차수도 없다는 뜻이라
+          링크는 어차피 빈 화면이다. 폴백이 그것을 고치지는 못한다.
+          **그래도 쓰는 이유**: null 로 두면 `{상세링크}` 가 빈 값이 되어
+          머리글에서 그 줄이 통째로 사라진다(빈 변수는 줄째로 빠진다).
+          사라지면 아무 단서가 없지만, 날짜가 박힌 주소는 "이 날짜 차수가
+          안 잡혔다" 를 보여 주고 차수 목록으로 되짚어 갈 손잡이가 된다.
+        */
+        const cycleYmd = row?.deployYmd ?? parsedFv.deployYmd;
         const win = resolveQaWindow({
           manualStartYmd: row?.qaStartYmdManual ?? null,
           manualEndYmd: row?.qaEndYmdManual ?? null,
           ledgerStartYmd: cycle.schedule?.qaStartYmd ?? null,
           ledgerEndYmd: cycle.schedule?.qaEndYmd ?? null,
           prodYmd: cycle.schedule?.prodYmd ?? null,
-          deployYmd: parsedFv.deployYmd,
+          deployYmd: cycleYmd,
           rule: cfg.qaScheduleRule,
         });
         const header = buildCycleHeader({
@@ -1099,7 +1130,7 @@ export async function runTick(
             (`release_20260914`: 본문 9/10 vs 제목 9/14)는 계속 막힌다.
           */
           prodYmd: prodDayOf({
-            deployYmd: parsedFv.deployYmd,
+            deployYmd: cycleYmd,
             prodYmd: cycle.schedule?.prodYmd ?? null,
           }),
           /*
@@ -1112,7 +1143,7 @@ export async function runTick(
             ? `${deps.jiraBaseUrl}/wiki/pages/viewpage.action?pageId=${cycle.deployPageId}`
             : null,
           filterUrl: `${deps.jiraBaseUrl}/issues?filter=${cfg.jiraFilterId}`,
-          cycleUrl: `${ADMIN_BASE}/admin/qa-router/${cfg.id}/cycles/${parsedFv.deployYmd}`,
+          cycleUrl: `${ADMIN_BASE}/admin/qa-router/${cfg.id}/cycles/${cycleYmd}`,
           scheduleWarn:
             win.source === 'invalid' || win.source === 'none'
               ? { why: win.why ?? 'QA 시작·종료일을 어디에서도 못 읽었습니다' }
