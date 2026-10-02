@@ -184,10 +184,7 @@ function reasonBullets(j: Judgement, jiraBaseUrl: string): string {
   // 결론 도막을 굵게. 표시를 먼저 입히고 나서 끊는다 — 끊고 나면
   // 도막마다 찾아 다녀야 하고, 경계에 걸친 문구를 놓친다.
   const marked = j.highlight
-    ? escapeMrkdwn(j.reason).replace(
-        escapeMrkdwn(j.highlight),
-        (m) => `*${m}*`
-      )
+    ? escapeMrkdwn(j.reason).replace(escapeMrkdwn(j.highlight), (m) => `*${m}*`)
     : escapeMrkdwn(j.reason);
   const parts = marked
     .split(/\s+(?:→|·)\s+/)
@@ -392,6 +389,17 @@ export interface CycleHeaderInput {
   deployPageUrl?: string | null;
   filterUrl?: string | null;
 }
+
+/**
+ * 어드민 도메인.
+ *
+ * SQL 쪽 `qa_router_admin_base()`
+ * (`20260911_qa_router_message_board_link.sql`) 와 **같은 값이어야 한다.**
+ * 알림 본문은 SQL 이 만들고 스레드 부모는 여기가 만드는데, 둘이 갈리면
+ * 한쪽 링크만 404 가 된다 — 링크는 눌러 본 사람만 깨진 것을 본다.
+ * 테스트가 두 원문을 맞대고 있다.
+ */
+export const ADMIN_BASE = 'https://fe1-jira-sync.vercel.app';
 
 export function buildCycleHeader(i: CycleHeaderInput): SlackMessage {
   const fields: unknown[] = [];

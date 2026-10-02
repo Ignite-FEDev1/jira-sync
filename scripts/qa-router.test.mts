@@ -54,7 +54,11 @@ import {
 import type { AlertRule, AlertWhen } from '@/lib/services/qa-router/types';
 import { postRecovery } from '@/lib/services/qa-router/fail-alert';
 import type { SlackPostResult } from '@/lib/services/qa-router/clients';
-import { cycleUpsertRow, toConfig, toState } from '@/lib/services/qa-router/rows';
+import {
+  cycleUpsertRow,
+  toConfig,
+  toState,
+} from '@/lib/services/qa-router/rows';
 import type { ConfigRow, StateRow } from '@/lib/services/qa-router/rows';
 import {
   extractIssueKeys,
@@ -2518,7 +2522,10 @@ test('차수 덮어쓰기 — 저장 전에 깨진 규칙을 사람 말로 막�
     checkAlertRules([{ ...anchor, when: { ...when, offset: 99 } }]) ?? '',
     /-60 ~ 60/
   );
-  assert.match(checkAlertRules([{ ...anchor, label: '  ' }]) ?? '', /문구를 입력/);
+  assert.match(
+    checkAlertRules([{ ...anchor, label: '  ' }]) ?? '',
+    /문구를 입력/
+  );
   // 시각이 데이터가 되면서 새로 생긴 칸이다. 여기도 사람 말로 막아야 한다.
   assert.match(checkAlertRules([{ ...anchor, at: '9:10' }]) ?? '', /시각/);
   // 같은 id 가 둘이면 화면의 key 가 겹쳐 한 줄을 고칠 때 다른 줄이 바뀐다.
@@ -4688,10 +4695,7 @@ test('마감선 — 운영 배포일 다음날부터는 아무것도 안 울린�
     prodYmd: '2026-10-07',
   };
   // 10-08 은 qaEnd 당일이지만 배포가 지났으므로 안 울린다
-  assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'),
-    null
-  );
+  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-10-08'), null);
 });
 
 test('마감선 — 운영 배포일 당일은 막지 않는다', () => {
@@ -4717,10 +4721,7 @@ test('마감선 — 정상 데이터에서는 아무것도 안 바뀐다', () =>
     milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-22'),
     '오늘 QA 시작'
   );
-  assert.equal(
-    milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'),
-    'QA 종료'
-  );
+  assert.equal(milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-29'), 'QA 종료');
   assert.equal(
     milestoneFrom(DEFAULT_ALERT_RULES, s, '2026-09-30'),
     '오늘 운영 배포'
@@ -5073,7 +5074,13 @@ test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
 
   // 종류를 읽고, 그 종류의 변수를 얹는다
   assert.match(sql, /coalesce\(p_when->>'kind', 'anchor'\)/);
-  for (const v of ['알림건수', '상태문구', '마지막확인', '일정머리말', '참고머리말']) {
+  for (const v of [
+    '알림건수',
+    '상태문구',
+    '마지막확인',
+    '일정머리말',
+    '참고머리말',
+  ]) {
     assert.match(sql, new RegExp(`'${v}'`), `${v} 를 안 채운다`);
   }
 
@@ -5112,8 +5119,10 @@ test('미리보기 — 종류를 받고 옛 서명을 먼저 지운다', () => {
 */
 test('일정 경고 문장 — 세 곳이 한 글자도 다르지 않다', () => {
   const files = {
-    '디스패처(20260930)': '../supabase/migrations/20260930_qa_router_alert_model.sql',
-    '미리보기(20261001)': '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
+    '디스패처(20260930)':
+      '../supabase/migrations/20260930_qa_router_alert_model.sql',
+    '미리보기(20261001)':
+      '../supabase/migrations/20261001_qa_router_preview_kinds.sql',
     '녹화(record-alert-messages)': '../scripts/record-alert-messages.mts',
   };
 
@@ -6285,4 +6294,35 @@ test('겹침 셈 — 기본 다섯 규칙 배치에서는 겹침이 없다', () 
     rows.filter((r) => r.shadowed).map((r) => r.rule.id),
     []
   );
+});
+
+/*
+  어드민 도메인이 TS 와 SQL 두 곳에 산다.
+
+  SQL 은 `qa_router_admin_base()` 가 정본이고, TS 는 스레드 부모가 차수 화면
+  링크를 들기 위해 같은 값을 안다. 둘이 갈리면 **한쪽 알림의 링크만 조용히
+  깨진다** — 링크는 눌러 본 사람만 404 를 본다.
+
+  그래서 원문으로 맞댄다. 이 레포는 같은 수법을 일정 경고 문장에 이미 쓴다.
+*/
+test('어드민 주소 — TS 와 SQL 이 한 글자도 다르지 않다', () => {
+  const ts = readFileSync(
+    new URL('../lib/services/qa-router/message.ts', import.meta.url),
+    'utf-8'
+  );
+  const sql = readFileSync(
+    new URL(
+      '../supabase/migrations/20260911_qa_router_message_board_link.sql',
+      import.meta.url
+    ),
+    'utf-8'
+  );
+
+  const tsHit = ts.match(/export const ADMIN_BASE = '([^']+)'/);
+  const sqlHit = sql.match(/select '(https:\/\/[^']+)'\s*\$\$/);
+
+  assert.ok(tsHit, 'message.ts 에 ADMIN_BASE 상수가 없다');
+  assert.ok(sqlHit, 'qa_router_admin_base() 의 값을 못 읽었다');
+  assert.equal(tsHit[1], sqlHit[1]);
+  assert.match(tsHit[1], /^https:\/\//);
 });
