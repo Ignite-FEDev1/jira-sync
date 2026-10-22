@@ -87,6 +87,9 @@ export default function QaRouterDetailPage() {
     toast.success('실행을 요청했습니다', {
       description: '끝나면 이 화면이 다시 읽힙니다',
     });
+    // 필터 캐시 지우기(run/route.ts)가 실패해도 dispatch 는 보냈다 - 성공
+    // 토스트 뒤에 별도로 띄워야 "캐시가 낡을 수 있다"를 사람이 놓치지 않는다.
+    if (body.warning) toast.warning(body.warning);
     const pressedAt = Date.now();
     const lastRunUrl = t.state?.lastRunUrl ?? null;
     let elapsedMs = 0;

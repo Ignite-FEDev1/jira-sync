@@ -120,7 +120,7 @@ export default function QaRouterListPage() {
       db
         .from('qa_router_cycles')
         .select(
-          'config_id, deploy_ymd, prod_ymd, qa_start_ymd, qa_end_ymd, qa_start_ymd_manual, qa_end_ymd_manual'
+          'config_id, fix_version, deploy_ymd, prod_ymd, qa_start_ymd, qa_end_ymd, qa_start_ymd_manual, qa_end_ymd_manual'
         ),
     ]);
 
@@ -208,6 +208,33 @@ export default function QaRouterListPage() {
         }
       }
 
+      /*
+        지금 돌고 있는 차수의 QA 시작일. `computeHealth` 가 이것으로
+        idleDays 를 잘라 "판정 없음"이 차수 사이 공백을 고장으로 읽지 않게
+        한다. `state.activeCycle` 이 가리키는 fixVersion 과 같은 행을
+        `scheduleCycRes`(배지용 쿼리, 날짜로 거르지 않은 원본)에서 찾는다 -
+        지난 차수까지 거른 `scheduleCycles` 를 쓰면 막 시작한 차수가
+        배포일 계산에 따라 먼저 빠져나갈 수 있다.
+      */
+      const activeFixVersion = state?.activeCycle?.fixVersion ?? null;
+      const activeCycleRow = activeFixVersion
+        ? (scheduleCycRes.data ?? []).find(
+            (r) =>
+              r.config_id === config.id && r.fix_version === activeFixVersion
+          )
+        : null;
+      const activeQaStartYmd = activeCycleRow
+        ? resolveQaWindow({
+            manualStartYmd: activeCycleRow.qa_start_ymd_manual ?? null,
+            manualEndYmd: activeCycleRow.qa_end_ymd_manual ?? null,
+            ledgerStartYmd: activeCycleRow.qa_start_ymd ?? null,
+            ledgerEndYmd: activeCycleRow.qa_end_ymd ?? null,
+            prodYmd: activeCycleRow.prod_ymd ?? null,
+            deployYmd: activeCycleRow.deploy_ymd,
+            rule: config.qaScheduleRule,
+          }).qaStartYmd
+        : null;
+
       return {
         config,
         state,
@@ -217,6 +244,7 @@ export default function QaRouterListPage() {
           now,
           idleDays,
           nextQaStartYmd: nextQaStart.get(config.id) ?? null,
+          activeQaStartYmd,
         }),
         todayCount,
         idleDays,

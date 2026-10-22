@@ -42,6 +42,24 @@ export async function POST(
     );
   }
 
+  /*
+    필터 캐시를 지운다 - 지금 실행인데 낡은 필터 조건을 그대로 쓰면 안 된다.
+
+    `tick.ts` 의 `FILTER_TTL_MS` (4시간)는 필터 조건(프로젝트·이슈타입·
+    제외상태·fixVersion)을 4시간 캐시한다. "지금 실행"은 그 설계와
+    부딪힌다 - 설정을 바꾼 뒤 10분을 안 기다리게 하려고 만든 버튼인데,
+    캐시가 안 지워지면 fixVersion 이 바뀐 것도 최대 4시간 동안 못 읽는다.
+    실측(2026-10-22): 사람이 필터의 fixVersion 을 바꾸고 지금 실행을
+    눌렀는데도 낡은 차수로 계속 돌았다.
+
+    지우기가 실패해도 dispatch 는 그대로 보낸다 - 필터를 못 새로 읽는 것과
+    실행 자체가 안 되는 것은 다른 문제이고, 후자가 사람을 더 막는다.
+  */
+  const cacheClear = await dbServer
+    .from('qa_router_state')
+    .update({ filter_cache: null })
+    .eq('config_id', id);
+
   const { error } = await dbServer.rpc('trigger_qa_router', {
     p_config_id: id,
     p_iterations: '0',
@@ -60,6 +78,9 @@ export async function POST(
   return NextResponse.json({
     ok: true,
     name: cfg.data.name,
-    message: '실행을 요청했습니다. 완료까지 약 40초 걸립니다.',
+    message: '실행을 요청했습니다 · 필터 조건도 다시 읽습니다',
+    ...(cacheClear.error
+      ? { warning: `필터 캐시를 지우지 못했습니다: ${cacheClear.error.message}` }
+      : {}),
   });
 }

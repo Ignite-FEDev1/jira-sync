@@ -214,6 +214,44 @@ export interface HealthInput {
    * 가짜 경보는 곧 무시되고, 무시되기 시작하면 진짜 경보도 같이 묻힌다.
    */
   nextQaStartYmd?: string | null;
+  /**
+   * **지금** 돌고 있는 차수의 QA 시작일. `effectiveIdleDays` 가 이 값으로
+   * idleDays 를 자른다. 없으면(과거 행 호환) idleDays 를 그대로 쓴다.
+   */
+  activeQaStartYmd?: string | null;
+}
+
+/**
+ * 판정 공백 일수를, 이번 QA 사이클이 시작한 날짜로 자른다.
+ *
+ * `idleDays` 는 "마지막 판정으로부터 며칠" 을 그대로 센다. 그 공백이
+ * **차수와 차수 사이**(배포 끝~다음 QA 시작 전)였다면 그건 고장이 아니라
+ * 쉬는 구간이다. 실측(2026-10-22): CPO 대상이 마지막 판정 10-02, 새 QA
+ * 시작 10-22 인데 화면이 "판정 없음 · 20일간 판정 0건 · 설정 확인 필요"
+ * 를 띄웠다 - 사이가 뜬 이유는 쉬는 구간이었지 봇이 멈춘 게 아니었다.
+ *
+ * 이번 QA 시작일 이후로만 공백을 다시 재면 된다. 시작일을 모르면
+ * (`activeQaStartYmd` 없음, 과거 행 호환) 원래 값을 그대로 쓴다 - 모르는
+ * 것을 근거로 경보를 숨기면 안 된다. 시작일이 미래면(아직 QA 전) 공백은
+ * 0 이다 - 새 사이클이 시작도 안 했는데 공백을 셀 수 없다.
+ */
+export function effectiveIdleDays(
+  idleDays: number | null,
+  activeQaStartYmd: string | null,
+  now: Date
+): number | null {
+  if (idleDays == null) return null;
+  if (!activeQaStartYmd) return idleDays;
+  const today = kstYmdOf(now);
+  const daysSince = Math.max(
+    0,
+    Math.round(
+      (Date.parse(`${today}T00:00:00Z`) -
+        Date.parse(`${activeQaStartYmd}T00:00:00Z`)) /
+        86_400_000
+    )
+  );
+  return Math.min(idleDays, daysSince);
 }
 
 /**
@@ -254,6 +292,7 @@ export function computeHealth({
   now,
   idleDays,
   nextQaStartYmd,
+  activeQaStartYmd,
 }: HealthInput): Health {
   if (!config.enabled) {
     return {
@@ -396,12 +435,21 @@ export function computeHealth({
     };
   }
 
-  // 정상인데 오래 판정이 없으면 설정 오류를 의심해야 한다 (조용한 고장).
-  if (idleDays != null && idleDays >= 7) {
+  /*
+    정상인데 오래 판정이 없으면 설정 오류를 의심해야 한다 (조용한 고장).
+    다만 공백이 차수 사이였다면 그건 쉬는 구간이지 고장이 아니다 -
+    `effectiveIdleDays` 가 이번 QA 시작일 이후로만 공백을 다시 잰다.
+  */
+  const quietIdleDays = effectiveIdleDays(
+    idleDays ?? null,
+    activeQaStartYmd ?? null,
+    now
+  );
+  if (quietIdleDays != null && quietIdleDays >= 7) {
     return {
       tone: 'warn',
       label: '판정 없음',
-      detail: `${idleDays}일간 판정 0건 · 설정 확인 필요`,
+      detail: `${quietIdleDays}일간 판정 0건 · 설정 확인 필요`,
       actionable: true,
     };
   }

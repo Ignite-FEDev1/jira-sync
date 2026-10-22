@@ -54,6 +54,7 @@ import {
   kstYmdOf,
   type Health,
 } from '@/lib/services/qa-router/status';
+import { resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   DeployCycle,
   DerivedContext,
@@ -1451,7 +1452,34 @@ export function targetHealth(
       .map((c) => c.qaStartYmd)
       .filter((d): d is string => !!d && d >= today)
       .sort()[0] ?? null;
-  return computeHealth({ config, state, now, idleDays, nextQaStartYmd });
+  /*
+    지금 돌고 있는 차수의 QA 시작일. `computeHealth` 가 이걸로 idleDays 를
+    잘라 "판정 없음"이 차수 사이 공백(배포 끝~다음 QA 시작 전)을 고장으로
+    읽지 않게 한다. 차수 표(CycleTable)가 쓰는 것과 같은 `resolveQaWindow`
+    입력이다 - 다르게 재면 표는 QA 1일차라는데 배지는 여전히 공백을 세게 된다.
+  */
+  const activeCycle = (cycles ?? []).find(
+    (c) => c.fixVersion === state?.activeCycle?.fixVersion
+  );
+  const activeQaStartYmd = activeCycle
+    ? resolveQaWindow({
+        manualStartYmd: activeCycle.qaStartYmdManual ?? null,
+        manualEndYmd: activeCycle.qaEndYmdManual ?? null,
+        ledgerStartYmd: activeCycle.qaStartYmd,
+        ledgerEndYmd: activeCycle.qaEndYmd,
+        prodYmd: activeCycle.prodYmd,
+        deployYmd: activeCycle.deployYmd,
+        rule: config.qaScheduleRule,
+      }).qaStartYmd
+    : null;
+  return computeHealth({
+    config,
+    state,
+    now,
+    idleDays,
+    nextQaStartYmd,
+    activeQaStartYmd,
+  });
 }
 
 /**
