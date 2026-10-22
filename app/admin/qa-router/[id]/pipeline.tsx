@@ -53,6 +53,18 @@ import {
   type JudgeTier,
 } from '@/lib/services/qa-router/types';
 
+/**
+ * 단계 수를 세는 고유어 수사로.
+ *
+ * 왜 두는가: "넷 다 아니면 판정 불가" 가 `ref_owner` 단계를 뺀 뒤에도 안 고쳐져
+ * 단계가 셋인데 넷이라 말하는 거짓 문구가 됐었다. 단계 배열 길이에서 직접
+ * 뽑으면 단계 수가 또 바뀌어도 문장이 거짓이 될 수 없다.
+ */
+function countWord(n: number): string {
+  const words = ['영', '하나', '둘', '셋', '넷', '다섯', '여섯', '일곱', '여덟', '아홉'];
+  return words[n] ?? `${n}개`;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 단계 껍데기
 // ─────────────────────────────────────────────────────────────
@@ -606,7 +618,7 @@ export function TierChecklist({
           ·
         </span>
         <span className="text-muted-foreground">
-          넷 다 아니면 판정 불가. Slack 에 “왜 판정 못 했나” 로 나갑니다
+          {countWord(tiers.length)} 다 아니면 판정 불가. Slack 에 “왜 판정 못 했나” 로 나갑니다
         </span>
       </li>
     </ol>
