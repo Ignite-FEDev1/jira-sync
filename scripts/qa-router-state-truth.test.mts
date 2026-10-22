@@ -18,6 +18,7 @@ import test from 'node:test';
 
 import {
   computeHealth,
+  effectiveIdleDays,
   nextExpectedPollAt,
 } from '../lib/services/qa-router/status';
 import { demoConfig, demoState } from '../lib/services/qa-router/demo';
@@ -217,6 +218,50 @@ test('상태 · 기한이 있으면 isBetweenCycles 로 고장을 덮지 않는�
     }),
   });
   assert.equal(h.label, '응답 없음');
+});
+
+// ─────────────────────────────────────────────────────────────
+// effectiveIdleDays: 차수 사이 공백은 "판정 없음" 고장이 아니다
+// ─────────────────────────────────────────────────────────────
+
+test('effectiveIdleDays · 이번 차수가 어제 시작했으면 공백은 1일이다', () => {
+  assert.equal(effectiveIdleDays(20, '2026-10-06', NOW), 1);
+});
+
+test('effectiveIdleDays · 이번 차수가 10일 전 시작했으면 공백은 10일이다', () => {
+  assert.equal(effectiveIdleDays(20, '2026-09-27', NOW), 10);
+});
+
+test('effectiveIdleDays · 시작일을 모르면 원래 값을 그대로 쓴다 (과거 행 호환)', () => {
+  assert.equal(effectiveIdleDays(20, null, NOW), 20);
+});
+
+test('effectiveIdleDays · idleDays 자체가 null 이면 null 이다', () => {
+  assert.equal(effectiveIdleDays(null, '2026-10-06', NOW), null);
+});
+
+test('effectiveIdleDays · 시작일이 미래면(아직 QA 전) 공백은 0이다', () => {
+  assert.equal(effectiveIdleDays(20, '2026-10-08', NOW), 0);
+});
+
+test('상태 · idleDays 가 커도 차수가 막 시작했으면 판정 없음이 아니다', () => {
+  /*
+    실측(2026-10-22): 마지막 판정 10-02, 새 QA 시작 10-22 인데 "판정 없음
+    · 20일간 판정 0건" 이 떴다. 공백의 정체가 차수 사이 쉬는 구간이면
+    activeQaStartYmd 가 그걸 가려야 한다.
+  */
+  const h = computeHealth({
+    config,
+    now: NOW,
+    idleDays: 20,
+    activeQaStartYmd: '2026-10-06', // 어제 시작
+    state: stateWith({
+      mode: 'qa',
+      nextExpectedPollAt: new Date(NOW.getTime() + 5 * 60_000).toISOString(),
+      lastPollAt: new Date(NOW.getTime() - 60_000).toISOString(),
+    }),
+  });
+  assert.notEqual(h.label, '판정 없음');
 });
 
 // ─────────────────────────────────────────────────────────────
