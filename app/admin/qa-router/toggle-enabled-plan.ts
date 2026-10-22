@@ -56,3 +56,16 @@ export function planToggleEnabled(
       '다시 켜도 그 사이 티켓은 소급 알림되지 않습니다.';
   return { allowed: true, blockedReason: null, confirmMessage };
 }
+
+/**
+ * 켜고 끄기 기록(`qa_router_events`)에 남길 사유 문구. 순수 함수다: 라우트가
+ * 저장 전후 값을 비교해 이 함수로 문구를 뽑고, 바뀌지 않았으면(`null`)
+ * 기록을 남기지 않는다.
+ */
+export function toggleEventReason(
+  before: boolean,
+  after: boolean
+): string | null {
+  if (before === after) return null;
+  return after ? '꺼짐 → 켜짐' : '켜짐 → 꺼짐';
+}

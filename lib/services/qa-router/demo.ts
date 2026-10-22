@@ -668,6 +668,20 @@ export function demoState(activeFixVersion: string): QaRouterState {
       `demoConfig` 가 같은 이유로 `as` 를 뗐던 그 문제다.
     */
     alertSentOn: {},
+    /*
+      배치가 적는 네 칸. 데모는 QA 기간 중 정상으로 도는 모습이다 - 다음
+      확인 기한이 미래라 화면이 "응답 없음" 을 띄우지 않는다. 실행 로그는
+      데모에 없으므로 null.
+    */
+    mode: 'qa',
+    nextExpectedPollAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+    /*
+      "최근 판정" 시각. `demoEvents` 는 차수 목록과 오늘 날짜를 받아야 해서
+      여기(차수 이름 하나만 받는다)서 부를 수 없다. 화면이 "방금 판정함"
+      으로 읽히는 몇 분 전으로 둔다.
+    */
+    lastJudgedAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+    lastRunUrl: null,
     updatedAt: new Date().toISOString(),
   };
 }

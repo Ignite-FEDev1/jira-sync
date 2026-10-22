@@ -42,6 +42,7 @@ import {
   type EventProblem,
 } from '@/lib/services/qa-router/outcome';
 import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
+import { windowNote } from '../../../window-note';
 import type {
   AlertAnchor,
   AlertRule,
@@ -198,6 +199,8 @@ export default function CycleDetailPage() {
     deployYmd: cycle.deployYmd,
     rule: config.qaScheduleRule,
   });
+  // 상세 표·목록과 같은 함수로 배지를 만든다. 문구가 화면마다 갈리지 않게.
+  const alertNote = windowNote(alertWindow);
   /*
     봇이 이 차수 알림을 모으는 스레드. permalink 는 ts 의 점을 빼고 p 를 붙인다.
     데모에서는 실제 ts 가 없으니 만들지 않는다.
@@ -339,25 +342,51 @@ export default function CycleDetailPage() {
           }
         />
         <DescRowPair
-          left={{ label: 'QA 기간', node: <>          {cycle.qaStartYmd ? (
-            <>
-              <span className="font-mono tabular-nums">
-                {cycle.qaStartYmd} ~ {qaEnd.ymd ?? '?'}
-              </span>
-              <Note>
-                {describeQaProgress(cycle.qaStartYmd, qaEnd.ymd, todayKst)}
-              </Note>
-              {qaEnd.ymd && (
-                <ScheduleDetail
-                  r={qaEnd}
-                  kind="qaEnd"
-                  todayYmd={todayKst}
-                  sourceLabel="종료일 근거"
-                />
-              )}
-            </>
+          left={{ label: 'QA 기간', node: <>          {/*
+            대장 칸(`cycle.qaStartYmd`)이 아니라 사다리 결과(`alertWindow`)를
+            쓴다. 상세 표(CycleTable)와 같은 입력, 같은 배지다. 대장 칸을
+            그대로 그리면 사다리가 `invalid` 를 준 차수에서 요약만 "QA 4일차
+            · 6일 남음" 으로 거짓말을 한다.
+          */}
+          {alertWindow.qaStartYmd ? (
+            <span className="font-mono tabular-nums">
+              {alertWindow.qaStartYmd} ~ {alertWindow.qaEndYmd ?? '?'}
+            </span>
           ) : (
-            <span className="text-muted-foreground">배포대장에서 못 읽음</span>
+            // 배지가 이미 "일정 미정" 을 말하면 같은 말을 두 번 하지 않는다.
+            !alertNote && (
+              <span className="text-muted-foreground">배포대장에서 못 읽음</span>
+            )
+          )}
+          {alertNote && (
+            <Badge
+              variant={alertNote.tone === 'off' ? 'muted' : alertNote.tone}
+              className="w-fit"
+            >
+              {alertNote.label}
+            </Badge>
+          )}
+          {alertNote?.detail && <Note>{alertNote.detail}</Note>}
+          {/* 어긋났거나 없는 날짜로 진행률을 세지 않는다. */}
+          {alertWindow.source !== 'invalid' &&
+            alertWindow.source !== 'none' &&
+            alertWindow.qaStartYmd && (
+              <Note>
+                {describeQaProgress(
+                  alertWindow.qaStartYmd,
+                  alertWindow.qaEndYmd,
+                  todayKst
+                )}
+              </Note>
+            )}
+          {/* 종료일 근거는 대장 본문에서 읽었을 때만 맞는 설명이다. */}
+          {alertWindow.source === 'ledger' && qaEnd.ymd && (
+            <ScheduleDetail
+              r={qaEnd}
+              kind="qaEnd"
+              todayYmd={todayKst}
+              sourceLabel="종료일 근거"
+            />
           )}
         </> }}
           right={{ label: '운영 배포일', node: <>          {deploy.ymd ? (
@@ -506,8 +535,15 @@ const QA_WINDOW_SOURCE_LABEL: Record<QaWindowSource, string> = {
   manual: '직접 입력한 값',
   ledger: '배포대장 본문',
   rule: '라우터 기본 규칙',
-  none: '정하지 못함',
-  invalid: '값이 앞뒤가 안 맞음',
+  // 미정·어긋남은 목록·상세 표의 배지와 같은 말이어야 한다. 그래서 직접 쓰지 않고 windowNote 에서 가져온다.
+  none: windowNote({ qaStartYmd: null, qaEndYmd: null, source: 'none', why: null })!
+    .label,
+  invalid: windowNote({
+    qaStartYmd: null,
+    qaEndYmd: null,
+    source: 'invalid',
+    why: null,
+  })!.label,
 };
 
 /**

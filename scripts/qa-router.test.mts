@@ -1515,6 +1515,15 @@ test('상태 — 차수 사이에는 폴링이 늦어도 응답 없음이 아니
     now,
     state: {
       ...demoState('release_20260914'),
+      /*
+        배치가 적는 기한 칸은 비운다. demoState 는 실제 시계로 기한을 채워
+        두므로 그대로 두면 computeHealth 가 기한 갈래로 가 버리고, 이 테스트가
+        보려는 heartbeat·차수 사이(isBetweenCycles) 갈래를 못 본다.
+      */
+      mode: null,
+      nextExpectedPollAt: null,
+      lastJudgedAt: null,
+      lastRunUrl: null,
       // 19시간 전 — heartbeat(기본 20분) 기준으로는 한참 넘는다
       lastPollAt: '2026-09-16T06:28:46Z',
       consecutiveFails: 0,
@@ -4061,10 +4070,18 @@ test('리허설 — 저장소의 모든 쓰기 함수에 가드가 있다', () =
 
   const fns = [...src.matchAll(/export (?:async )?function (\w+)/g)];
   const WRITE = /\.(insert|update|upsert|delete|rpc)\(/;
+  /*
+    `.rpc(` 는 쓰기일 수도 읽기일 수도 있어 정규식으로는 못 가른다. 읽기만
+    하는 RPC 함수는 여기에 이름으로 적어 명시적으로 뺀다. 본문 주석에
+    가드 이름을 적어 검사를 통과시키는 식이면, 진짜 쓰기 함수도 주석 한
+    줄로 통과할 수 있어 검사가 뜻을 잃는다.
+  */
+  const READ_ONLY_RPC = new Set(['inQaWindow']);
   const missing: string[] = [];
 
   for (let i = 0; i < fns.length; i++) {
     const name = fns[i][1];
+    if (READ_ONLY_RPC.has(name)) continue;
     const body = src.slice(
       fns[i].index! + fns[i][0].length,
       i + 1 < fns.length ? fns[i + 1].index! : src.length
@@ -4263,6 +4280,11 @@ test('상태 — 배포일이 지났다고 다 "조치 필요" 는 아니다', (
       config: { ...demoConfig('demo', null), enabled: true },
       state: {
         ...demoState('release_20260914'),
+        // 기한 칸을 비워 heartbeat 갈래를 본다 (demoState 는 실제 시계로 채운다).
+        mode: null,
+        nextExpectedPollAt: null,
+        lastJudgedAt: null,
+        lastRunUrl: null,
         // 방금 확인한 것으로 둔다 — "응답 없음" 이 먼저 잡히면 이 갈래를 못 본다.
         lastPollAt: new Date(now.getTime() - 30_000).toISOString(),
         consecutiveFails: 0,

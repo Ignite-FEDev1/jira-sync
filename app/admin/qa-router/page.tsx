@@ -20,10 +20,14 @@ import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   QaRouterConfig,
   QaRouterState,
+  QaWindow,
 } from '@/lib/services/qa-router/types';
 import { NewRoutingDialog } from './new-routing-dialog';
 import { planToggleEnabled } from './toggle-enabled-plan';
 import { writeEnabled } from './toggle-enabled';
+// 배지 문구는 상세와 같은 곳(windowNote)에서 가져온다. 여기서 다시 번역하면
+// 글자 하나가 갈려도 목록과 상세가 서로 다른 말을 하게 된다.
+import { windowNote } from './window-note';
 
 /** 이 화면은 브라우저에서 anon 키로 직접 읽는다 (settings/projects 와 같은 패턴). */
 interface Row {
@@ -32,11 +36,34 @@ interface Row {
   health: Health;
   todayCount: number;
   idleDays: number | null;
-  /** 앞으로 배포할 차수 중 QA 기간이 미정이거나 이상한 것의 수. */
-  unsetCount: number;
+  /**
+   * 앞으로 배포할 차수 중 QA 기간이 미정(none)이거나 앞뒤가 안 맞는(invalid)
+   * 것. 사람이 할 일이 다르므로(없는 값을 채우는 것 / 있는 값을 고치는 것)
+   * 배지도 숫자도 따로 센다. `resolveQaWindow` 의 `source` 를 그대로 가른다.
+   *
+   * 판정 결과(`QaWindow`)를 같이 들고 있는 이유: 배지 문구를 `windowNote`
+   * 로 뽑으려면 `source`·`why` 가 필요하다. 숫자만 남기고 버리면 라벨을
+   * 다시 여기서 하드코딩하게 되고, 그게 바로 상세와 갈리던 문제다.
+   */
+  unsetCycles: { deployYmd: string; window: QaWindow }[];
+  invalidCycles: { deployYmd: string; window: QaWindow }[];
 }
 
 const TONE_ORDER = { bad: 0, warn: 1, ok: 2, off: 3 } as const;
+
+/**
+ * "일정 미정/어긋남" 배지가 가리킬 곳. 걸린 차수가 하나뿐이면 그 차수로
+ * 바로 보낸다. 여럿이면 어느 것을 봐야 할지 배지만으로는 못 정하므로
+ * 상세로 보내 목록에서 고르게 한다.
+ */
+function scheduleBadgeHref(
+  configId: string,
+  cycles: { deployYmd: string }[]
+): string {
+  return cycles.length === 1
+    ? `/admin/qa-router/${configId}/cycles/${cycles[0].deployYmd}`
+    : `/admin/qa-router/${configId}`;
+}
 
 export default function QaRouterListPage() {
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -58,15 +85,22 @@ export default function QaRouterListPage() {
     setLoading(true);
     const now = new Date();
     const todayYmd = kstYmdOf(now);
+    // 오늘 KST 00:00 의 ISO. 이 시각 이후 이벤트만 읽으면 "오늘" 집계에
+    // 쓸 수 있는 전부를 담는다. 대상 수가 늘어도 "최근 500건" 처럼 특정
+    // 대상만 쏠려 잘리는 일이 없다.
+    const todayStartIso = new Date(
+      `${todayYmd}T00:00:00+09:00`
+    ).toISOString();
     const [cfgRes, stRes, evRes, cycRes, scheduleCycRes] = await Promise.all([
       db.from('qa_router_configs').select('*').order('name'),
       db.from('qa_router_state').select('*'),
-      // 오늘 판정 건수 + 마지막 판정 시각을 함께 쓰려고 최근 것만 읽는다.
+      // 오늘 판정 건수와, lastJudgedAt 이 없는 옛 state 의 폴백에 쓴다.
       db
         .from('qa_router_events')
         .select('config_id, created_at, classification')
+        .gte('created_at', todayStartIso)
         .order('created_at', { ascending: false })
-        .limit(500),
+        .limit(2000),
       /*
         다음 차수의 QA 시작일. 배포일이 지난 뒤 "끝난 것" 과 "필터를 바꿔야
         하는 것" 을 가르는 데 쓴다 — 둘을 안 가르면 배포 다음 날부터 몇 주
@@ -120,10 +154,8 @@ export default function QaRouterListPage() {
     const stateByConfig = new Map(
       (stRes.data ?? []).map((s) => [s.config_id as string, toState(s)])
     );
+    // 쿼리가 이미 오늘(KST 00:00 이후)로 좁혔으니 여기서 다시 거르지 않는다.
     const events = evRes.data ?? [];
-    const todayKst = new Date(now.getTime() + 9 * 3_600_000)
-      .toISOString()
-      .slice(0, 10);
 
     const next: Row[] = (cfgRes.data ?? []).map((raw) => {
       const config = toConfig(raw);
@@ -131,34 +163,50 @@ export default function QaRouterListPage() {
       const mine = events.filter((e) => e.config_id === config.id);
       // 시스템 이벤트(이월·설정 변경)는 판정 건수가 아니다.
       const judgements = mine.filter((e) => e.classification !== 'system');
-      const todayCount = judgements.filter(
-        (e) =>
-          new Date(new Date(e.created_at).getTime() + 9 * 3_600_000)
-            .toISOString()
-            .slice(0, 10) === todayKst
-      ).length;
-      const lastJudged = judgements[0]?.created_at ?? null;
-      const idleDays = lastJudged
+      const todayCount = judgements.length;
+      /*
+        idleDays 는 state.lastJudgedAt 이 정본이다. 배치가 매 tick 적으므로
+        오늘 이벤트가 하나도 없어도(며칠째 판정 0건) 정확하다. 그 칸이 아직
+        없는 옛 행(lastJudgedAt null)만 오늘 이벤트 중 가장 최근 것으로
+        대신한다. 오늘치만 보이는 한계는 있지만 옛 행에 한정된 임시값이다.
+      */
+      /*
+        대신하는 값도 last_judged_at 과 같은 정의로 센다. 판정 실패
+        (classification null)는 판정이 아니다. 실패만 쌓인 대상이 "방금
+        판정함" 으로 보이면 "판정 없음 · 7일" 경고가 가려진다.
+      */
+      const lastJudgedAt =
+        state?.lastJudgedAt ??
+        judgements.find((e) => e.classification !== null)?.created_at ??
+        null;
+      const idleDays = lastJudgedAt
         ? Math.floor(
-            (now.getTime() - new Date(lastJudged).getTime()) / 86_400_000
+            (now.getTime() - new Date(lastJudgedAt).getTime()) / 86_400_000
           )
         : null;
 
       // 이 대상의 차수 중 QA 기간이 미정(none)이거나 앞뒤가 안 맞는(invalid) 것.
-      const unsetCount = scheduleCycles
-        .filter((r) => r.config_id === config.id)
-        .filter((r) => {
-          const w = resolveQaWindow({
-            manualStartYmd: r.qa_start_ymd_manual ?? null,
-            manualEndYmd: r.qa_end_ymd_manual ?? null,
-            ledgerStartYmd: r.qa_start_ymd ?? null,
-            ledgerEndYmd: r.qa_end_ymd ?? null,
-            prodYmd: r.prod_ymd ?? null,
-            deployYmd: r.deploy_ymd,
-            rule: config.qaScheduleRule,
-          });
-          return w.source === 'none' || w.source === 'invalid';
-        }).length;
+      // 사람이 할 일이 다르므로(없는 값을 채우는 것 / 있는 값을 고치는 것)
+      // 배지도 따로 센다.
+      const unsetCycles: { deployYmd: string; window: QaWindow }[] = [];
+      const invalidCycles: { deployYmd: string; window: QaWindow }[] = [];
+      for (const r of scheduleCycles) {
+        if (r.config_id !== config.id) continue;
+        const w = resolveQaWindow({
+          manualStartYmd: r.qa_start_ymd_manual ?? null,
+          manualEndYmd: r.qa_end_ymd_manual ?? null,
+          ledgerStartYmd: r.qa_start_ymd ?? null,
+          ledgerEndYmd: r.qa_end_ymd ?? null,
+          prodYmd: r.prod_ymd ?? null,
+          deployYmd: r.deploy_ymd,
+          rule: config.qaScheduleRule,
+        });
+        if (w.source === 'none') {
+          unsetCycles.push({ deployYmd: r.deploy_ymd as string, window: w });
+        } else if (w.source === 'invalid') {
+          invalidCycles.push({ deployYmd: r.deploy_ymd as string, window: w });
+        }
+      }
 
       return {
         config,
@@ -172,7 +220,8 @@ export default function QaRouterListPage() {
         }),
         todayCount,
         idleDays,
-        unsetCount,
+        unsetCycles,
+        invalidCycles,
       };
     });
 
@@ -193,6 +242,20 @@ export default function QaRouterListPage() {
     // 비용이 무의미하고, 서버 컴포넌트로 바꾸면 브라우저 CRUD 경로가 달라진다.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
+    /*
+      상세는 이미 자동 갱신하는데 목록은 마운트 1회라 "버튼을 눌러야만
+      움직이는 화면" 이었다. 30초 간격으로 맞춘다. 상세 화면과 같은 주기다.
+
+      탭이 숨겨져 있으면 건너뛴다. 백그라운드 탭에서 계속 쏘면 안 보는
+      화면 때문에 DB 요청만 쌓인다. 토글 중인 행이 있어도 이 조회는 서버
+      기준값을 그대로 덮어쓸 뿐이고, 실패 시엔 로컬 상태를 먼저 뒤집지
+      않으므로(`toggleEnabled` 참고) 섞여도 문제가 없다.
+    */
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      void load();
+    }, 30_000);
+    return () => clearInterval(timer);
   }, [load]);
 
   // rows 는 한 자릿수라 메모이제이션이 필요 없다 — 매 렌더 계산이 더 단순하다.
@@ -406,14 +469,44 @@ function ConfigRow({
           </span>
         )}
         {/*
-          "일정 미정" 은 health 와 다른 축이다 — health 는 봇이 살아서
+          "일정 미정/어긋남" 은 health 와 다른 축이다. health 는 봇이 살아서
           도는지를 보고, 이건 **앞으로 올 차수의 QA 기간을 아직 아무도
-          안 넣었거나 앞뒤가 안 맞는지**를 본다. 판정이 멎는 건 아니라서
-          빨강이 아니라 노랑이다. 0개면 줄에서 아예 사라진다 — 배지가
-          영원히 켜져 있으면 곧 무시된다.
+          안 넣었는지(미정) / 넣긴 했는데 앞뒤가 안 맞는지(어긋남)**를 본다.
+          판정이 멎는 건 아니라서 빨강이 아니라 노랑이다. 0개면 줄에서 아예
+          사라진다. 배지가 영원히 켜져 있으면 곧 무시된다.
+
+          라벨은 하드코딩하지 않고 `windowNote` 에서 가져온다. 같은 판정을
+          상세([id]/page.tsx)도 그 함수로 옮기므로, 여기서 따로 글자를
+          박으면 둘 중 하나만 고쳤을 때 목록과 상세가 다른 말을 하게 된다.
+          그룹 안 차수는 전부 같은 source(none 또는 invalid)라 라벨 자체는
+          어느 것을 대표로 넘겨도 같다. 첫 번째 것을 쓴다.
+
+          배지 자체를 링크로 둔다. 고칠 곳이 이 행 어딘가가 아니라 정확히
+          어느 차수인지는 눌러야 알 수 있었다. relative 를 줘서 이름 열의
+          스트레치드 링크(after:absolute after:inset-0, tr 전체를 덮는다)
+          보다 DOM 순서상 뒤에 그려지게 한다. 사용 스위치와 같은 방법이다.
         */}
-        {row.unsetCount > 0 && (
-          <Badge variant="warn">일정 미정 {row.unsetCount}개</Badge>
+        {row.unsetCycles.length > 0 && (
+          <Link
+            href={scheduleBadgeHref(c.id, row.unsetCycles)}
+            className="relative inline-flex"
+          >
+            <Badge variant="warn">
+              {windowNote(row.unsetCycles[0].window)!.label}{' '}
+              {row.unsetCycles.length}개
+            </Badge>
+          </Link>
+        )}
+        {row.invalidCycles.length > 0 && (
+          <Link
+            href={scheduleBadgeHref(c.id, row.invalidCycles)}
+            className="relative inline-flex"
+          >
+            <Badge variant="warn">
+              {windowNote(row.invalidCycles[0].window)!.label}{' '}
+              {row.invalidCycles.length}개
+            </Badge>
+          </Link>
         )}
       </td>
       {/*

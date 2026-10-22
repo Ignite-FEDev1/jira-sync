@@ -91,6 +91,15 @@ export type StateRow = {
   fail_alert_ts: string | null;
   side_effects: Record<string, SideEffectResult> | null;
   alert_sent_on: Record<string, string> | null;
+  /*
+    아래 넷은 optional 이다. 컬럼이 아직 없는 DB(배포 창)에서 읽은 행에는
+    키 자체가 없다. 타입이 그 사실을 말해야 `toState` 의 `?? null` 이
+    방어 코드가 아니라 필요한 코드로 읽힌다.
+  */
+  mode?: 'qa' | 'idle' | null;
+  next_expected_poll_at?: string | null;
+  last_judged_at?: string | null;
+  last_run_url?: string | null;
   updated_at: string;
 };
 
@@ -212,6 +221,15 @@ export function toState(r: StateRow): QaRouterState {
     failAlertTs: r.fail_alert_ts ?? null,
     sideEffects: r.side_effects ?? {},
     alertSentOn: (r.alert_sent_on as Record<string, string> | null) ?? {},
+    /*
+      `first_fail_at` 과 같은 이유로 `?? null` 이다. 코드 배포와 마이그레이션이
+      같은 push 에서 동시에 돌아, 컬럼이 아직 없는 DB 에서 읽는 창이 있다.
+      그때 undefined 가 화면까지 새면 "값 없음" 과 "모름" 이 갈라진다.
+    */
+    mode: r.mode ?? null,
+    nextExpectedPollAt: r.next_expected_poll_at ?? null,
+    lastJudgedAt: r.last_judged_at ?? null,
+    lastRunUrl: r.last_run_url ?? null,
     updatedAt: r.updated_at,
   };
 }

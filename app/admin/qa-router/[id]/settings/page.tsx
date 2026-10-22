@@ -31,6 +31,7 @@ import {
   staleFilterCycle,
 } from '@/lib/services/qa-router/status';
 import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
+import { windowNote } from '../../window-note';
 import {
   checkAlertRules,
   DEFAULT_TEMPLATE,
@@ -232,19 +233,14 @@ export default function QaRouterSettingsPage() {
   /** 배치가 남긴 채널 문제. null 이면 마지막 확인에서 멀쩡했다. */
   const channelProblem = t.state?.sideEffects?.channel?.error ?? null;
   /*
-    이름을 못 읽었을 때 그 이유. 배치가 conversations.info 로 확인해
-    sideEffects 에 남기는데, 그게 없으면 아직 한 번도 안 물어본 것이다.
-  */
-  const unnamedReason = channelProblem
-    ? '이름을 못 읽습니다'
-    : '이름을 아직 못 읽었습니다';
-  /*
     ── 원인과 고칠 길을 읽기에서도 말한다 ──
 
     편집 모드의 `ChannelInput` 은 `channels:read 권한이 없어` 라고 원인을
     대고 `봇 앱에 스코프를 더하고 재설치하면 이름이 뜹니다` 까지 붙인다.
-    읽기 모드는 같은 상황에서 `이름을 아직 못 읽었습니다` 한 마디였다 —
-    "왜 알림이 안 왔지" 로 온 사람이 보는 쪽에만 답이 없었던 것이다.
+    읽기 모드는 판정 알림 줄만 이유를 달고 운영·봇 상태 줄은 "아직 못
+    읽었습니다" 한 마디였다 — "왜 알림이 안 왔지" 로 온 사람이 보는 쪽에만
+    답이 없었던 것이다. 세 줄이 같은 이유와 할 일을 말하도록
+    `unnamedChannelReason` 하나로 모았다(정의는 `ChannelLine` 옆).
 
     배치가 남긴 문구에서 스코프 문제를 알아본다. 문자열 판별이 못마땅하지만
     그 값을 만드는 곳(`tick.ts`)이 구조화된 코드를 안 남긴다 — 여기서
@@ -740,7 +736,7 @@ export default function QaRouterSettingsPage() {
                   label="판정 알림"
                   id={config.slackChannelId}
                   name={names[config.slackChannelId]}
-                  unnamedReason={unnamedReason}
+                  unnamedReason={unnamedChannelReason(channelProblem)}
                 />
                 <ChannelLine
                   label="운영 알림"
@@ -751,6 +747,7 @@ export default function QaRouterSettingsPage() {
                       : undefined
                   }
                   fallback="판정 알림 채널로"
+                  unnamedReason={unnamedChannelReason(channelProblem)}
                 />
                 <ChannelLine
                   label="봇 상태"
@@ -761,6 +758,7 @@ export default function QaRouterSettingsPage() {
                       : undefined
                   }
                   fallback="운영 알림 채널로"
+                  unnamedReason={unnamedChannelReason(channelProblem, true)}
                 />
               </div>
               {/*
@@ -1205,12 +1203,34 @@ function Fixed({
 }
 
 /**
+ * 이름이 없는 채널 줄에 붙일 "이유 · 할 일" 한 줄.
+ *
+ * 왜 세 줄이 이 함수 하나를 타야 하는가:
+ *   판정 알림 줄만 이유를 달았고 운영·봇 상태 줄은 "아직 못 읽었습니다"
+ *   한 마디였다. 이름을 못 읽었다는 건 봇이 그 채널 정보를 못 봤다는
+ *   뜻이고, 봇 상태 채널은 **실패 알림이 가는 곳**이라 그 결과까지
+ *   말해야 한다. 규칙을 한 곳에 모아 세 줄이 같이 쓴다.
+ */
+function unnamedChannelReason(
+  channelProblem: string | null,
+  isHealthChannel = false
+): string {
+  const reason = channelProblem?.includes('channels:read')
+    ? '봇 앱에 channels:read 스코프가 없습니다 · 스코프를 더하고 재설치'
+    : channelProblem
+      ? channelProblem
+      : '봇이 이 채널에 없을 수 있습니다 · 채널에서 /invite @봇';
+  return isHealthChannel ? `${reason} · 실패 알림이 가는 채널입니다` : reason;
+}
+
+/**
  * 채널 한 줄.
  *
- * 이름을 못 읽었으면 **왜 못 읽는지**를 같이 적는다. 화면에 `C0BVDJEJ19C`
- * 만 떠 있으면 어느 채널인지 확인하러 Slack 을 뒤져야 하고, 더 나쁜 건
- * 그게 정상인지 고장인지도 모른다는 것이다 — 실제로 봇 토큰에
- * `channels:read` 가 없어 여태 한 번도 이름을 못 읽었는데 아무도 몰랐다.
+ * 이름을 못 읽었으면 **왜 못 읽는지와 할 일**을 같이 적는다. 화면에
+ * `C0BVDJEJ19C` 만 떠 있으면 어느 채널인지 확인하러 Slack 을 뒤져야 하고,
+ * 더 나쁜 건 그게 정상인지 고장인지도 모른다는 것이다 — 실제로 봇
+ * 토큰에 `channels:read` 가 없어 여태 한 번도 이름을 못 읽었는데
+ * 아무도 몰랐다.
  */
 function ChannelLine({
   label,
@@ -2704,9 +2724,8 @@ function CycleEditor({
                     ? '대장이 이김'
                     : w.source === 'manual'
                       ? '직접 입력이 이김'
-                      : w.source === 'invalid'
-                        ? '값이 이상함'
-                        : '미정';
+                      : // 미정·어긋남은 목록·상세의 배지와 같은 말로 쓴다.
+                        windowNote(w)!.label;
               return (
                 <li key={c.deployYmd}>
                   {c.deployYmd} 배포 → {w.qaStartYmd ?? '?'} ~{' '}

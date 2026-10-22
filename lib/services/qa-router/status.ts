@@ -19,6 +19,7 @@ import type {
   DerivedContext,
   QaRouterConfig,
   QaRouterState,
+  QuietHours,
 } from './types';
 
 export type HealthTone = 'ok' | 'warn' | 'bad' | 'off';
@@ -54,10 +55,111 @@ export function kstYmdOf(now: Date): string {
 
 /** 지금이 폴링해야 하는 시간대인지 */
 export function isWorkingWindow(cfg: QaRouterConfig, now: Date): boolean {
-  const { day, hour } = kstParts(now);
-  const { startHour, endHour, skipWeekend } = cfg.quietHours;
-  if (skipWeekend && (day === 0 || day === 6)) return false;
-  return hour >= startHour && hour < endHour;
+  return inWorkingHours(cfg.quietHours, now);
+}
+
+/*
+  `isWorkingWindow` 의 몸통. `nextExpectedPollAt` 은 설정 전체가 아니라
+  `quietHours` 만 받으므로 같은 규칙을 그 모양으로도 쓸 수 있게 뺐다.
+  SQL `qa_router_in_window` 와 같은 경계다 (`hour < endHour`, 끝 시각 정각은 밖).
+*/
+function inWorkingHours(q: QuietHours, at: Date): boolean {
+  const { day, hour } = kstParts(at);
+  if (q.skipWeekend && (day === 0 || day === 6)) return false;
+  return hour >= q.startHour && hour < q.endHour;
+}
+
+/**
+ * `at` 보다 뒤에 오는 첫 동작 창 시작 시각 (KST `startHour`:00).
+ *
+ * 주말을 건너뛰는 설정이면 토·일 아침은 시작이 아니다. 8일을 넘겨 보는 일은
+ * 없다 (주말 이틀을 건너도 사흘이면 닿는다). 그래도 못 찾으면(시작 시각이
+ * 끝 시각보다 늦게 잘못 적힌 설정 등) 다음 날 같은 시각을 준다 - 기한을
+ * 못 정했다고 "지금" 을 주면 화면이 곧바로 응답 없음을 띄운다.
+ */
+function nextWindowStart(q: QuietHours, at: Date): Date {
+  const k = new Date(at.getTime() + KST_OFFSET_MS);
+  for (let d = 0; d <= 8; d++) {
+    const startKst = Date.UTC(
+      k.getUTCFullYear(),
+      k.getUTCMonth(),
+      k.getUTCDate() + d,
+      q.startHour
+    );
+    const start = new Date(startKst - KST_OFFSET_MS);
+    if (start.getTime() <= at.getTime()) continue;
+    if (inWorkingHours(q, start)) return start;
+  }
+  return new Date(at.getTime() + 24 * 3_600_000);
+}
+
+export interface NextExpectedPollInput {
+  now: Date;
+  /** 이번 tick 이 본 `qa_router_in_qa_window` 의 답 */
+  mode: 'qa' | 'idle';
+  quietHours: QuietHours;
+  heartbeatStaleMinutes: number;
+}
+
+/**
+ * 다음 tick 이 이 시각까지 안 오면 응답 없음이다. 배치가 계산해 state 에 적는다.
+ *
+ * ── 왜 배치가 계산하나 ──
+ *
+ * 화면이 `lastPollAt + heartbeat` 로 재면, 디스패처가 일부러 늦추는 구간
+ * (QA 기간 밖은 정시 1회)을 고장으로 읽는다. 늦추는 규칙을 아는 쪽은
+ * 디스패처뿐이라 그 규칙을 여기에 그대로 옮기고, 배치가 tick 마다 답을
+ * 적는다. 화면은 그 값과 지금만 비교한다.
+ *
+ * ── 규칙 (`20260916_qa_router_idle_after_deploy.sql` 의 `trigger_qa_router`) ──
+ *
+ *   qa   pg_cron 이 10분마다 깨운다. 지금 + heartbeat.
+ *   idle 정시에 한 번만 깨운다(`분 < 10`). 크론이 10분 주기라 그 "한 번" 은
+ *        정시~정시 10분 사이 어딘가에 온다. 다음 정시 + 10분 + heartbeat.
+ *   어느 쪽이든 결과가 동작 창 밖이면 디스패처는 그 시각에 아무도 안
+ *   깨운다(`qa_router_in_window`). 다음 창 시작 + heartbeat 로 미룬다.
+ *
+ * ── 경계에서 고른 것 ──
+ *
+ * - idle 의 "다음 정시" 는 지금보다 **엄격히 뒤**다. 정시 정각(10:00:00)에
+ *   불려도 11:00 이다. 이 함수는 tick 이 끝날 때 불리고, idle tick 은 그
+ *   정시 깨움 자체이므로 같은 정시가 다시 오지 않는다.
+ * - 결과가 창 끝 정각(예: 18:00, endHour=18)이면 **밖**으로 본다. SQL 과
+ *   `isWorkingWindow` 가 `hour < endHour` 라 18:00 에는 아무도 안 깨운다.
+ * - 창 밖으로 넘기면 idle 이어도 +10분을 더하지 않는다. 창이 열리는 첫
+ *   크론(startHour:00)은 `분 < 10` 이라 idle 대상도 깨우므로, 그 깨움은
+ *   정각에 온다.
+ * - 창 안/밖은 **기한(결과)** 으로 판단한다. 17:45 qa 면 다음 크론(17:50)은
+ *   창 안이지만 기한 18:05 는 밖이라 다음 창으로 넘어간다. 그 사이 봇이
+ *   죽어도 업무시간 밖이라 화면은 원래 응답 없음을 띄우지 않으므로
+ *   (`computeHealth` 의 `working &&`) 잃는 경보가 없고, 다음 아침에 뜻이
+ *   있는 기한이 남는다.
+ */
+export function nextExpectedPollAt({
+  now,
+  mode,
+  quietHours,
+  heartbeatStaleMinutes,
+}: NextExpectedPollInput): Date {
+  const graceMs = heartbeatStaleMinutes * 60_000;
+  let wakeMs: number;
+  if (mode === 'qa') {
+    wakeMs = now.getTime();
+  } else {
+    // KST 로 시를 내린다. 오프셋이 정수 시간이라 UTC 로 내려도 같지만,
+    // 이 파일의 다른 계산과 같은 모양으로 둔다.
+    const k = new Date(now.getTime() + KST_OFFSET_MS);
+    const hourStartKst = Date.UTC(
+      k.getUTCFullYear(),
+      k.getUTCMonth(),
+      k.getUTCDate(),
+      k.getUTCHours()
+    );
+    wakeMs = hourStartKst - KST_OFFSET_MS + 3_600_000 + 10 * 60_000;
+  }
+  const due = new Date(wakeMs + graceMs);
+  if (inWorkingHours(quietHours, due)) return due;
+  return new Date(nextWindowStart(quietHours, due).getTime() + graceMs);
 }
 
 export function formatAgo(iso: string | null, now: Date): string {
@@ -170,7 +272,27 @@ export function computeHealth({
   const lastPoll = state?.lastPollAt
     ? new Date(state.lastPollAt).getTime()
     : null;
-  const stale = lastPoll == null || now.getTime() - lastPoll > staleMs;
+  /*
+    ── 배치가 적은 기한이 있으면 그것만 본다 ──
+
+    `nextExpectedPollAt` 은 디스패처의 늦추는 규칙을 이미 담고 있다
+    (`nextExpectedPollAt()` 주석). 그 값이 있는데 여기서 heartbeat 로 다시
+    재면, 같은 질문에 답이 둘이 된다. 없으면(컬럼 이전의 행) 옛 방식이다.
+  */
+  const expectedBy = state?.nextExpectedPollAt
+    ? new Date(state.nextExpectedPollAt).getTime()
+    : null;
+  /*
+    기한이 지났어도 lastPoll 이 heartbeat 안이면 살아 있는 것으로 본다.
+    `saveTruth` 는 본 쓰기(saveState) 뒤에 따로, 던지지 않게 돈다. 그래서 본
+    쓰기는 성공하고 기한 칸만 일시 실패하면 지난 tick 의 기한이 남은 채로
+    lastPoll 만 새로워진다. 기한만 보면 방금 돈 봇을 "응답 없음" 으로 칠한다.
+    기한은 만들 때부터 늘 lastPoll + heartbeat 이상이라, 이 조건이 진짜 경보를
+    지우는 경우는 없다.
+  */
+  const pollGone = lastPoll == null || now.getTime() - lastPoll > staleMs;
+  const stale =
+    expectedBy != null ? now.getTime() > expectedBy && pollGone : pollGone;
 
   /*
     ── 쉬는 중인지 먼저 본다 ──
@@ -187,7 +309,13 @@ export function computeHealth({
     가짜 경보는 곧 무시되고, 무시되기 시작하면 진짜 경보도 같이 묻힌다.
     그래서 "끝난 차수" 판단을 **stale 검사보다 먼저** 한다.
   */
-  const cycleDone = isBetweenCycles({ state, now, nextQaStartYmd });
+  /*
+    기한이 있으면 쉬는 구간이 이미 그 안에 들어 있다. `isBetweenCycles` 로
+    한 번 더 빼면 진짜 고장(기한을 넘김)까지 쉬는 중으로 덮는다. 옛 행만
+    이 추정에 기댄다.
+  */
+  const cycleDone =
+    expectedBy == null && isBetweenCycles({ state, now, nextQaStartYmd });
 
   // 업무시간인데 폴링이 끊겼으면 조치가 필요하다. 쉬는 구간은 빼고 본다.
   if (working && stale && !cycleDone) {
@@ -240,16 +368,7 @@ export function computeHealth({
     */
     const today = kstYmdOf(now);
     const nextStarted = !!nextQaStartYmd && today >= nextQaStartYmd;
-    if (!nextStarted) {
-      return {
-        tone: 'off',
-        label: '차수 완료',
-        detail: nextQaStartYmd
-          ? `다음 QA 는 ${nextQaStartYmd} 시작입니다`
-          : '다음 차수를 기다리는 중입니다',
-        actionable: false,
-      };
-    }
+    if (!nextStarted) return cycleDoneHealth(nextQaStartYmd);
     return {
       tone: 'warn',
       label: '전환 대기',
@@ -257,6 +376,16 @@ export function computeHealth({
       actionable: true,
     };
   }
+
+  /*
+    ── 배치가 "QA 기간 밖" 이라고 적었으면 쉬는 중이다 ──
+
+    필터가 아직 끝난 차수를 가리키지 않아도(위 `pending` 이 못 잡아도) SQL 은
+    차수 목록 전체로 "지금은 기간 밖" 을 안다. 그 답이 `mode` 다. 기한을
+    넘기지 않았으면(stale 아님) 일부러 쉬는 것이니 위와 같은 문장을 쓴다.
+    기한을 넘겼으면 이미 위에서 "응답 없음" 으로 끝났다.
+  */
+  if (state?.mode === 'idle' && !stale) return cycleDoneHealth(nextQaStartYmd);
 
   if (!working) {
     return {
@@ -281,6 +410,22 @@ export function computeHealth({
     tone: 'ok',
     label: '정상',
     detail: `${formatAgo(state?.lastPollAt ?? null, now)} 확인`,
+    actionable: false,
+  };
+}
+
+/*
+  "차수 완료" 문장. 필터가 끝난 차수를 가리키는 갈래와 배치가 idle 을 적은
+  갈래가 같은 상태를 말하므로 같은 글자를 쓴다. 두 곳에 복제하면 한쪽만
+  고쳐져 같은 상태가 두 문장으로 보인다.
+*/
+function cycleDoneHealth(nextQaStartYmd: string | null | undefined): Health {
+  return {
+    tone: 'off',
+    label: '차수 완료',
+    detail: nextQaStartYmd
+      ? `다음 QA 는 ${nextQaStartYmd} 시작입니다`
+      : '다음 차수를 기다리는 중입니다',
     actionable: false,
   };
 }

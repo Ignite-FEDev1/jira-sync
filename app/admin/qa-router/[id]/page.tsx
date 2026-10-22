@@ -1,10 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
+
+import { db } from '@/lib/db';
 
 import { Badge, StatusLed } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,12 +14,14 @@ import {
   cycleStage,
   describeQaProgress,
 } from '@/lib/services/qa-router/status';
+import { prodDayOf, resolveQaWindow } from '@/lib/services/qa-router/qa-window';
 import type {
   DeployCycle,
   QaRouterEvent,
 } from '@/lib/services/qa-router/types';
 import { hasAlertOverride } from '@/lib/services/qa-router/types';
 import type { QaRouterConfig } from '@/lib/services/qa-router/types';
+import { windowNote } from '../window-note';
 
 import {
   Code,
@@ -51,13 +55,25 @@ export default function QaRouterDetailPage() {
   const t = useRouterTarget(id, { demo });
   const [running, setRunning] = useState(false);
   const [rereading, setRereading] = useState(false);
+  /** 폴링 interval id. 언마운트 시, 그리고 끝났을 때 정리한다. */
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
 
   /**
    * 배치를 한 번 즉시 돌린다.
    *
-   * 전에는 fetch 응답이 오면 곧바로 running 을 내렸다. 그런데 실제 배치는
-   * 그 뒤로 40초를 더 돈다 — 버튼이 즉시 원래대로 돌아와서 "끝났다"고
-   * 거짓말을 했다. 결과를 다시 읽을 때까지 실행 중으로 둔다.
+   * 전에는 fetch 응답이 오면 40초 고정 타이머 뒤 무조건 reload 했다. 배치가
+   * 느려지거나(예: Jira 쪽 지연) 그보다 먼저 끝나는 날이 둘 다 있어서,
+   * 고정된 숫자는 "일찍 reload 해 옛 값을 보여주거나" "다 끝났는데 계속
+   * 실행 중"이 되는 둘 중 하나로 늘 틀렸다. 5초마다 실제로 끝났는지
+   * (`last_poll_at` 이 누른 시각보다 뒤로 갔는지)를 직접 물어 **진짜 끝**을
+   * 본다. 120초가 지나도 안 끝나면 포기하고 실행 로그를 보라고 안내한다.
+   * 무한정 "실행 중"으로 묶어 두면 버튼이 고장난 것처럼 보인다.
    */
   const runNow = async () => {
     setRunning(true);
@@ -69,13 +85,45 @@ export default function QaRouterDetailPage() {
       return;
     }
     toast.success('실행을 요청했습니다', {
-      description: '완료까지 약 40초 · 끝나면 이 화면이 다시 읽힙니다',
+      description: '끝나면 이 화면이 다시 읽힙니다',
     });
-    // 완료 신호가 없으므로 배치가 도는 만큼 기다렸다가 읽는다.
-    setTimeout(() => {
-      t.reload();
-      setRunning(false);
-    }, 40_000);
+    const pressedAt = Date.now();
+    const lastRunUrl = t.state?.lastRunUrl ?? null;
+    let elapsedMs = 0;
+    pollRef.current = setInterval(() => {
+      void (async () => {
+        elapsedMs += 5_000;
+        const row = await db
+          .from('qa_router_state')
+          .select('last_poll_at')
+          .eq('config_id', id)
+          .maybeSingle();
+        const lastPollAt = row.data?.last_poll_at
+          ? new Date(row.data.last_poll_at as string).getTime()
+          : null;
+        const finished = lastPollAt !== null && lastPollAt > pressedAt;
+        if (finished) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+          setRunning(false);
+          t.reload();
+          return;
+        }
+        if (elapsedMs >= 120_000) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+          setRunning(false);
+          toast.warning('아직 안 돌았습니다 · 실행 로그를 확인해 주세요', {
+            action: lastRunUrl
+              ? {
+                  label: '실행 로그 열기',
+                  onClick: () => window.open(lastRunUrl, '_blank', 'noopener,noreferrer'),
+                }
+              : undefined,
+          });
+        }
+      })();
+    }, 5_000);
   };
 
   /**
@@ -223,6 +271,7 @@ export default function QaRouterDetailPage() {
           configId={id}
           demo={demo}
           enabled={config.enabled}
+          qaScheduleRule={config.qaScheduleRule}
         />
       </section>
     </div>
@@ -336,6 +385,7 @@ function CycleTable({
   configId,
   demo,
   enabled,
+  qaScheduleRule,
 }: {
   cycles: DeployCycle[];
   activeFixVersion: string | null;
@@ -353,6 +403,13 @@ function CycleTable({
   demo: boolean;
   /** 이 대상이 켜져 있나. 꺼져 있으면 "알림 중" 배지를 못 띄운다. */
   enabled: boolean;
+  /**
+   * 설정의 QA 기간 규칙(3순위). 행마다 `resolveQaWindow` 를 직접 계산하는 데
+   * 쓴다. 대장 칸(`c.qaStartYmd`)을 그대로 읽으면 직접 입력·규칙으로 정한
+   * 차수에서 사다리가 고른 기간과 다른 값을 보여준다 (settings/page.tsx 의
+   * `activeWindow` 와 같은 이유).
+   */
+  qaScheduleRule: QaRouterConfig['qaScheduleRule'];
 }) {
   const [page, setPage] = useState(0);
 
@@ -481,11 +538,43 @@ function CycleTable({
                 const n = ambiguous(c)
                   ? undefined
                   : (counted.get(c.fixVersion) ?? 0);
+                /*
+                  대장 칸(`c.qaStartYmd`)이 아니라 사다리 결과를 쓴다. 설정
+                  화면의 `activeWindow` 와 같은 입력이다. 이게 다르면
+                  10-07 차수처럼 대장 칸은 멀쩡해 보여도 사다리는 `invalid`
+                  (QA 종료가 운영 배포보다 뒤)를 주는 차수에서 표가 "QA 4일차
+                  · 6일 남음"으로 거짓말을 한다.
+                */
+                const win = resolveQaWindow({
+                  manualStartYmd: c.qaStartYmdManual ?? null,
+                  manualEndYmd: c.qaEndYmdManual ?? null,
+                  ledgerStartYmd: c.qaStartYmd,
+                  ledgerEndYmd: c.qaEndYmd,
+                  prodYmd: c.prodYmd,
+                  deployYmd: c.deployYmd,
+                  rule: qaScheduleRule,
+                });
+                /*
+                  경고(틴트·warn 배지)는 아직 운영 배포 전인 차수에만 건다.
+                  목록은 다가오는 차수만 "일정 미정 N" 으로 센다. 지난 차수까지
+                  칠하면 목록은 0 인데 상세는 노랗게 되어 같은 대상을 두고
+                  두 화면이 다른 수를 말한다. 지난 차수는 알림도 더 안 나가니
+                  고칠 일이 없다.
+                */
+                const upcoming = prodDayOf(c) >= todayYmd;
+                const rawNote = windowNote(win);
+                const note =
+                  rawNote?.tone === 'warn' && !upcoming ? null : rawNote;
+                // 목록의 warn 행과 같은 틴트. 같은 사다리가 같은 말을 한다.
+                const scheduleTint =
+                  note?.tone === 'warn'
+                    ? 'bg-amber-50/60 dark:bg-amber-950/20'
+                    : '';
                 return (
                   <tr
                     key={c.deployYmd}
                     // relative: RowLink 의 덮개가 이 행 안에 갇히게 한다.
-                    className={`relative cursor-pointer border-b last:border-0 hover:bg-muted/60 ${isCurrentCycle ? 'bg-muted/40' : ''}`}
+                    className={`relative cursor-pointer border-b last:border-0 hover:bg-muted/60 ${scheduleTint || (isCurrentCycle ? 'bg-muted/40' : '')}`}
                   >
                     <td className="px-3 py-2.5 align-baseline">
                       {/*
@@ -514,26 +603,55 @@ function CycleTable({
                       <Code>{c.fixVersion}</Code>
                     </td>
                     <td className="px-3 py-2.5 align-baseline">
-                      {c.qaStartYmd ? (
-                        <div className="flex flex-col gap-0.5">
+                      <div className="flex flex-col gap-0.5">
+                        {win.qaStartYmd ? (
                           <span className="whitespace-nowrap font-mono tabular-nums">
-                            {c.qaStartYmd.slice(5)} ~{' '}
-                            {c.qaEndYmd?.slice(5) ?? '?'}
+                            {win.qaStartYmd.slice(5)} ~{' '}
+                            {win.qaEndYmd?.slice(5) ?? '?'}
                           </span>
-                          {/* 진행 상태는 QA 기간 정보라 이 열에 둔다. */}
-                          {isCurrentCycle && (
+                        ) : (
+                          // note 가 이미 "일정 미정" 을 배지로 말한다. 둘 다
+                          // 그리면 같은 말을 두 번 하게 된다.
+                          !note && (
+                            <span className="text-muted-foreground">미정</span>
+                          )
+                        )}
+                        {note && (
+                          <Badge
+                            variant={note.tone === 'off' ? 'muted' : note.tone}
+                            className="w-fit"
+                          >
+                            {note.label}
+                          </Badge>
+                        )}
+                        {note?.detail && (
+                          <span className="text-xs text-muted-foreground">
+                            {note.detail}
+                          </span>
+                        )}
+                        {/*
+                          어긋난 날짜로 "6일 남음"을 세지 않는다. 대신 알림이
+                          안 나간다는 사실만 말한다.
+                        */}
+                        {win.source === 'invalid' && upcoming && (
+                          <span className="whitespace-nowrap text-xs text-muted-foreground">
+                            이 차수 QA 날짜 알림 안 나감
+                          </span>
+                        )}
+                        {/* 진행 상태는 QA 기간 정보라 이 열에 둔다. */}
+                        {isCurrentCycle &&
+                          win.source !== 'invalid' &&
+                          win.source !== 'none' &&
+                          win.qaStartYmd && (
                             <span className="whitespace-nowrap text-xs text-muted-foreground">
                               {describeQaProgress(
-                                c.qaStartYmd,
-                                c.qaEndYmd,
+                                win.qaStartYmd,
+                                win.qaEndYmd,
                                 todayYmd
                               )}
                             </span>
                           )}
-                        </div>
-                      ) : (
-                        <span className="text-muted-foreground">미정</span>
-                      )}
+                      </div>
                     </td>
                     <td className="px-3 py-2.5 align-baseline">
                       <ProdDate cycle={c} />
