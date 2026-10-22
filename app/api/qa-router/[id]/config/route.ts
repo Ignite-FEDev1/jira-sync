@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
 
+import { toggleEventReason } from '@/app/admin/qa-router/toggle-enabled-plan';
 import { jiraBaseUrl } from '@/lib/constants/jira';
 import { dbServer } from '@/lib/db';
 import { resolveFilterInput } from '@/lib/services/qa-router/api-creds';
 import { parseFilterUrl, parseGadgetUrl } from '@/lib/services/qa-router/derive';
+import * as repo from '@/lib/services/qa-router/repository';
 import {
   checkAlertRules,
   DEPLOY_KINDS,
@@ -38,6 +40,11 @@ interface Body {
   jiraFilterId?: unknown;
   slackChannelId?: unknown;
   quietHours?: unknown;
+  /**
+   * 켜고 끄기. 전에는 화면이 anon 키로 테이블을 직접 update 해서 검증·
+   * 낙관적 잠금·기록·Slack 알림을 다 건너뛰었다. boolean 만 받는다.
+   */
+  enabled?: unknown;
   /*
     ── 아래는 **보내면 바뀌고, 안 보내면 그대로** 다 ──
 
@@ -142,7 +149,8 @@ export type ConfigField =
   | 'qaScheduleRule'
   | 'alertRules'
   | 'tickIntervalSeconds'
-  | 'quietHours';
+  | 'quietHours'
+  | 'enabled';
 
 type Checked =
   | { ok: true; row: Record<string, unknown>; filterId: string | null }
@@ -287,6 +295,20 @@ function checkPipeline(
     만든다. 대신 화면이 6명 중에서만 고르게 하고, 어긋나면 필터 확인
     (filter-check) 이 "명단에 없습니다" 로 잡는다.
   */
+  // 켜고 끄기. boolean 만 통과시킨다: 채널 없이는 못 켜는 것은 여기서
+  // 안 본다. 그건 DB 제약(qa_router_configs_enabled_needs_essentials)이 막고,
+  // 걸리면 PATCH 핸들러가 원문 메시지를 그대로 400 으로 돌려준다.
+  if (b.enabled !== undefined) {
+    if (typeof b.enabled !== 'boolean') {
+      return {
+        ok: false,
+        error: '사용 여부는 true 또는 false 여야 합니다.',
+        field: 'enabled',
+      };
+    }
+    row.enabled = b.enabled;
+  }
+
   if (b.triageAccountId !== undefined) {
     const v =
       typeof b.triageAccountId === 'string' ? b.triageAccountId.trim() : '';
@@ -594,7 +616,9 @@ export async function PATCH(
 
   const before = await dbServer
     .from('qa_router_configs')
-    .select('jira_filter_id, updated_at')
+    .select(
+      'jira_filter_id, updated_at, enabled, name, slack_channel_id, slack_ops_channel_id'
+    )
     .eq('id', id)
     .maybeSingle();
 
@@ -631,10 +655,92 @@ export async function PATCH(
     .eq('id', id);
 
   if (error) {
+    /*
+      켜기만 걸릴 수 있는 제약이다(qa_router_configs_enabled_needs_essentials,
+      필터·트리아지·채널 중 하나라도 비면 켜기가 거부된다). `writeEnabled` 가
+      브라우저에서 직접 update 하던 시절엔 이 원문 메시지를 감싸지 않고 그대로
+      돌려줬다. 그 원칙을 그대로 옮긴다.
+    */
+    if (checked.row.enabled === true) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json(
       { error: `저장 실패: ${error.message}` },
       { status: 500 }
     );
+  }
+
+  // 저장은 끝났다. 아래는 다 "저장은 성공했다" 는 전제 위의 부수 효과라
+  // 실패해도 500 으로 돌리지 않고 warning 에 적는다.
+  let warning: string | undefined;
+  // 기록 실패와 Slack 실패가 둘 다 날 수 있다. 둘 다 사람이 봐야 하므로
+  // 하나만 남기지 않고 필터-캐시 경고와 같은 방식으로 이어붙인다.
+  const addWarning = (w: string) => {
+    warning = warning ? `${warning} / ${w}` : w;
+  };
+
+  // 켜고 끄기가 바뀌었으면 기록을 남기고, 끄는 경우에는 운영 채널에 한 줄
+  // 알린다. 필터 변경은 이미 Slack "설정 변경 감지" 가 나가는데 끄기는
+  // 어디에도 안 남던 비대칭을 없앤다.
+  if ('enabled' in checked.row) {
+    const after = checked.row.enabled as boolean;
+    const reason = toggleEventReason(Boolean(before.data.enabled), after);
+    if (reason) {
+      try {
+        await repo.appendSystemEvent(id, '사용 변경', reason);
+      } catch (e) {
+        // 기록 실패여도 저장은 이미 끝났다: 500 으로 되돌리지 않는다.
+        addWarning(
+          `사용 변경 기록에 실패했습니다: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
+
+      if (!after) {
+        const token = process.env.SLACK_BOT_TOKEN;
+        const channel =
+          before.data.slack_ops_channel_id ?? before.data.slack_channel_id;
+        const name =
+          typeof checked.row.name === 'string'
+            ? checked.row.name
+            : before.data.name;
+        if (!token || !channel) {
+          addWarning(
+            '알림 채널 또는 Slack 토큰이 없어 끄기 알림을 보내지 못했습니다.'
+          );
+        } else {
+          try {
+            const slackRes = await fetch(
+              'https://slack.com/api/chat.postMessage',
+              {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  'Content-Type': 'application/json; charset=utf-8',
+                },
+                body: JSON.stringify({
+                  channel,
+                  text: `⏸️ QA Router · ${name} 사용 꺼짐 · 다시 켜기 전까지 QA 티켓 알림이 나가지 않습니다`,
+                }),
+              }
+            );
+            const slackData = (await slackRes.json()) as {
+              ok?: boolean;
+              error?: string;
+            };
+            if (!slackData.ok) {
+              addWarning(
+                `끄기 알림을 보내지 못했습니다: ${slackData.error ?? slackRes.status}`
+              );
+            }
+          } catch (e) {
+            // 조용히 건너뛴다: 끄기 자체는 이미 끝났다.
+            addWarning(
+              `끄기 알림을 보내지 못했습니다: ${e instanceof Error ? e.message : String(e)}`
+            );
+          }
+        }
+      }
+    }
   }
 
   // 필터가 바뀌면 지금 들고 있는 파생값은 다른 필터에서 읽은 것이다.
@@ -652,16 +758,21 @@ export async function PATCH(
     if (reset.error) {
       // 설정은 이미 저장됐다. 캐시만 남은 상태를 조용히 넘기면
       // "필터를 바꿨는데 옛 담당자에게 알림이 간다"가 된다.
+      const cacheWarning = `설정은 저장했지만 캐시를 비우지 못했습니다 (${reset.error.message}). 지금 실행을 눌러 주세요.`;
       return NextResponse.json(
         {
           ok: true,
           filterChanged,
-          warning: `설정은 저장했지만 캐시를 비우지 못했습니다 (${reset.error.message}). 지금 실행을 눌러 주세요.`,
+          warning: warning ? `${warning} / ${cacheWarning}` : cacheWarning,
         },
         { status: 200 }
       );
     }
   }
 
-  return NextResponse.json({ ok: true, filterChanged });
+  return NextResponse.json({
+    ok: true,
+    filterChanged,
+    ...(warning ? { warning } : {}),
+  });
 }
