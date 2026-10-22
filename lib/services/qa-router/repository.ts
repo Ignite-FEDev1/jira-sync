@@ -366,6 +366,15 @@ export interface StatePatch {
   firstFailAt?: string | null;
   staleAlertedAt?: string | null;
   failAlertTs?: string | null;
+  /*
+    아래 넷은 배치가 적고 화면은 읽기만 하는 칸이다 (`QaRouterState` 주석).
+    다른 칸과 같이 undefined 면 안 쓴다 - 쓸 근거가 없는 tick 이 남이 적은
+    값을 지우지 않게 한다.
+  */
+  mode?: 'qa' | 'idle' | null;
+  nextExpectedPollAt?: string | null;
+  lastJudgedAt?: string | null;
+  lastRunUrl?: string | null;
 }
 
 export async function saveState(
@@ -386,6 +395,11 @@ export async function saveState(
   if (patch.staleAlertedAt !== undefined)
     row.stale_alerted_at = patch.staleAlertedAt;
   if (patch.failAlertTs !== undefined) row.fail_alert_ts = patch.failAlertTs;
+  if (patch.mode !== undefined) row.mode = patch.mode;
+  if (patch.nextExpectedPollAt !== undefined)
+    row.next_expected_poll_at = patch.nextExpectedPollAt;
+  if (patch.lastJudgedAt !== undefined) row.last_judged_at = patch.lastJudgedAt;
+  if (patch.lastRunUrl !== undefined) row.last_run_url = patch.lastRunUrl;
   if (Object.keys(row).length === 0) return;
 
   const { error } = await dbServer
@@ -393,6 +407,28 @@ export async function saveState(
     .update(row)
     .eq('config_id', configId);
   if (error) throw new Error(`saveState: ${error.message}`);
+}
+
+/**
+ * 오늘이 이 대상의 QA 기간 안인가. SQL `qa_router_in_qa_window` 의 답을 그대로 쓴다.
+ *
+ * TS 로 다시 계산하지 않는 이유: 디스패처와 워치독이 이 함수로 깨울지
+ * 말지를 정한다. 화면이 따로 추정하면 둘이 어긋나는 순간 같은 봇을 두고
+ * 반대로 말한다. 배치가 이 답을 `mode` 로 적고 화면은 그걸 읽는다.
+ *
+ * 오류는 던진다. 모르는 것을 false(쉬는 중)로 지어내면 화면이 그 값을 믿는다.
+ * 치명인지는 부르는 쪽(tick)이 정한다.
+ */
+export async function inQaWindow(configId: string): Promise<boolean> {
+  /*
+    읽기 RPC 라 리허설 가드를 걸지 않는다. 리허설도 지금이 QA 기간인지
+    알아야 운영과 같은 흐름을 본다. (테스트의 READ_ONLY_RPC 허용 목록에 있다)
+  */
+  const { data, error } = await dbServer.rpc('qa_router_in_qa_window', {
+    p_config_id: configId,
+  });
+  if (error) throw new Error(`inQaWindow: ${error.message}`);
+  return data === true;
 }
 
 /**

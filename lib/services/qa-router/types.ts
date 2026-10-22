@@ -932,6 +932,27 @@ export interface QaRouterState {
    * 하나로 합치면서 그 등식이 깨졌다.
    */
   alertSentOn: Record<string, string>;
+  /*
+    ── 아래 네 칸: 배치가 적고 화면은 읽기만 한다 ──
+
+    "쉬는 중인가" 를 SQL(`qa_router_in_qa_window`, 디스패처, 워치독)과
+    TS(`isBetweenCycles`, 화면)가 따로 정의하고 있었다. 둘이 어긋나면 같은
+    봇을 두고 화면은 빨강, 워치독은 침묵이 된다. 배치가 SQL 의 답을 그대로
+    적고 화면은 다시 추정하지 않으면 어긋날 자리가 없다.
+
+    넷 다 컬럼이 없던 시절의 행에서는 null 이다 (`rows.ts` 의 `?? null`).
+  */
+  /** 마지막 tick 이 본 QA 기간 여부. qa = 10분 주기, idle = 정시 1회. null = 모름. */
+  mode: 'qa' | 'idle' | null;
+  /**
+   * 이 시각까지 다음 tick 이 안 오면 응답 없음이다 (`status.ts` 의
+   * `nextExpectedPollAt` 으로 배치가 계산). 있으면 화면은 이것만으로 stale 을 본다.
+   */
+  nextExpectedPollAt: string | null;
+  /** 마지막으로 티켓 판정을 기록한 tick 의 시각. system 기록과 판정 실패는 안 센다. */
+  lastJudgedAt: string | null;
+  /** 마지막 tick 의 GitHub Actions 실행 로그 주소. 로컬 실행이면 null. */
+  lastRunUrl: string | null;
   updatedAt: string;
 }
 

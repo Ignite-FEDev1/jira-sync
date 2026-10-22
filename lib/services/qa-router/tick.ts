@@ -12,6 +12,17 @@
  *     중복 알림이 누락보다 낫다는 판단이다.
  *   - 발송 건수에 상한을 두지 않는다. 상한은 도배를 막지 못하고 늦추기만 하면서
  *     안전하다는 착각을 준다. 대신 순차 발송으로 Slack 속도 제한만 지킨다.
+ *
+ * 배치가 적고 화면은 읽는 네 칸 (mode, nextExpectedPollAt, lastJudgedAt, lastRunUrl):
+ *   - **마이그레이션 순서에 기대지 않는다.** 네 칸은 기존 `saveState` 객체에
+ *     싣지 않고, 성공(`finishOk`)과 실패(catch) 경로 모두 `saveTruth` 로
+ *     **따로, 던지지 않게** 쓴다. 마이그레이션(`20261005_qa_router_state_truth.sql`)
+ *     보다 코드가 먼저 붙는 창에서는 이 쓰기만 PGRST204 로 실패하고 로그에
+ *     남는다 - 마이그레이션이 닿을 때까지 네 칸은 최선 노력(best-effort)이다.
+ *   - 같은 객체에 실으면 tick 당 쓰기 하나를 아끼지만, 그 창에서 성공한 tick
+ *     이 실패로 뒤집혀 연속 실패 알림까지 간다. `first_fail_at` 을 조건부로만
+ *     쓰는 것(12fafdd, "배포 레이스에 봇이 조용히 죽지 않게")과 같은 판단이다.
+ *   - 읽는 쪽(`rows.ts`)은 `?? null` 이라 컬럼이 없어도 견딘다.
  */
 
 import {
@@ -35,7 +46,7 @@ import {
 } from './message';
 import { prodDayOf, resolveQaWindow } from './qa-window';
 import { wantsQaAlerts } from './alert-rule';
-import { readCyclePageTitle, tooSoon } from './status';
+import { nextExpectedPollAt, readCyclePageTitle, tooSoon } from './status';
 import {
   extractJqlStrings,
   pickLedgerFixVersion,
@@ -747,6 +758,42 @@ export async function runTick(
   }
 
   /*
+    ── 이번 tick 이 본 QA 기간 여부 ──
+
+    디스패처·워치독이 깨울지 말지를 정하는 SQL(`qa_router_in_qa_window`)의
+    답을 그대로 받아 state 에 적는다. 화면이 자기 규칙으로 따로 추정하면
+    둘이 어긋나는 순간 같은 봇을 두고 반대로 말한다.
+
+    RPC 실패는 치명이 아니다. 알림은 이 값과 무관하게 나가야 한다. 대신
+    null 로 두고 그 tick 은 mode·기한을 **null 로 지운다** (`truthPatch`).
+    모르는 값을 지어내 적으면 화면이 그걸 믿고, 낡은 기한을 남기면 살아
+    있는 봇이 응답 없음으로 보인다. null 이면 화면은 heartbeat 규칙으로 돈다.
+
+    tick 이 적는 지점(`finishOk`, 실패 집계)에서 처음 한 번만 묻고 기억한다.
+    `too_soon` 경로는 아무것도 안 적으므로 묻지도 않는다 (그 경로는 운영
+    배치가 1분마다 지나가는 가장 흔한 길이다).
+  */
+  let mode: 'qa' | 'idle' | null | undefined;
+  const resolveMode = async (): Promise<'qa' | 'idle' | null> => {
+    if (mode === undefined) {
+      try {
+        mode = (await repo.inQaWindow(cfg.id)) ? 'qa' : 'idle';
+      } catch (e) {
+        log(
+          `QA 기간 조회 실패 (이번 tick 은 mode·기한을 비움): ${(e as Error).message}`
+        );
+        mode = null;
+      }
+    }
+    return mode;
+  };
+  /*
+    이번 tick 이 판정을 하나라도 기록했나. tick 끝의 `saveState` 한 번에
+    `lastJudgedAt` 을 같이 싣는다 (판정마다 쓰면 호출 수가 판정 수만큼 는다).
+  */
+  let judged = false;
+
+  /*
     어느 구간에서 죽었나. `catch` 가 마지막 값을 읽는다.
 
     `runAside` 를 넓히지 않는 이유: 그것은 **치명적이지 않은** 구간 전용이라
@@ -759,7 +806,10 @@ export async function runTick(
     const state = await repo.getOrCreateState(cfg.id);
 
     if (isQuietHours(cfg, now())) {
-      await finishOk(cfg, state, log, deps, healthChannel);
+      await finishOk(cfg, state, log, deps, healthChannel, {
+        mode: await resolveMode(),
+        judged,
+      });
       return { status: 'quiet_hours' };
     }
 
@@ -1072,7 +1122,10 @@ export async function runTick(
           state.activeCycle = null;
           await repo.saveState(cfg.id, { activeCycle: null });
         }
-        await finishOk(cfg, state, log, deps, healthChannel);
+        await finishOk(cfg, state, log, deps, healthChannel, {
+          mode: await resolveMode(),
+          judged,
+        });
         return { status: 'cycle_ended', fixVersion: parsedFv.raw };
       }
 
@@ -1114,7 +1167,10 @@ export async function runTick(
       const qaStart = cycle.schedule?.qaStartYmd;
       if (qaStart && kstYmd(now()) < qaStart) {
         log(`개발 단계 · QA 시작 ${qaStart} · 조용히 종료`);
-        await finishOk(cfg, state, log, deps, healthChannel);
+        await finishOk(cfg, state, log, deps, healthChannel, {
+          mode: await resolveMode(),
+          judged,
+        });
         return {
           status: 'not_started',
           fixVersion: parsedFv.raw,
@@ -1512,6 +1568,11 @@ export async function runTick(
           // 모든 기록이 null 로 쌓였고, 화면의 차수별 집계가 늘 비었다.
           fixVersion,
         });
+        /*
+          판정이 기록된 뒤에만 센다. 아래 catch 의 기록(classification null)은
+          판정 실패라 "마지막 판정" 이 아니다.
+        */
+        judged = true;
       } catch (e) {
         failed++;
         log(`✗ ${issue.key} 판정 실패: ${(e as Error).message}`);
@@ -1536,7 +1597,10 @@ export async function runTick(
       );
     }
 
-    await finishOk(cfg, state, log, deps, healthChannel);
+    await finishOk(cfg, state, log, deps, healthChannel, {
+      mode: await resolveMode(),
+      judged,
+    });
     return {
       status: 'done',
       scanned: found.length,
@@ -1574,6 +1638,20 @@ export async function runTick(
       // 집계가 안 됐다는 사실 자체가 단서다. 삼키지 말고 로그에 남긴다.
       log(`실패 집계 기록 불가: ${(bookkeepingError as Error).message}`);
     }
+    /*
+      ── 실패 경로의 네 칸은 집계와 **따로** 적는다 ──
+
+      실패해도 디스패처는 같은 주기로 다시 깨운다. 기한·실행 로그를 적어야
+      화면이 "다음은 언제" 와 "이번 실패의 로그" 를 말할 수 있다.
+
+      집계 객체에 싣지 않는 이유: 위 집계는 배포 레이스(컬럼이 아직 없는
+      DB)에서도 횟수를 남기려고 일부러 옛 칸만 쓴다 (`scripts/qa-router.test.mts`
+      의 '배포 레이스' 검사가 그 모양을 고정한다). 새 칸을 거기 실으면
+      PGRST204 한 번에 횟수까지 잃는다. 성공 경로와 같은 `saveTruth` 를 쓴다.
+
+      던지지 않는다. 이 쓰기가 실패해도 아래 실패 알림은 나가야 한다.
+    */
+    await saveTruth(cfg, now(), { mode: await resolveMode(), judged }, log);
     log(
       `치명적 오류 ${fails === null ? '횟수 미상' : `${fails}회 연속`} (${step}): ${(e as Error).message}`
     );
@@ -1618,13 +1696,79 @@ export async function runTick(
   }
 }
 
+/** 이번 tick 이 알아낸 것 중 state 에 같이 적을 것. */
+interface TickTruth {
+  /** `qa_router_in_qa_window` 의 답. null 이면 조회 실패라 mode·기한을 null 로 지운다. */
+  mode: 'qa' | 'idle' | null;
+  /** 판정을 하나라도 기록했나. 참이면 `lastJudgedAt` 을 적는다. */
+  judged: boolean;
+}
+
+/**
+ * 배치가 적고 화면은 읽는 네 칸의 patch. 성공(`finishOk`)과 실패(catch) 경로가
+ * 같은 규칙으로 적도록 한 곳에 둔다.
+ *
+ * - mode 를 모르면 mode 와 기한을 **null 로 지운다.** 안 적고 두면 직전 tick
+ *   의 기한이 남은 채 `lastPollAt` 만 앞으로 가서, 봇이 살아 있는데도 그 낡은
+ *   기한을 넘긴 순간 화면이 "응답 없음" 을 띄운다. null 이면 화면은 옛
+ *   heartbeat 규칙(`lastPollAt` 기준)으로 돌아간다. 모르는 값을 지어내지도,
+ *   낡은 값을 들고 있지도 않는다.
+ * - `lastJudgedAt` 은 판정이 있었을 때만. 없던 tick 이 지우면 "마지막 판정" 이 사라진다.
+ * - `lastRunUrl` 은 늘 적는다. 로컬 실행이면 null 이 사실이다 (그 tick 에는 로그 주소가 없다).
+ */
+function truthPatch(
+  cfg: QaRouterConfig,
+  at: Date,
+  truth: TickTruth
+): Pick<
+  repo.StatePatch,
+  'mode' | 'nextExpectedPollAt' | 'lastJudgedAt' | 'lastRunUrl'
+> {
+  return {
+    ...(truth.mode
+      ? {
+          mode: truth.mode,
+          nextExpectedPollAt: nextExpectedPollAt({
+            now: at,
+            mode: truth.mode,
+            quietHours: cfg.quietHours,
+            heartbeatStaleMinutes: cfg.heartbeatStaleMinutes,
+          }).toISOString(),
+        }
+      : { mode: null, nextExpectedPollAt: null }),
+    ...(truth.judged ? { lastJudgedAt: at.toISOString() } : {}),
+    lastRunUrl: githubRunUrl(),
+  };
+}
+
+/**
+ * 네 칸을 따로, **던지지 않게** 쓴다. 성공과 실패 경로가 같이 쓴다.
+ *
+ * 컬럼이 아직 없는 DB(배포 창)에서 PGRST204 로 실패해도 tick 의 결과를
+ * 바꾸지 않는다. 화면용 칸 하나 못 적었다고 성공한 tick 이 실패로 뒤집히면
+ * 연속 실패 알림이 거짓으로 나간다. 못 적은 사실은 로그에 남긴다.
+ */
+async function saveTruth(
+  cfg: QaRouterConfig,
+  at: Date,
+  truth: TickTruth,
+  log: Logger
+): Promise<void> {
+  try {
+    await repo.saveState(cfg.id, truthPatch(cfg, at, truth));
+  } catch (truthError) {
+    log(`상태 네 칸 기록 불가: ${(truthError as Error).message}`);
+  }
+}
+
 /** 정상 종료 공통 경로. 조기 종료도 "이번 tick 성공"이라 카운터를 리셋한다. */
 async function finishOk(
   cfg: QaRouterConfig,
   state: QaRouterState,
   log: Logger,
   deps: TickDeps,
-  healthChannel: string
+  healthChannel: string,
+  truth: TickTruth
 ): Promise<void> {
   await repo.saveState(cfg.id, {
     consecutiveFails: 0,
@@ -1644,6 +1788,12 @@ async function finishOk(
     lastPollAt: (deps.now?.() ?? new Date()).toISOString(),
     staleAlertedAt: null,
   });
+  /*
+    네 칸은 위 객체에 싣지 않는다. 위 쓰기는 tick 의 성공을 정하는 쓰기라
+    던지면 실패로 뒤집히고, 네 칸은 화면용이라 못 적어도 tick 은 성공이다
+    (파일 머리말). 마이그레이션 전 배포 창에서도 성공 tick 이 성공으로 남는다.
+  */
+  await saveTruth(cfg, deps.now?.() ?? new Date(), truth, log);
   if (state.consecutiveFails >= FAIL_ALERT_THRESHOLD) {
     /*
       실패 알림이 남긴 ts 가 있으면 **그 스레드**로 보낸다. 7분짜리 일시
