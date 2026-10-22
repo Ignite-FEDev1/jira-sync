@@ -1429,8 +1429,18 @@ export function targetHealth(
   */
   cycles?: DeployCycle[]
 ): Health {
+  /*
+    배치가 적은 lastJudgedAt 이 정본이다. events 는 최근 N건 창이라 판정이
+    며칠 없거나 창이 다른 기록으로 차면 "마지막 판정" 이 사라진다. 그 칸이
+    없는 옛 행만 events 로 대신하고, 이때도 같은 정의(system 아님, 판정
+    실패 null 아님)로 센다. 목록과 답이 갈리지 않게 한다.
+  */
   const lastJudged =
-    events.find((e) => e.classification !== 'system')?.createdAt ?? null;
+    state?.lastJudgedAt ??
+    events.find(
+      (e) => e.classification !== 'system' && e.classification !== null
+    )?.createdAt ??
+    null;
   const idleDays = lastJudged
     ? Math.floor((now.getTime() - new Date(lastJudged).getTime()) / 86_400_000)
     : null;
@@ -1743,6 +1753,35 @@ export function HealthBadge({
               <span className="text-muted-foreground">없음</span>
             )}
           </Row>
+          {/*
+            아래 세 줄은 값이 없으면 줄 자체를 그리지 않는다. 컬럼이 아직
+            없던 시절의 행(`rows.ts` 의 `?? null`)에서는 셋 다 null 이라,
+            빈 줄을 늘어놓는 대신 진단을 원래 다섯 줄로 되돌린다.
+          */}
+          {state?.mode && (
+            <Row label="지금 모드">
+              <span>{state.mode === 'qa' ? 'QA 중' : '쉬는 중'}</span>
+            </Row>
+          )}
+          {state?.nextExpectedPollAt && (
+            <Row label="다음 확인 예정">
+              <span className="font-mono text-xs tabular-nums">
+                {formatClock(state.nextExpectedPollAt, now)}
+              </span>
+            </Row>
+          )}
+          {state?.lastRunUrl && (
+            <Row label="실행 로그">
+              <a
+                className="inline-flex items-center gap-1 text-blue-700 underline decoration-blue-700/40 underline-offset-2 dark:text-blue-300 dark:decoration-blue-300/40"
+                href={state.lastRunUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                실행 로그 열기 <ExternalLinkIcon />
+              </a>
+            </Row>
+          )}
         </dl>
         {/*
           "지금 실행"은 여기 있다. 배치는 1분마다 자동으로 도니 이 버튼이
@@ -1764,7 +1803,9 @@ export function HealthBadge({
               {/* 갱신(RefreshCw)과 다른 모양을 쓴다. 같은 아이콘이 돌면
                   화면을 다시 읽는 중인지 배치가 도는 중인지 구분되지 않는다. */}
               {running ? <Loader2 className="animate-spin" /> : <Play />}
-              {running ? '실행 중 · 약 40초' : '1분 기다리지 않고 지금 실행'}
+              {running
+                ? '실행 중 · 끝나면 다시 읽습니다'
+                : '1분 기다리지 않고 지금 실행'}
             </Button>
           </div>
         )}
