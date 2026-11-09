@@ -14,12 +14,13 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   extractGitlabOrigin,
   extractGitlabProjectPath,
-  getTargetBranchPrefixes,
+  getGitlabLabelFilter,
   type DeployType,
 } from '@/lib/constants/deploy-room';
 import {
   getAssigneeColor,
   getInitial,
+  matchesLabel,
   normalizeName,
   type AssigneeColor,
 } from '@/lib/services/deploy-room/utils';
@@ -65,16 +66,18 @@ interface GitlabMrPayload {
   assignees?: Array<{ name?: string }>;
 }
 
-async function fetchGitlabMrsByBranch(
+const MAX_PAGES = 5;
+
+async function fetchGitlabMrsPage(
   origin: string,
   projectPath: string,
   gitlabToken: string,
-  targetBranch: string
+  page: number
 ): Promise<GitlabMrPayload[]> {
   const params = new URLSearchParams({
     per_page: '100',
     state: 'all',
-    target_branch: targetBranch,
+    page: String(page),
   });
   const res = await fetch(
     `${origin}/api/v4/projects/${encodeURIComponent(projectPath)}/merge_requests?${params}`,
@@ -90,26 +93,30 @@ async function fetchGitlabMrsByBranch(
 async function fetchGitlabMrs(
   projectUrl: string,
   gitlabToken: string,
-  targetBranchCandidates: string[]
+  labelFilter: string
 ): Promise<ImportedMr[]> {
   const projectPath = extractGitlabProjectPath(projectUrl);
   const origin = extractGitlabOrigin(projectUrl);
 
-  // 두 날짜 형식을 각각 target_branch 로 조회 후 병합 (iid 기준 중복 제거)
-  const results = await Promise.all(
-    targetBranchCandidates.map((branch) =>
-      fetchGitlabMrsByBranch(origin, projectPath, gitlabToken, branch)
-    )
-  );
+  // 라벨 표기가 사용자마다 달라 서버 필터(정확 일치) 대신 페이지를 받아 로컬에서 정규화 매칭한다
+  const matched: GitlabMrPayload[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const mrs = await fetchGitlabMrsPage(
+      origin,
+      projectPath,
+      gitlabToken,
+      page
+    );
+    matched.push(
+      ...mrs.filter(
+        (mr) =>
+          mr.state !== 'closed' && matchesLabel(mr.labels ?? [], labelFilter)
+      )
+    );
+    if (mrs.length < 100) break;
+  }
 
-  const seen = new Set<number>();
-  const merged = results.flat().filter((mr) => {
-    if (mr.state === 'closed' || seen.has(mr.iid)) return false;
-    seen.add(mr.iid);
-    return true;
-  });
-
-  return merged.map((mr) => ({
+  return matched.map((mr) => ({
     gitlab_project_path: projectPath,
     mr_iid: mr.iid,
     title: mr.title,
@@ -221,10 +228,11 @@ export function MrPanel({
       return;
     }
 
-    const targetBranchPrefixes = getTargetBranchPrefixes(
-      (session.deployType ?? 'regular') as DeployType,
-      session.deployDate
-    );
+    const labelFilter =
+      getGitlabLabelFilter(
+        (session.deployType ?? 'regular') as DeployType,
+        session.deployDate
+      ) ?? '';
 
     setImporting(true);
     try {
@@ -234,7 +242,7 @@ export function MrPanel({
           const projectMrs = await fetchGitlabMrs(
             projectUrl,
             gitlabToken,
-            targetBranchPrefixes
+            labelFilter
           );
           allMrs.push(...projectMrs);
         } catch (error) {
@@ -248,12 +256,8 @@ export function MrPanel({
           toast.error('가져올 MR이 없습니다');
           return;
         }
-        const filterDesc =
-          targetBranchPrefixes.length > 0
-            ? `브랜치 "${targetBranchPrefixes.join('" 또는 "')}*"`
-            : '전체';
         const ok = confirm(
-          `${filterDesc} 매칭 MR이 0건입니다.\n기존 ${mrs.length}건을 모두 비울까요?`
+          `라벨 "${labelFilter}" 매칭 MR이 0건입니다.\n기존 ${mrs.length}건을 모두 비울까요?`
         );
         if (!ok) return;
       }
