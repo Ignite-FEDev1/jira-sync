@@ -24,12 +24,17 @@ import { recordTimeline } from './timeline.service';
 import { importMrsForSession } from './gitlab.service';
 import { parseConfluenceTasks } from './confluence.service';
 
-export async function listSessions(): Promise<DeployRoomSession[]> {
-  const { data, error } = await dbServer
+export async function listSessions(
+  limit?: number,
+  offset = 0
+): Promise<DeployRoomSession[]> {
+  let query = dbServer
     .from('deploy_room_sessions')
     .select('*')
     .order('deploy_date', { ascending: false })
     .order('created_at', { ascending: false });
+  if (limit !== undefined) query = query.range(offset, offset + limit - 1);
+  const { data, error } = await query;
 
   if (error) throw new Error(`세션 목록 조회 실패: ${error.message}`);
   return (data as SessionRow[]).map(toSession);
@@ -39,10 +44,11 @@ export async function listSessions(): Promise<DeployRoomSession[]> {
  * 세션 목록 + 진행률(완료 항목수 / 전체 항목수) 일괄 계산.
  * 정책은 상세 페이지의 getAggregate와 동일 (assignee별 expected participants 모두 done 이어야 완료).
  */
-export async function listSessionsWithProgress(): Promise<
-  DeployRoomSessionWithProgress[]
-> {
-  const sessions = await listSessions();
+export async function listSessionsWithProgress(
+  limit?: number,
+  offset = 0
+): Promise<DeployRoomSessionWithProgress[]> {
+  const sessions = await listSessions(limit, offset);
   if (sessions.length === 0) return [];
 
   const sessionIds = sessions.map((s) => s.id);
