@@ -46,11 +46,15 @@ interface TeamOption {
   name: string;
 }
 
+const PAGE_SIZE = 6;
+
 export default function DeployRoomListPage() {
   const { currentUser } = useCurrentUser();
   const router = useRouter();
   const [sessions, setSessions] = useState<DeployRoomSessionWithProgress[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
 
   // 시나리오 + 팀 목록
@@ -68,13 +72,20 @@ export default function DeployRoomListPage() {
   const [submitting, setSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const loadSessions = async () => {
-    setLoading(true);
+  const loadSessions = async (append = false) => {
+    if (append) setLoadingMore(true);
+    else setLoading(true);
     try {
-      const res = await fetch('/api/deploy-room/sessions');
+      const offset = append ? sessions.length : 0;
+      const res = await fetch(
+        `/api/deploy-room/sessions?limit=${PAGE_SIZE}&offset=${offset}`
+      );
       const json = await res.json();
       if (json.success) {
-        setSessions(json.sessions);
+        setSessions((prev) =>
+          append ? [...prev, ...json.sessions] : json.sessions
+        );
+        setHasMore(!!json.hasMore);
       } else {
         toast.error(`목록 조회 실패: ${json.error}`);
       }
@@ -84,6 +95,7 @@ export default function DeployRoomListPage() {
       );
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   };
 
@@ -300,6 +312,18 @@ export default function DeployRoomListPage() {
                 </div>
               );
             })}
+          </div>
+        )}
+        {hasMore && (
+          <div className="mt-6 text-center">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => loadSessions(true)}
+              disabled={loadingMore}
+            >
+              {loadingMore ? '불러오는 중…' : '더보기'}
+            </Button>
           </div>
         )}
       </div>
