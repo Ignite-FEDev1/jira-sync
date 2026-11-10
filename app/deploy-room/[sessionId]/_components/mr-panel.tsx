@@ -14,13 +14,12 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   extractGitlabOrigin,
   extractGitlabProjectPath,
-  getGitlabLabelFilter,
+  getTargetBranchPrefixes,
   type DeployType,
 } from '@/lib/constants/deploy-room';
 import {
   getAssigneeColor,
   getInitial,
-  matchesLabel,
   normalizeName,
   type AssigneeColor,
 } from '@/lib/services/deploy-room/utils';
@@ -66,18 +65,16 @@ interface GitlabMrPayload {
   assignees?: Array<{ name?: string }>;
 }
 
-const MAX_PAGES = 5;
-
-async function fetchGitlabMrsPage(
+async function fetchGitlabMrsByBranch(
   origin: string,
   projectPath: string,
   gitlabToken: string,
-  page: number
+  targetBranch: string
 ): Promise<GitlabMrPayload[]> {
   const params = new URLSearchParams({
     per_page: '100',
     state: 'all',
-    page: String(page),
+    target_branch: targetBranch,
   });
   const res = await fetch(
     `${origin}/api/v4/projects/${encodeURIComponent(projectPath)}/merge_requests?${params}`,
@@ -90,33 +87,44 @@ async function fetchGitlabMrsPage(
   return res.json() as Promise<GitlabMrPayload[]>;
 }
 
+/**
+ * GitLab 프로젝트에서 "머지 타겟 브랜치" 기준으로 MR을 가져온다.
+ *
+ * [변경 이력 - 라벨 기준으로 되돌리지 말 것]
+ * 과거 배포방은 GitLab 라벨(예: 정기배포(yyMMdd))로 MR을 가져왔다.
+ * 그러나 라벨 기준은 stage 머지 때 붙인 라벨이나 잘못 붙인 라벨의 MR까지
+ * 함께 불러와 배포 대상이 오염되었고, 누락/오탐을 막기 위해 타겟 브랜치 기준으로 변경되었다.
+ * (2026-11 라벨 기준으로 되돌렸다가 동일 사유로 다시 타겟 브랜치로 복원)
+ *
+ * 정기배포 날짜가 바뀌어 자동 생성된 브랜치명(release/yyMMdd 등)과
+ * 실제 타겟 브랜치가 다른 경우에는, 사용자가 UI에서 타겟 브랜치명을 직접 입력해
+ * 해당 브랜치로 조회할 수 있다 (customBranch).
+ *
+ * @param targetBranchCandidates 조회할 타겟 브랜치명 목록. 각각 target_branch 정확 일치로 조회 후 병합한다.
+ */
 async function fetchGitlabMrs(
   projectUrl: string,
   gitlabToken: string,
-  labelFilter: string
+  targetBranchCandidates: string[]
 ): Promise<ImportedMr[]> {
   const projectPath = extractGitlabProjectPath(projectUrl);
   const origin = extractGitlabOrigin(projectUrl);
 
-  // 라벨 표기가 사용자마다 달라 서버 필터(정확 일치) 대신 페이지를 받아 로컬에서 정규화 매칭한다
-  const matched: GitlabMrPayload[] = [];
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    const mrs = await fetchGitlabMrsPage(
-      origin,
-      projectPath,
-      gitlabToken,
-      page
-    );
-    matched.push(
-      ...mrs.filter(
-        (mr) =>
-          mr.state !== 'closed' && matchesLabel(mr.labels ?? [], labelFilter)
-      )
-    );
-    if (mrs.length < 100) break;
-  }
+  // 두 날짜 형식을 각각 target_branch 로 조회 후 병합 (iid 기준 중복 제거)
+  const results = await Promise.all(
+    targetBranchCandidates.map((branch) =>
+      fetchGitlabMrsByBranch(origin, projectPath, gitlabToken, branch)
+    )
+  );
 
-  return matched.map((mr) => ({
+  const seen = new Set<number>();
+  const merged = results.flat().filter((mr) => {
+    if (mr.state === 'closed' || seen.has(mr.iid)) return false;
+    seen.add(mr.iid);
+    return true;
+  });
+
+  return merged.map((mr) => ({
     gitlab_project_path: projectPath,
     mr_iid: mr.iid,
     title: mr.title,
@@ -174,6 +182,7 @@ export function MrPanel({
   onMrsImported,
 }: Props) {
   const [importing, setImporting] = useState(false);
+  const [customBranch, setCustomBranch] = useState('');
   const [approvals, setApprovals] = useState<Record<string, ApprovalState>>({});
 
   const loadApprovals = async (mrsOverride?: DeployRoomMr[]) => {
@@ -228,11 +237,14 @@ export function MrPanel({
       return;
     }
 
-    const labelFilter =
-      getGitlabLabelFilter(
-        (session.deployType ?? 'regular') as DeployType,
-        session.deployDate
-      ) ?? '';
+    // 직접 입력한 타겟 브랜치가 있으면 자동 생성 브랜치명 대신 사용한다
+    const manualBranch = customBranch.trim();
+    const targetBranchPrefixes = manualBranch
+      ? [manualBranch]
+      : getTargetBranchPrefixes(
+          (session.deployType ?? 'regular') as DeployType,
+          session.deployDate
+        );
 
     setImporting(true);
     try {
@@ -242,7 +254,7 @@ export function MrPanel({
           const projectMrs = await fetchGitlabMrs(
             projectUrl,
             gitlabToken,
-            labelFilter
+            targetBranchPrefixes
           );
           allMrs.push(...projectMrs);
         } catch (error) {
@@ -256,8 +268,12 @@ export function MrPanel({
           toast.error('가져올 MR이 없습니다');
           return;
         }
+        const filterDesc =
+          targetBranchPrefixes.length > 0
+            ? `브랜치 "${targetBranchPrefixes.join('" 또는 "')}*"`
+            : '전체';
         const ok = confirm(
-          `라벨 "${labelFilter}" 매칭 MR이 0건입니다.\n기존 ${mrs.length}건을 모두 비울까요?`
+          `${filterDesc} 매칭 MR이 0건입니다.\n기존 ${mrs.length}건을 모두 비울까요?`
         );
         if (!ok) return;
       }
@@ -303,6 +319,20 @@ export function MrPanel({
           </span>
         </div>
         <div className="flex items-center gap-3">
+          {templateGitlabProjects.length > 0 && (
+            <input
+              type="text"
+              value={customBranch}
+              onChange={(e) => setCustomBranch(e.target.value)}
+              placeholder="타겟 브랜치 직접 입력"
+              title={
+                '기본값: 배포방의 유형·날짜로 자동 생성한 타겟 브랜치(예: release/261109, release/20261109)의 MR을 가져옵니다.\n' +
+                '배포 날짜가 바뀌는 등 실제 타겟 브랜치명이 다르면 여기에 브랜치명을 입력하세요.\n' +
+                '라벨이 아닌 "머지 타겟 브랜치" 기준인 이유: 라벨 기준은 stage 머지용·잘못 붙인 라벨의 MR까지 불러와 누락/오탐이 생겼기 때문입니다.'
+              }
+              className="h-7 w-44 rounded-md border border-slate-200 px-2 text-xs placeholder:text-slate-400"
+            />
+          )}
           {templateGitlabProjects.length > 0 && (
             <Button
               variant="outline"

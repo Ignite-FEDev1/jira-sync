@@ -2,7 +2,6 @@ import https from 'https';
 import axios from 'axios';
 import { dbServer } from '@/lib/db';
 import { extractGitlabProjectPath } from '@/lib/constants/deploy-room';
-import { matchesLabel } from './utils';
 import { recordTimeline } from './timeline.service';
 
 // 사내망 SSL 회피 (Jira 서비스와 동일 패턴)
@@ -30,34 +29,49 @@ function getGitlabConfig(): { baseUrl: string; token: string } {
 }
 
 /**
- * 특정 GitLab 프로젝트의 open MR 목록 조회.
- * labelFilter를 넘기면 로컬에서 정규화 비교로 필터링한다.
- * (공백, 띄어쓰기 차이를 허용)
+ * 특정 GitLab 프로젝트에서 "머지 타겟 브랜치" 기준으로 MR 목록을 조회한다.
+ *
+ * [변경 이력 - 라벨 기준으로 되돌리지 말 것]
+ * 라벨(정기배포(yyMMdd) 등) 기준은 stage 머지 때 붙인 라벨이나 잘못 붙인 라벨의 MR까지
+ * 함께 불러와 누락/오탐을 일으켜 타겟 브랜치 기준으로 변경되었다.
+ * 클라이언트의 'MR 가져오기'(mr-panel.tsx)와 동일한 기준을 사용한다.
+ *
+ * 각 타겟 브랜치명을 target_branch 정확 일치로 조회한 뒤 iid 기준으로 중복을 제거하고,
+ * closed 상태(머지 없이 닫힌 MR)는 제외한다.
  */
-export async function fetchOpenMergeRequests(
+export async function fetchMergeRequestsByTargetBranches(
   projectUrlOrPath: string,
-  labelFilter?: string
+  targetBranches: readonly string[]
 ): Promise<GitlabMergeRequest[]> {
   const { baseUrl, token } = getGitlabConfig();
   const projectPath = extractGitlabProjectPath(projectUrlOrPath);
   const encoded = encodeURIComponent(projectPath);
 
-  const { data } = await axios.get<GitlabMergeRequest[]>(
-    `${baseUrl}/api/v4/projects/${encoded}/merge_requests`,
-    {
-      params: {
-        state: 'opened',
-        per_page: 100,
-      },
-      headers: { 'PRIVATE-TOKEN': token },
-      httpsAgent,
-      timeout: 15000,
-    }
+  const results = await Promise.all(
+    targetBranches.map(async (targetBranch) => {
+      const { data } = await axios.get<GitlabMergeRequest[]>(
+        `${baseUrl}/api/v4/projects/${encoded}/merge_requests`,
+        {
+          params: {
+            state: 'all',
+            per_page: 100,
+            target_branch: targetBranch,
+          },
+          headers: { 'PRIVATE-TOKEN': token },
+          httpsAgent,
+          timeout: 15000,
+        }
+      );
+      return data;
+    })
   );
 
-  if (!labelFilter) return data;
-
-  return data.filter((mr) => matchesLabel(mr.labels ?? [], labelFilter));
+  const seen = new Set<number>();
+  return results.flat().filter((mr) => {
+    if (mr.state === 'closed' || seen.has(mr.iid)) return false;
+    seen.add(mr.iid);
+    return true;
+  });
 }
 
 interface ImportResult {
@@ -66,15 +80,15 @@ interface ImportResult {
 }
 
 /**
- * 세션의 템플릿 프로젝트들로부터 Open MR을 가져와 deploy_room_mrs에 저장.
- * labelFilter를 넘기면 해당 라벨이 달린 MR만 가져온다 (정규화 매칭).
+ * 세션의 템플릿 프로젝트들로부터 MR을 가져와 deploy_room_mrs에 저장.
+ * targetBranches에 해당하는 타겟 브랜치의 MR만 가져온다 (라벨 기준 아님. fetchMergeRequestsByTargetBranches 참고).
  * 일부 프로젝트 실패해도 전체 실패하지 않고 타임라인에 기록한다.
  */
 export async function importMrsForSession(
   sessionId: string,
   projectUrls: readonly string[],
-  actorUserId?: string,
-  labelFilter?: string
+  targetBranches: readonly string[],
+  actorUserId?: string
 ): Promise<ImportResult> {
   const allRows: Array<{
     session_id: string;
@@ -93,7 +107,10 @@ export async function importMrsForSession(
 
   for (const projectUrl of projectUrls) {
     try {
-      const mrs = await fetchOpenMergeRequests(projectUrl, labelFilter);
+      const mrs = await fetchMergeRequestsByTargetBranches(
+        projectUrl,
+        targetBranches
+      );
       const projectPath = extractGitlabProjectPath(projectUrl);
       for (const mr of mrs) {
         allRows.push({
@@ -107,7 +124,7 @@ export async function importMrsForSession(
           source_branch: mr.source_branch,
           target_branch: mr.target_branch,
           included: false,
-          status: 'pending',
+          status: mr.state === 'merged' ? 'merged' : 'pending',
         });
       }
     } catch (error) {

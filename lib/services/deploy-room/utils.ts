@@ -116,17 +116,3 @@ export function formatTime(iso: string): string {
     minute: '2-digit',
   });
 }
-
-// ---- GitLab 라벨 매칭 ----
-// "비정기 배포 ( 260416 )" 같은 표기 변형도 허용
-
-/** 공백·괄호 등 구분 기호를 제거하고 소문자로 변환 ("정기배포 (261109)" == "정기배포(261109)") */
-export function normalizeLabel(label: string): string {
-  return label.replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase();
-}
-
-/** MR의 현재 라벨 목록에 기대 라벨이 포함되어 있는지 (정규화 매칭) */
-export function matchesLabel(mrLabels: string[], expected: string): boolean {
-  const norm = normalizeLabel(expected);
-  return mrLabels.some((l) => normalizeLabel(l) === norm);
-}
