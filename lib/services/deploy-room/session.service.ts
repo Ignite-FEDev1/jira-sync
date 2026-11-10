@@ -9,7 +9,7 @@ import type {
 } from '@/lib/types/deploy-room';
 import {
   DEFAULT_TEAM_ID,
-  getGitlabLabelFilter,
+  getTargetBranchPrefixes,
   type DeployType,
 } from '@/lib/constants/deploy-room';
 import {
@@ -270,13 +270,14 @@ export async function createSession(
   });
 
   const deployType = (req.deployType ?? 'regular') as DeployType;
-  const labelFilter = getGitlabLabelFilter(deployType, req.deployDate);
+  // 라벨이 아닌 타겟 브랜치 기준 (사유는 getTargetBranchPrefixes JSDoc 참고)
+  const targetBranches = getTargetBranchPrefixes(deployType, req.deployDate);
   try {
     await importMrsForSession(
       session.id,
       template.gitlabProjects,
-      req.createdBy,
-      labelFilter ?? undefined
+      targetBranches,
+      req.createdBy
     );
   } catch (error) {
     console.error('[deploy-room] GitLab MR import 실패:', error);

@@ -127,17 +127,34 @@ export const MR_STATUS_LABELS: Record<DeployRoomMrStatus, string> = {
 // ---------------- 라벨 / 경로 변환 ----------------
 
 /**
- * deployDate(YYYY-MM-DD) + deployType → GitLab 라벨 필터 문자열
+ * deployType + deployDate → GitLab MR 타겟브랜치 prefix 목록
+ *
+ * 배포방 MR 가져오기의 기준은 라벨이 아니라 "머지 타겟 브랜치"이다.
+ * 라벨 기준은 stage 머지 때 붙인 라벨·잘못 붙인 라벨의 MR까지 불러와 누락/오탐을 일으켜 타겟 브랜치로 변경되었다.
+ * 다시 라벨 기준으로 되돌리지 말 것. 날짜 변경 등으로 브랜치명이 다른 경우는 UI의 타겟 브랜치 직접 입력으로 대응한다.
+ * 날짜 형식이 yyMMdd(261007)와 yyyyMMdd(20261007) 두 가지 모두 사용될 수 있으므로 둘 다 반환한다.
+ * GitLab API에는 target_branch 정확 일치로 전달된다(접미사가 붙은 브랜치는 UI에서 직접 입력).
+ *
+ * 예)
+ * - 정기배포(regular), 2026-10-07 → ['release/261007', 'release/20261007']
+ * - 비정기배포(adhoc), 2026-10-07 → ['adhoc/261007', 'adhoc/20261007']
+ * - 핫픽스(hotfix), 2026-10-07 → ['hotfix/261007', 'hotfix/20261007']
  */
-export function getGitlabLabelFilter(
+export function getTargetBranchPrefixes(
   deployType: DeployType,
   deployDate: string
-): string | null {
-  const yyMMdd = deployDateToYYMMDD(deployDate);
-  if (deployType === 'regular') return `정기배포(${yyMMdd})`;
-  if (deployType === 'adhoc') return `비정기배포(${yyMMdd})`;
-  if (deployType === 'hotfix') return `핫픽스(${yyMMdd})`;
-  return null;
+): string[] {
+  let typePrefix: string;
+  if (deployType === 'regular') typePrefix = 'release/';
+  else if (deployType === 'adhoc') typePrefix = 'adhoc/';
+  else if (deployType === 'hotfix') typePrefix = 'hotfix/';
+  else return [];
+
+  const [year, month, day] = deployDate.split('-');
+  const yyMMdd = year.slice(2) + month + day; // '261007'
+  const yyyyMMdd = year + month + day; // '20261007'
+
+  return [`${typePrefix}${yyMMdd}`, `${typePrefix}${yyyyMMdd}`];
 }
 
 /** 배포일(YYYY-MM-DD) → yyMMdd 변환 (타이틀 자동생성용) */
