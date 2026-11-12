@@ -25,6 +25,7 @@ const createIssueTypeIdCache: Map<string, string> = new Map();
  */
 const PREFERRED_ISSUETYPE_NAMES: Record<string, string[]> = {
   AUTOWAY: ['작업', 'Task', '업무', '스토리', 'Story', '버그', 'Bug'],
+  MEMBERSHIP: ['Dev Task', '작업', 'Task', '스토리', 'Story', '버그', 'Bug'],
 };
 
 const DEFAULT_PREFERRED_NAMES = [
@@ -47,7 +48,7 @@ export class HMGSyncService {
   /**
    * FEHG 부모 에픽이 있으면 대상 프로젝트의 동일 이름 에픽을 찾거나 신규 생성해서
    * mappedFields에 Epic Link(customfield_10014)를 주입.
-   * 규칙: target summary = "[FEHG] " + FEHG 부모 summary (이미 [FEHG] 시작이면 그대로)
+   * 규칙: target summary = "[FE] " + FEHG 부모 summary ([FEHG]/[FE] 접두사는 제거 후 부착)
    */
   private async injectEpicLink(
     fehgTicket: JiraIssue,
@@ -417,7 +418,8 @@ export class HMGSyncService {
   }
 
   /**
-   * 소스 티켓 원본 링크 필드를 반환 (mappedFields에 병합용)
+   * 소스 티켓 키 필드를 반환 (mappedFields에 병합용)
+   * - URL 대신 티켓 키 텍스트 저장 (대상 프로젝트 권한만 있는 사용자도 값 확인 가능)
    */
   private getSourceLinkFields(
     fehgKey: string,
@@ -425,7 +427,7 @@ export class HMGSyncService {
   ): Record<string, string> {
     const sourceLinkField = profileInfo?.sourceLinkField;
     if (!sourceLinkField) return {};
-    return { [sourceLinkField]: `${JIRA_ENDPOINTS.IGNITE}/browse/${fehgKey}` };
+    return { [sourceLinkField]: fehgKey };
   }
 
   /**
