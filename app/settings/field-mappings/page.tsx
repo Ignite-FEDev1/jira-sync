@@ -1321,7 +1321,7 @@ export default function FieldMappingsPage() {
                   )}
                 </div>
                 <p className="text-[11px] text-muted-foreground">
-                  타겟(HMG) 티켓에서 소스 티켓 원본 링크를 저장할 텍스트/URL 타입 커스텀 필드를 선택하세요.
+                  타겟(HMG) 티켓에서 소스 티켓 키(예: FEHG-1234)를 텍스트로 저장할 커스텀 필드를 선택하세요.
                 </p>
               </div>
 

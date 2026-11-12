@@ -417,7 +417,8 @@ export class HMGSyncService {
   }
 
   /**
-   * 소스 티켓 원본 링크 필드를 반환 (mappedFields에 병합용)
+   * 소스 티켓 키 필드를 반환 (mappedFields에 병합용)
+   * - URL 대신 티켓 키 텍스트 저장 (대상 프로젝트 권한만 있는 사용자도 값 확인 가능)
    */
   private getSourceLinkFields(
     fehgKey: string,
@@ -425,7 +426,7 @@ export class HMGSyncService {
   ): Record<string, string> {
     const sourceLinkField = profileInfo?.sourceLinkField;
     if (!sourceLinkField) return {};
-    return { [sourceLinkField]: `${JIRA_ENDPOINTS.IGNITE}/browse/${fehgKey}` };
+    return { [sourceLinkField]: fehgKey };
   }
 
   /**
