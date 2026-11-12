@@ -2,12 +2,12 @@
 //
 // 조회 순서:
 //   1단계: FEHG 에픽 customfield_10306 URL → HMG key 추출 (ID 기반)
-//   2단계: [FEHG] 접두사 summary 매칭 (기존 에픽 backward compat) + URL 저장
-//   3단계: 신규 생성 ([FEHG] 접두사 포함) + URL 저장
+//   2단계: [FE] 접두사 summary 매칭 (구 [FEHG] 접두사 에픽 backward compat) + URL 저장
+//   3단계: 신규 생성 ([FE] 접두사 포함) + URL 저장
 //   - 동일 에픽에 대한 동시 요청은 단일 Promise로 합침 (중복 생성 방지)
 //   - 매칭/생성 완료 후 FEHG 부모 에픽의 상태를 대상 에픽에도 동기화 (세션당 1회)
 //   - 대상 에픽이 closed(statusCategory.key === 'done') 상태면 transition 스킵 (보호 정책)
-//   - 1단계 매칭 시 HMG 에픽명이 "[FEHG] {FEHG 에픽명}"과 다르면 HMG 쪽을 업데이트 (FEHG → HMG 단방향)
+//   - 1단계 매칭 시 HMG 에픽명이 "[FE] {FEHG 에픽명}"과 다르면 HMG 쪽을 업데이트 (FEHG → HMG 단방향)
 
 import { jira } from '@/lib/services/jira';
 import { JIRA_ENDPOINTS, IGNITE_CUSTOM_FIELDS } from '@/lib/constants/jira';
@@ -42,10 +42,26 @@ export function clearEpicCache() {
   syncedStatusEpicKeys.clear();
 }
 
+const TARGET_EPIC_PREFIX = '[FE]';
+const LEGACY_TARGET_EPIC_PREFIX = '[FEHG]';
+
+// 에픽명 앞의 [FEHG] 또는 [FE] 접두사 제거 (접두사가 중복으로 붙는 것 방지)
+function stripTargetEpicPrefix(summary: string): string {
+  const trimmed = summary.trim();
+  for (const prefix of [LEGACY_TARGET_EPIC_PREFIX, TARGET_EPIC_PREFIX]) {
+    if (trimmed.startsWith(prefix)) return trimmed.slice(prefix.length).trim();
+  }
+  return trimmed;
+}
+
+// HMG 대상 에픽명 생성: "[FE] {FEHG 에픽명}"
+function buildTargetSummary(fehgParentSummary: string): string {
+  return `${TARGET_EPIC_PREFIX} ${stripTargetEpicPrefix(fehgParentSummary)}`;
+}
+
 // backward compat: 기존 HMG 에픽 중 [FEHG] 접두사로 생성된 것 매칭용
 function buildLegacyTargetSummary(fehgParentSummary: string): string {
-  const trimmed = fehgParentSummary.trim();
-  return trimmed.startsWith('[FEHG]') ? trimmed : `[FEHG] ${trimmed}`;
+  return `${LEGACY_TARGET_EPIC_PREFIX} ${stripTargetEpicPrefix(fehgParentSummary)}`;
 }
 
 // FEHG 에픽 customfield_10306에 저장된 URL에서 HMG key 추출
@@ -277,11 +293,13 @@ export async function ensureTargetEpic(
       );
       if (storedKey) {
         logger.info(`에픽 ID 기반 매칭: ${fehgParent.key} → ${storedKey}`);
-        // HMG 에픽명이 "[FEHG] {FEHG 에픽명}"과 다르면 동기화
-        const expectedSummary = buildLegacyTargetSummary(fehgParent.summary);
+        // HMG 에픽명이 "[FE] {FEHG 에픽명}"과 다르면 동기화
+        const expectedSummary = buildTargetSummary(fehgParent.summary);
         const hmgEpic = await jira.hmg.getIssue(storedKey, ['summary']);
         if (hmgEpic.success && hmgEpic.data) {
-          const currentSummary = hmgEpic.data.fields.summary as string | undefined;
+          const currentSummary = hmgEpic.data.fields.summary as
+            | string
+            | undefined;
           if (currentSummary && currentSummary !== expectedSummary) {
             await jira.hmg.updateIssue(storedKey, {
               fields: { summary: expectedSummary },
@@ -297,9 +315,11 @@ export async function ensureTargetEpic(
 
     const targetEpics = await loadTargetEpics(targetProjectKey, logger);
 
-    // 2단계: (1단계 실패시 fallback) [FEHG] 접두사 summary 매칭 + URL 저장
-    const legacySummary = buildLegacyTargetSummary(fehgParent.summary);
-    const legacyMatch = targetEpics.get(legacySummary);
+    // 2단계: (1단계 실패시 fallback) [FE] 또는 구 [FEHG] 접두사 summary 매칭 + URL 저장
+    const targetSummary = buildTargetSummary(fehgParent.summary);
+    const legacyMatch =
+      targetEpics.get(targetSummary) ??
+      targetEpics.get(buildLegacyTargetSummary(fehgParent.summary));
     if (legacyMatch) {
       logger.info(
         `에픽 레거시 summary 매칭: ${fehgParent.key} → ${legacyMatch}`
@@ -311,14 +331,14 @@ export async function ensureTargetEpic(
       return legacyMatch;
     }
 
-    // 3단계: 신규 생성 ([FEHG] 접두사 포함) + URL 저장
+    // 3단계: 신규 생성 ([FE] 접두사 포함) + URL 저장
     const newKey = await createTargetEpic(
       fehgParent.key,
       targetProjectKey,
-      legacySummary,
+      targetSummary,
       logger
     );
-    if (newKey) targetEpics.set(legacySummary, newKey);
+    if (newKey) targetEpics.set(targetSummary, newKey);
     return newKey;
   })();
 

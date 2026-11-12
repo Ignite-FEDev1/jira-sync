@@ -47,7 +47,7 @@ export class HMGSyncService {
   /**
    * FEHG 부모 에픽이 있으면 대상 프로젝트의 동일 이름 에픽을 찾거나 신규 생성해서
    * mappedFields에 Epic Link(customfield_10014)를 주입.
-   * 규칙: target summary = "[FEHG] " + FEHG 부모 summary (이미 [FEHG] 시작이면 그대로)
+   * 규칙: target summary = "[FE] " + FEHG 부모 summary ([FEHG]/[FE] 접두사는 제거 후 부착)
    */
   private async injectEpicLink(
     fehgTicket: JiraIssue,
