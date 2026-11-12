@@ -25,6 +25,7 @@ const createIssueTypeIdCache: Map<string, string> = new Map();
  */
 const PREFERRED_ISSUETYPE_NAMES: Record<string, string[]> = {
   AUTOWAY: ['작업', 'Task', '업무', '스토리', 'Story', '버그', 'Bug'],
+  MEMBERSHIP: ['Dev Task', '작업', 'Task', '스토리', 'Story', '버그', 'Bug'],
 };
 
 const DEFAULT_PREFERRED_NAMES = [
