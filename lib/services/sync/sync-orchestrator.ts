@@ -349,7 +349,7 @@ export class SyncOrchestrator {
         }
       }
 
-      const parentSummary = ticket.fields.parent?.fields?.summary ?? '';
+      const parentSummary = (ticket.fields.parent?.fields?.summary ?? '').trim();
 
       // 2. AUTOWAY 확인 (link field 또는 에픽 이름 [GW] 접두사)
       if (targetProjects.includes('AUTOWAY')) {
@@ -544,7 +544,7 @@ export class SyncOrchestrator {
       }
 
       // 3. 상위 에픽 이름 prefix로 라우팅 (link field 없을 때만 보강)
-      const parentSummary = ticket.fields.parent?.fields?.summary ?? '';
+      const parentSummary = (ticket.fields.parent?.fields?.summary ?? '').trim();
       if (
         (parentSummary.startsWith('[GW]') ||
           parentSummary.startsWith('[GW-QA지원]')) &&
@@ -596,7 +596,7 @@ export class SyncOrchestrator {
         return ['KQ'];
       }
 
-      const epicSummary = epicResult.data.fields.summary;
+      const epicSummary = (epicResult.data.fields.summary ?? '').trim();
       this.logger.info(`${epicKey}: "${epicSummary}"`);
 
       // 2. Summary에서 프로젝트 prefix 확인 (시작 prefix 우선)

@@ -89,7 +89,7 @@ async function fetchFehgEpicsByPrefix(
     return [];
   }
   const filtered = result.data.issues.filter((iss) => {
-    const s = iss.fields.summary ?? '';
+    const s = (iss.fields.summary ?? '').trim();
     if (prefix === '[GW]')
       return s.startsWith('[GW]') || s.startsWith('[GW-QA지원]');
     return s.startsWith(prefix);
@@ -140,7 +140,7 @@ export async function executeEpicSync(
       return emptySummary();
     }
     const epic = result.data;
-    const summary = epic.fields.summary || '';
+    const summary = (epic.fields.summary || '').trim();
     if (
       summary.startsWith(TARGET_PREFIX.AUTOWAY) ||
       summary.startsWith('[GW-QA지원]')
