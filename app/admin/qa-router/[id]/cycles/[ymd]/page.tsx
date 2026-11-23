@@ -1821,6 +1821,12 @@ function CycleAssignments({
                                 </p>
                               )}
                               <OwnerTrail event={e} instance={instance} />
+                              {e.evidence?.handoff && (
+                                <HandoffLines
+                                  handoff={e.evidence.handoff}
+                                  instance={instance}
+                                />
+                              )}
                             </td>
                           </tr>
                         )}
@@ -2726,6 +2732,54 @@ function FinalOwner({ event }: { event: QaRouterEvent }) {
     <span className="text-xs text-muted-foreground">
       {event.outcome === 'our_team' ? '우리 팀' : '타팀'}
     </span>
+  );
+}
+
+/**
+ * 넘길 곳 꼬리표. 알림에 붙은 두 줄을 그대로 보여 준다.
+ *   - 판정이 아니다. 받은 사람이 BE, 기획으로 넘길 때 볼 이름이다
+ *   - 출처(직접 참조, 명세, 안건)는 이름 위에 올리면 보인다
+ */
+const HANDOFF_SOURCE_LABEL = {
+  ref: '레이블이 가리킨 BE 개발 티켓 담당',
+  'spec+agenda': 'BE 명세 최근 수정자, 정기배포 안건에도 있음',
+  spec: 'BE 명세 최근 수정자',
+  agenda: '정기배포 안건 담당',
+} as const;
+
+function HandoffLines({
+  handoff,
+  instance,
+}: {
+  handoff: NonNullable<JudgeEvidence['handoff']>;
+  instance: 'ignite' | 'hmg';
+}) {
+  if (handoff.be.length === 0 && !handoff.plan) return null;
+  return (
+    <div className="mt-2 flex flex-col gap-1">
+      {handoff.be.length > 0 && (
+        <p>
+          <span className="mr-1 font-medium text-foreground">BE로 넘길 경우</span>
+          {handoff.be.map((p, i) => (
+            <Fragment key={p.accountId}>
+              {i > 0 && ' · '}
+              <span title={HANDOFF_SOURCE_LABEL[p.source]}>{p.name}</span>
+            </Fragment>
+          ))}
+        </p>
+      )}
+      {handoff.plan && (
+        <p className="flex items-center gap-1">
+          <span className="font-medium text-foreground">기획 문의</span>
+          {handoff.plan.name}
+          <IssueLink
+            issueKey={handoff.plan.key}
+            isSystem={false}
+            instance={instance}
+          />
+        </p>
+      )}
+    </div>
   );
 }
 

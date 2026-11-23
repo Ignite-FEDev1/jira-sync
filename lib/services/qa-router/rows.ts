@@ -53,6 +53,9 @@ export type ConfigRow = {
   slack_fallback_channel_id: string | null;
   slack_ops_channel_id: string | null;
   slack_health_channel_id: string | null;
+  /** 마이그레이션 전 DB 에는 없다. */
+  be_spec_root_page_id?: string | null;
+  handoff_menu_aliases?: Record<string, string> | null;
   plan_issue_type_id: string | null;
   dev_issue_type_id: string | null;
   plan_issue_type_name: string | null;
@@ -153,6 +156,8 @@ export function toConfig(r: ConfigRow): QaRouterConfig {
     id: r.id,
     name: r.name,
     enabled: r.enabled,
+    beSpecRootPageId: r.be_spec_root_page_id ?? null,
+    handoffMenuAliases: r.handoff_menu_aliases ?? null,
     jiraInstance: r.jira_instance,
     jiraFilterId: r.jira_filter_id,
     triageAccountId: r.triage_account_id,

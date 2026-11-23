@@ -357,6 +357,7 @@ async function scoreAll(samples: Sample[], d: ScoreDeps): Promise<Scored[]> {
       'assignee',
       'parent',
       'issuetype',
+      'fixVersions',
       ...(d.cfg.coAssigneeField ? [d.cfg.coAssigneeField] : []),
     ]);
     const r = await judge(target, port, {
@@ -369,6 +370,8 @@ async function scoreAll(samples: Sample[], d: ScoreDeps): Promise<Scored[]> {
       devIssueTypes: d.devIssueTypes,
       coAssigneeField: d.cfg.coAssigneeField ?? undefined,
       tiers: d.tiers,
+      // 최근 같은 메뉴를 볼 때 판정 시각 뒤에 생긴 티켓을 못 보게 한다.
+      now: new Date(s.at),
     });
     const expectedIsMember = d.memberIds.has(s.expected);
     // 트리아지를 가리킨 답은 버린다 (변형). 위 `rejectTriage` 주석 참고.

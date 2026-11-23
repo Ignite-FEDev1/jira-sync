@@ -115,7 +115,7 @@ const OURS_REASONS: {
 }[] = [
   {
     reason:
-      '기획 KQ-18427 → 에픽 KQ-17645 「[BO>법인매입] 매입 견적 재요청 흐름 개…」 아래 개발처리 5건 중 3건이 {name} 담당 (최다)',
+      '기획 KQ-18427 → 에픽 KQ-17645 「[BO>법인매입] 매입 견적 재요청 흐름 개…」 아래 개발처리 5건 중 3건이 {name} 담당 (우리 팀 중 최다)',
     via: 'epic',
     evidence: {
       tickets: [
@@ -700,6 +700,8 @@ export function demoConfig(
     id,
     name: 'CPO BO QA (데모)',
     enabled: true,
+    beSpecRootPageId: null,
+    handoffMenuAliases: null,
     jiraInstance: 'ignite',
     jiraFilterId: '12571',
     triageAccountId: TRIAGE,

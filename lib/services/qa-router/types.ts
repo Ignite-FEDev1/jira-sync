@@ -640,6 +640,10 @@ export interface QaRouterConfig {
   id: string;
   name: string;
   enabled: boolean;
+  /** BE 명세 루트 컨플 페이지. null 이면 "넘길 곳" BE 꼬리표를 만들지 않는다. */
+  beSpecRootPageId: string | null;
+  /** QA 메뉴명 → 명세 페이지 이름 보정. `DEFAULT_MENU_ALIASES` 를 덮어쓴다. */
+  handoffMenuAliases: Record<string, string> | null;
 
   jiraInstance: 'ignite' | 'hmg';
   jiraFilterId: string;
@@ -1059,7 +1063,7 @@ export interface QaRouterEvent {
    * 설정 화면이 단계 순서를 보여 주면서도 "이 단계가 실제로 일하고 있나" 는
    * 말하지 못했다.
    */
-  via: JudgeTier | 'routing_map' | 'none' | null;
+  via: JudgeTier | 'routing_map' | 'guess' | 'none' | null;
   notified: boolean;
   reassigned: boolean;
   error: string | null;

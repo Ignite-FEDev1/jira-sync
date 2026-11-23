@@ -81,6 +81,10 @@ interface Body {
   tickIntervalSeconds?: unknown;
   planIssueTypeName?: unknown;
   devIssueTypeName?: unknown;
+  /** BE 명세 루트 컨플 페이지. 넘길 곳 꼬리표의 원천. 비우면 꼬리표 끔. */
+  beSpecRootPageId?: unknown;
+  /** QA 메뉴명 → 명세 페이지 이름. 코드 기본 별칭을 덮어쓴다. null 이면 기본만. */
+  handoffMenuAliases?: unknown;
   /*
     maxTicketsPerTick, heartbeatStaleMinutes 는 받지 않는다.
     발송 상한은 없애서 값 자체가 사라졌고(tick.ts), 응답 없음 기준은 사람이
@@ -144,6 +148,8 @@ export type ConfigField =
   | 'planIssueTypeId'
   | 'devIssueTypeId'
   | 'confluenceDeployRootId'
+  | 'beSpecRootPageId'
+  | 'handoffMenuAliases'
   | 'planCollectHours'
   | 'deployKinds'
   | 'qaScheduleRule'
@@ -462,6 +468,61 @@ function checkPipeline(
         };
       }
       row.confluence_deploy_root_id = id;
+    }
+  }
+
+  /*
+    넘길 곳: BE 명세 루트. 배포대장 루트와 같은 방식으로 주소에서 id 를 뽑는다.
+    비우면 꼬리표를 끈다 (판정과 알림은 그대로).
+  */
+  if (b.beSpecRootPageId !== undefined) {
+    const raw =
+      typeof b.beSpecRootPageId === 'string' ? b.beSpecRootPageId.trim() : '';
+    if (!raw) {
+      row.be_spec_root_page_id = null;
+    } else {
+      const id = raw.match(/\/pages\/(\d+)/)?.[1] ?? raw.match(/^\d+$/)?.[0];
+      if (!id) {
+        return {
+          ok: false,
+          error:
+            'BE 명세 루트 페이지 주소를 붙여넣어 주세요. 예: https://ignitecorp.atlassian.net/wiki/spaces/CPO/pages/24478288/...',
+          field: 'beSpecRootPageId',
+        };
+      }
+      row.be_spec_root_page_id = id;
+    }
+  }
+
+  /*
+    넘길 곳: 메뉴 별칭. `{ 메뉴명: 명세 이름 }`. 빈 칸 쌍은 버리고, 남는 게
+    없으면 null(코드 기본만 쓴다).
+  */
+  if (b.handoffMenuAliases !== undefined) {
+    const v = b.handoffMenuAliases;
+    if (v === null) {
+      row.handoff_menu_aliases = null;
+    } else if (typeof v !== 'object' || Array.isArray(v)) {
+      return {
+        ok: false,
+        error: '메뉴 별칭은 { 메뉴명: 명세 이름 } 형태여야 합니다.',
+        field: 'handoffMenuAliases',
+      };
+    } else {
+      const out: Record<string, string> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        const key = k.trim();
+        const name = typeof val === 'string' ? val.trim() : '';
+        if (key && name) out[key] = name;
+      }
+      if (Object.keys(out).length > 100) {
+        return {
+          ok: false,
+          error: '메뉴 별칭은 100개까지 둘 수 있습니다.',
+          field: 'handoffMenuAliases',
+        };
+      }
+      row.handoff_menu_aliases = Object.keys(out).length > 0 ? out : null;
     }
   }
 
