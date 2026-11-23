@@ -115,7 +115,7 @@ import {
  */
 
 /** 한 번에 한 단계만 편집한다. 둘을 동시에 열면 무엇을 저장하는지 흐려진다. */
-type StageKey = 'find' | 'when' | 'where' | 'cycle' | 'what';
+type StageKey = 'find' | 'when' | 'where' | 'handoff' | 'cycle' | 'what';
 
 export default function QaRouterSettingsPage() {
   const { id } = useParams<{ id: string }>();
@@ -248,6 +248,7 @@ export default function QaRouterSettingsPage() {
   */
   const scopeIssue = !!channelProblem?.includes('channels:read');
   const planSide = t.state?.sideEffects?.plan ?? null;
+  const handoffSide = t.state?.sideEffects?.handoff ?? null;
   /*
     ── 단계별 건수를 흐름도에 안 적는다 ──
 
@@ -393,7 +394,7 @@ export default function QaRouterSettingsPage() {
       </div>
 
       {/*
-        ── 처음 온 사람은 아래 5단계가 왜 1~3, 4~5 로 갈라지는지 모른다 ──
+        ── 처음 온 사람은 아래 6단계가 왜 1~4, 5~6 으로 갈라지는지 모른다 ──
 
         그 답("봇이 도는 갈래가 실제로 둘이다")이 각 그룹 h2 옆 11.5px
         부제로만 있었다 — 스크롤해서 그 h2 까지 가야 보인다. 처음 이
@@ -406,12 +407,12 @@ export default function QaRouterSettingsPage() {
         <p className="mt-1 text-muted-foreground">
           <b className="font-semibold text-foreground">① 판정 알림</b> · QA
           티켓이 쌓이면 담당자를 찾아 1분마다 Slack 으로 알립니다. 아래{' '}
-          <b className="font-medium text-foreground">1~3번</b>이 이 흐름입니다.
+          <b className="font-medium text-foreground">1~4번</b>이 이 흐름입니다.
         </p>
         <p className="mt-0.5 text-muted-foreground">
           <b className="font-semibold text-foreground">② 차수 현황</b> · 이번
           차수 진행률을 세어 하루 2번(아침·마감) 요약을 보냅니다. 아래{' '}
-          <b className="font-medium text-foreground">4~5번</b>이 이 흐름입니다.
+          <b className="font-medium text-foreground">5~6번</b>이 이 흐름입니다.
         </p>
       </div>
 
@@ -663,11 +664,11 @@ export default function QaRouterSettingsPage() {
                 ── 고치는 곳과 보이는 곳을 맞춘다 ──
 
                 수집 시각은 이 단계에서 고치는데(`WhenEditor`) 읽기에는
-                없고 ④에만 떠 있었다. 편집기를 여기로 옮기면서 표시를 안
+                없고 ⑤에만 떠 있었다. 편집기를 여기로 옮기면서 표시를 안
                 따라 옮긴 탓이다 — 저장하고 나면 무엇을 골랐는지 이 단계
                 에서는 확인할 수 없었다.
 
-                ④의 `17시 수집이 아직 안 돌았습니다` 는 그대로 둔다.
+                ⑤의 `17시 수집이 아직 안 돌았습니다` 는 그대로 둔다.
                 그건 설정값이 아니라 **지금 상태**라 차수 현황 쪽 이야기다.
               */}
               <Pill label="수집">
@@ -781,6 +782,64 @@ export default function QaRouterSettingsPage() {
           )}
         </Stage>
 
+        {/* ── ④ 넘길 곳 꼬리표 ───────────────────────────────────── */}
+        <Stage
+          n={4}
+          title="넘길 곳"
+          subtitle="BE, 기획 꼬리표"
+          broken={!!handoffSide?.error}
+          editing={editing === 'handoff'}
+          onEdit={() => requestEditSwitch('handoff')}
+        >
+          {editing === 'handoff' ? (
+            <HandoffEditor
+              config={config}
+              saving={saving}
+              onCancel={close}
+              onSave={patch}
+            />
+          ) : (
+            <>
+              {config.beSpecRootPageId ? (
+                <p className="text-[12.5px]">
+                  레이블에 BE 개발 티켓이 걸린 건과 판정 못 한 건에만 담당자 줄 아래
+                  <b>BE라면</b>, <b>기획</b> 이름을 붙입니다 (멘션 없음, 판정은 그대로)
+                </p>
+              ) : (
+                <p className="text-[12.5px] text-muted-foreground">
+                  꺼짐. BE 명세 루트 페이지를 넣으면 켜집니다
+                </p>
+              )}
+              {config.beSpecRootPageId && (
+                <p className="mt-1.5 flex flex-wrap items-baseline gap-x-1.5 gap-y-1 border-t pt-1.5 text-[11px] text-muted-foreground/80">
+                  <a
+                    className="text-blue-700 underline decoration-blue-700/40 underline-offset-2 dark:text-blue-300 dark:decoration-blue-300/40"
+                    href={`https://ignitecorp.atlassian.net/wiki/spaces/CPO/pages/${config.beSpecRootPageId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    BE 명세 루트
+                  </a>
+                  <span aria-hidden>·</span>
+                  <span>
+                    메뉴 별칭{' '}
+                    {Object.keys(config.handoffMenuAliases ?? {}).length}개 추가
+                  </span>
+                  <span aria-hidden>·</span>
+                  <span>
+                    {handoffSide
+                      ? `마지막 수집 ${formatAgo(handoffSide.at, now)}`
+                      : '아직 수집 없음 (다음 실행 때 모읍니다)'}
+                  </span>
+                </p>
+              )}
+              {handoffSide?.error && (
+                <Live bad>수집 실패 : {handoffSide.error}</Live>
+              )}
+            </>
+          )}
+        </Stage>
+
       </div>
 
       {/* ── [B] 차수 현황 · 하루 2번 ─────────────────────────────── */}
@@ -792,9 +851,9 @@ export default function QaRouterSettingsPage() {
           </p>
         </div>
 
-        {/* ── ④ 차수와 진행을 어떻게 읽나 ─────────────────────────── */}
+        {/* ── ⑤ 차수와 진행을 어떻게 읽나 ─────────────────────────── */}
         <Stage
-          n={4}
+          n={5}
           title="차수와 진행을 어떻게 읽나"
           subtitle="배포대장 · 티켓 타입 · 수집"
           editing={editing === 'cycle'}
@@ -884,9 +943,9 @@ export default function QaRouterSettingsPage() {
           )}
         </Stage>
 
-        {/* ── ⑤ 언제 요약을 보내나 ────────────────────────────────── */}
+        {/* ── ⑥ 언제 요약을 보내나 ────────────────────────────────── */}
         <Stage
-          n={5}
+          n={6}
           title="언제 요약을 보내나"
           subtitle="알림 규칙 한 목록"
           editing={editing === 'what'}
@@ -2967,6 +3026,115 @@ function WhenEditor({
             },
             tickIntervalSeconds: interval,
             planCollectHours: hours,
+          })
+        }
+      />
+    </div>
+  );
+}
+
+/**
+ * 넘길 곳 꼬리표 설정.
+ *   - 루트: BE 명세(기능목록) 페이지들이 모인 컨플 페이지 주소
+ *   - 별칭: QA 제목의 메뉴명과 명세 페이지 이름이 다를 때만 적는다
+ *     (코드 기본 별칭 위에 덮어쓴다)
+ */
+function HandoffEditor({
+  config,
+  saving,
+  onCancel,
+  onSave,
+}: EditorBase & { config: QaRouterConfig }) {
+  const [root, setRoot] = useState(
+    config.beSpecRootPageId
+      ? `https://ignitecorp.atlassian.net/wiki/spaces/CPO/pages/${config.beSpecRootPageId}`
+      : ''
+  );
+  const [rows, setRows] = useState<{ menu: string; spec: string }[]>(() => {
+    const r = Object.entries(config.handoffMenuAliases ?? {}).map(
+      ([menu, spec]) => ({ menu, spec })
+    );
+    return r.length > 0 ? r : [{ menu: '', spec: '' }];
+  });
+  const setRow = (i: number, next: Partial<{ menu: string; spec: string }>) =>
+    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...next } : r)));
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <FieldLabel>BE 명세 루트 페이지</FieldLabel>
+        <Input
+          value={root}
+          onChange={(e) => setRoot(e.target.value)}
+          placeholder="https://ignitecorp.atlassian.net/wiki/spaces/CPO/pages/24478288/..."
+          aria-label="BE 명세 루트 페이지"
+        />
+        <Hint>
+          이 페이지 아래 제목에 &quot;기능목록&quot; 이 든 페이지의 최근 수정자를
+          BE 후보로 씁니다
+          <br />
+          비우면 꼬리표를 끕니다. 판정과 알림은 그대로입니다
+        </Hint>
+      </div>
+      <div>
+        <FieldLabel>메뉴 별칭</FieldLabel>
+        <div className="flex flex-col gap-1.5">
+          {rows.map((r, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <Input
+                value={r.menu}
+                onChange={(e) => setRow(i, { menu: e.target.value })}
+                placeholder="QA 메뉴명 (예: 탁송현황관리)"
+                aria-label={`별칭 ${i + 1} 메뉴명`}
+              />
+              <span aria-hidden className="text-muted-foreground">
+                →
+              </span>
+              <Input
+                value={r.spec}
+                onChange={(e) => setRow(i, { spec: e.target.value })}
+                placeholder="명세 이름 (예: 물류)"
+                aria-label={`별칭 ${i + 1} 명세 이름`}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label={`별칭 ${i + 1} 지우기`}
+                onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
+              >
+                지우기
+              </Button>
+            </div>
+          ))}
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setRows((rs) => [...rs, { menu: '', spec: '' }])}
+            >
+              별칭 추가
+            </Button>
+          </div>
+        </div>
+        <Hint>
+          QA 제목 [BO_메뉴명] 과 명세 페이지 이름이 다를 때만 적습니다
+          <br />
+          기본 별칭(탁송현황관리 → 물류 등)은 이미 들어 있습니다
+        </Hint>
+      </div>
+      <StageActions
+        saving={saving}
+        onCancel={onCancel}
+        onSave={() =>
+          void onSave({
+            beSpecRootPageId: root,
+            handoffMenuAliases: Object.fromEntries(
+              rows
+                .filter((r) => r.menu.trim() && r.spec.trim())
+                .map((r) => [r.menu.trim(), r.spec.trim()])
+            ),
           })
         }
       />

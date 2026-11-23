@@ -30,6 +30,7 @@ import {
   createJiraClient,
   createSlackClient,
 } from '@/lib/services/qa-router/clients';
+import { createWikiPort } from '@/lib/services/qa-router/handoff-collect';
 import { JIRA_ENDPOINTS } from '@/lib/constants/jira';
 
 /**
@@ -192,6 +193,7 @@ async function main() {
             confluence,
             slack,
             jiraBaseUrl: jiraBase,
+            wiki: createWikiPort({ baseUrl: jiraBase, ...creds }),
             log,
           },
           HOLDER

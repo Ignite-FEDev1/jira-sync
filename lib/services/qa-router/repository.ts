@@ -23,6 +23,7 @@ import {
   type EventRow,
   type StateRow,
 } from './rows';
+import type { HandoffSourceRow } from './handoff';
 import type { PlanProgress } from './plan-tickets';
 import type { JiraInstance } from './derive';
 import type {
@@ -698,6 +699,31 @@ export async function lastCycleCollectedAt(
     .maybeSingle();
   if (error) throw new Error(`lastCycleCollectedAt: ${error.message}`);
   return data?.collected_at ?? null;
+}
+
+/** "넘길 곳" 꼬리표 원천 전부. 틱 시작 때 한 번 읽어 메모리에 둔다. */
+export async function listHandoffSources(
+  configId: string
+): Promise<HandoffSourceRow[]> {
+  const { data, error } = await dbServer
+    .from('qa_router_handoff_sources')
+    .select('kind, page_id, title, version, data')
+    .eq('config_id', configId);
+  if (error) throw new Error(`listHandoffSources: ${error.message}`);
+  return (data ?? []) as HandoffSourceRow[];
+}
+
+export async function upsertHandoffSource(
+  configId: string,
+  row: HandoffSourceRow
+): Promise<void> {
+  // 리허설: 쓰지 않는다 (setWritesDisabled).
+  if (writesDisabled) return;
+  const { error } = await dbServer.from('qa_router_handoff_sources').upsert(
+    { config_id: configId, ...row, fetched_at: new Date().toISOString() },
+    { onConflict: 'config_id,kind,page_id' }
+  );
+  if (error) throw new Error(`upsertHandoffSource: ${error.message}`);
 }
 
 /**

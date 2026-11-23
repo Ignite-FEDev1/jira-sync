@@ -625,7 +625,7 @@ test('diffDerived — 첫 파생이면 변경 없음 (알림 안 보냄)', () =>
 // Slack 메시지
 // ─────────────────────────────────────────────────────────────
 
-test('buildRouteMessage — 판정 근거를 사람이 읽는 문장으로 편다', () => {
+test('buildRouteMessage — 제목, 담당자, 근거 한 줄만 보낸다', () => {
   const msg = buildRouteMessage({
     issueKey: 'KQ-18599',
     summary: '[BO_판매차량명의전] 컬럼값이 기획과 상이한 현상',
@@ -636,62 +636,27 @@ test('buildRouteMessage — 판정 근거를 사람이 읽는 문장으로 편�
       slackId: 'U04DLF61U9K',
       path: ['KQ-17647', 'KQ-17645', 'KQ-18230'],
       reason:
-        '기획 KQ-17647 → 에픽 KQ-17645 아래 개발처리 5건 중 3건이 박성찬 담당 (최다)',
+        '기획 KQ-17647 → 에픽 KQ-17645 아래 개발처리 5건 중 3건이 박성찬 담당 (우리 팀 중 최다) · 나머지 2건은 우리 팀 밖 (이상일 2)',
       tier: 1,
     },
     links: { refKq: 'KQ-17647', epic: 'KQ-17645', devKeys: ['KQ-18230'] },
     reassign: { kind: 'kept', triageName: '김가빈' },
   });
 
-  const blocks = msg.blocks as Array<{ type: string; text?: { text: string } }>;
-  assert.deepEqual(
-    blocks.map((b) => b.type),
-    ['section', 'section', 'section', 'divider']
-  );
-  assert.ok(blocks[0].text!.text.includes('<@U04DLF61U9K>'), '멘션이 들어간다');
-  /*
-    티켓 번호와 제목이 한 줄, 담당자는 그 아래 줄이다. 제목이 사람 이름
-    뒤로 밀리면 "무슨 건인가" 를 먼저 못 읽는다.
-  */
+  const blocks = msg.blocks as Array<{ type: string; text?: { text: string }; elements?: { text: string }[] }>;
+  // 근거 불릿, 관련 링크, 개발처리 목록은 차수 화면 몫이다. 스레드에 쌓이면 한 건이 화면 하나를 먹는다.
+  assert.deepEqual(blocks.map((b) => b.type), ['section', 'context', 'divider']);
   const head = blocks[0].text!.text.split('\n');
+  // 무슨 건인가가 먼저, 누구인가는 인용 막대로 뗀 다음 줄
   assert.ok(head[0].includes('KQ-18599') && head[0].includes('컬럼값이'));
-  // `>` 는 Slack 이 왼쪽 세로 막대를 그리는 표시다. 제목과 경계를 만든다.
-  assert.ok(head[1].startsWith('>*예상 담당자*'), '담당자 줄을 인용으로 뗀다');
-  /*
-    'kept' 는 아무 말도 하지 않는다. reassignMode 가 'off' 라 **모든**
-    메시지에 붙던 줄이고, 값이 변하지 않는 문장은 정보가 아니라 배경이다.
-    담당자가 그대로라는 것은 머리글의 `예상 담당자` 가 이미 말한다.
-  */
-  assert.ok(
-    !blocks[0].text!.text.includes('담당자 유지'),
-    '변하지 않는 줄은 넣지 않는다'
-  );
-  /*
-    키만 늘어놓은 경로(`KQ-17647 → KQ-17645 → KQ-18230 → 박성찬`)를 쓰지
-    않는다. 키 세 개로는 그게 기획인지 에픽인지, 왜 그 사람인지 알 수 없다.
-    judge 가 만든 문장을 단계별 불릿으로 편다.
-  */
-  const reason = blocks[1].text!.text;
-  /*
-    머리글과 **같은 칩**(진짜 멘션)을 쓴다. 평문 `@박성찬` 은 검은 글씨라
-    바로 위 파란 칩과 다른 사람처럼 보였다.
-  */
-  assert.ok(
-    reason.includes('왜 <@U04DLF61U9K> 인가'),
-    '근거 제목도 멘션 칩으로 쓴다'
-  );
-  assert.ok(reason.includes('• 기획 '), '단계마다 불릿이 붙는다');
-  assert.ok(
-    reason.includes('개발처리 5건 중 3건이 박성찬 담당 (최다)'),
-    'judge 의 문장이 살아 있어야 한다'
-  );
-  assert.ok(
-    reason.includes('/browse/KQ-17647|KQ-17647'),
-    '문장 속 키는 눌러서 갈 수 있어야 한다'
-  );
-  // Tier 번호는 코드 내부 이름이라 읽는 사람에게 뜻이 없다.
-  assert.ok(!reason.includes('Tier'), 'Tier 번호를 노출하지 않는다');
-  assert.ok(blocks[2].text!.text.includes('[기획]'));
+  assert.equal(head[1], '>*예상 담당자* <@U04DLF61U9K>');
+  // 'kept' 는 매 메시지에 붙던 배경이라 말하지 않는다
+  assert.equal(head.length, 2);
+  // short 가 없으면 reason 의 첫 도막. 팀 밖 명단은 빠지고 키는 눌러서 간다
+  const why = blocks[1].elements![0].text;
+  assert.match(why, /^근거 · 기획 <[^|]+\|KQ-17647> → 에픽 <[^|]+\|KQ-17645> 아래 개발처리 5건 중 3건이 박성찬 담당/);
+  assert.ok(!why.includes('나머지'));
+  assert.ok(!JSON.stringify(blocks).includes('Tier'), 'Tier 번호를 노출하지 않는다');
 });
 
 test('buildRouteMessage — 제목의 Slack 문법을 무력화한다', () => {
@@ -718,7 +683,7 @@ test('buildRouteMessage — 액션 버튼을 넣지 않는다', () => {
   });
   const types = (msg.blocks as Array<{ type: string }>).map((b) => b.type);
   assert.ok(!types.includes('actions'));
-  assert.deepEqual(types, ['section', 'section', 'section', 'divider']);
+  assert.deepEqual(types, ['section', 'context', 'divider']);
 });
 
 test('buildCycleHeader — QA 기간이 없으면 필드를 생략한다', () => {

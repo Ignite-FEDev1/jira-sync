@@ -18,6 +18,7 @@
 
 import type { Classification, Judgement, RelatedLinks } from './message';
 import type { ChangelogEntry } from './triage';
+import type { HandoffHints } from './handoff';
 import type { DerivedMember, JudgeTier } from './types';
 import { JUDGE_TIERS } from './types';
 import type { JiraIssue as BaseJiraIssue } from '@/lib/types/jira';
@@ -290,6 +291,8 @@ export interface EpicMatch {
    * 그걸 알아야 "이 버그가 FE 인가 BE 인가" 를 사람이 판단할 수 있다.
    */
   outsiders: { name: string; count: number }[];
+  /** 후보 중 우리 팀원(담당 또는 공동담당)이 잡은 건 수. 근거 문장의 분모다. */
+  ours: number;
   /** 에픽 제목. 키만 적으면 근거를 읽고도 무슨 일인지 모른다. */
   epicSummary?: string;
   /** 레이블이 가리킨 기획 티켓 제목. 링크 목록에 붙인다. */
@@ -336,6 +339,8 @@ export interface JudgeEvidence {
     모으고, 열에 맞는 것(티켓·제목·담당자)만 행으로 내린다.
   */
   tickets: EvidenceTicket[];
+  /** 넘길 곳 꼬리표. 판정이 아니라 tick 이 알림을 보낼 때 붙인다. */
+  handoff?: HandoffHints;
 }
 
 function tally(
@@ -400,7 +405,27 @@ function quoteSummary(summary: string | undefined, max = 32): string {
  */
 function countPhrase(votes: number, candidates: number, name: string): string {
   if (candidates <= votes) return `${candidates}건 모두 ${name} 담당`;
-  return `${candidates}건 중 ${votes}건이 ${name} 담당 (최다)`;
+  // 센 것은 우리 팀원 표만이다. 그냥 "최다" 라고 쓰면 전체 최다로 읽힌다 (97건 중 1건).
+  return `${candidates}건 중 ${votes}건이 ${name} 담당 (우리 팀 중 최다)`;
+}
+
+/**
+ * 알림에 쓰는 에픽 근거 한 줄. 분모는 **우리 팀 개발만** 센다.
+ *
+ * "97건 중 1건" 은 맞은 판정도 틀린 것처럼 읽힌다. 나머지 96건은 BE 티켓이라
+ * FE 담당을 고르는 데 쓰인 적이 없다. 고른 근거가 된 숫자만 적는다.
+ */
+export function epicShort(epicKey: string, votes: number, ours: number, name: string): string {
+  return ours <= votes
+    ? `에픽 ${epicKey} 의 우리 팀 개발 ${ours}건 모두 ${name} 담당`
+    : `에픽 ${epicKey} 의 우리 팀 개발 ${ours}건 중 ${votes}건 ${name} 담당`;
+}
+
+/** 팀 밖 담당은 상위 2명만 이름을 적는다. 여섯 명을 다 적으면 근거보다 길어진다. */
+export function outsidersPhrase(rest: number, outsiders: { name: string; count: number }[]): string {
+  const top = outsiders.slice(0, 2).map((o) => `${o.name} ${o.count}`).join(', ');
+  const more = outsiders.length > 2 ? ` 외 ${outsiders.length - 2}명` : '';
+  return `나머지 ${rest}건은 우리 팀 밖 (${top}${more})`;
 }
 
 /**
@@ -432,7 +457,16 @@ export async function findViaEpic(
     try {
       // summary 를 같이 받는다. 필드 하나 더 요청할 뿐 왕복은 그대로다 —
       // 이게 없어서 링크 목록이 `[기획] KQ-17670` 키만 보여 주고 있었다.
-      const ref = await jira.getIssue(refKq, ['parent', 'summary']);
+      // 뒤의 넷은 판정이 안 쓴다. 넘길 곳 꼬리표가 같은 응답을 다시 쓰려고 받는다
+      // (tick 이 메모해 둔다). 같은 왕복이라 비용이 없다.
+      const ref = await jira.getIssue(refKq, [
+        'parent',
+        'summary',
+        'issuetype',
+        'assignee',
+        'components',
+        'labels',
+      ]);
       const epicKey = ref.fields?.parent?.key;
       if (!epicKey) continue;
       const epicSummary = ref.fields?.parent?.fields?.summary;
@@ -483,6 +517,11 @@ export async function findViaEpic(
         issueType: win.issueType,
         votes: win.tickets.length,
         candidates: pool.length,
+        ours: pool.filter(
+          (k) =>
+            memberIds.has(k.fields?.assignee?.accountId ?? '') ||
+            memberIds.has(personAt(k.fields, coField)?.accountId ?? '')
+        ).length,
         widened,
         epicSummary,
         refSummary: ref.fields?.summary,
@@ -819,6 +858,48 @@ function jqlValueAt(fields: JiraIssue['fields'], field: string): string | null {
   return null;
 }
 
+/** 이번 차수에 근거가 없을 때 넓혀 볼 기간. */
+export const RECENT_MENU_DAYS = 180;
+
+/**
+ * 같은 메뉴의 최근 티켓 범위. 이번 차수 형제가 아직 아무도 안 맡았을 때 쓴다.
+ *
+ * ── 왜 넓히나 ──
+ *
+ *   QA 첫날은 같은 메뉴 티켓이 한꺼번에 들어와, 이번 차수 형제도 아직 전부
+ *   트리아지에 있다. 그래서 형제 단계가 거의 답하지 못했다.
+ *   실측(2026-11-20, CPO 240일): 판정불가 46건 중 45건이 이 경우.
+ *   이 메뉴를 최근 누가 맡아 왔는지는 이미 Jira 에 있다.
+ *     [BO_법인매입] 최근 QA 21건 중 20건 박성찬
+ *
+ * ── 날짜를 적어 넣는 이유 ──
+ *
+ *   `-180d` 는 Jira 의 "지금" 기준이라 백테스트가 판정 뒤에 생긴 티켓까지 본다.
+ *   판정 시각으로 창을 고정한다. 날짜는 KST 로 적는다 (조회 계정 시간대).
+ */
+/** JQL 날짜 칸에 넣는 KST 분 단위 시각. 예: `2026-05-10 10:00` */
+function kstMinute(t: number): string {
+  return new Date(t + 9 * 3_600_000).toISOString().slice(0, 16).replace('T', ' ');
+}
+
+/** 같은 메뉴를 넓혀 볼 때 받을 최대 쪽수 (100건씩). */
+const RECENT_MENU_PAGES = 5;
+
+export function recentMenuScope(
+  prefix: string,
+  ctx: { projectKey: string; now?: Date }
+): string {
+  const now = (ctx.now ?? new Date()).getTime();
+  const from = kstMinute(now - RECENT_MENU_DAYS * 86_400_000).slice(0, 10);
+  const to = kstMinute(now);
+  // Jira 텍스트 검색은 `_` 와 괄호를 단어로 안 본다. 정확한 메뉴 대조는 뒤에서 한다.
+  const words = prefix.replace(/[_\[\]"\\]+/g, ' ').trim();
+  return (
+    `project = ${ctx.projectKey} AND created >= "${from}" AND created <= "${to}"` +
+    ` AND summary ~ "${words}"`
+  );
+}
+
 export async function findViaSiblings(
   issue: JiraIssue,
   /** 좁은 것부터 넓은 것 순. 앞에서 근거가 나오면 거기서 멈춘다. */
@@ -833,12 +914,16 @@ export async function findViaSiblings(
     triageAccountId: string;
     /** 차수 축도 못 잡았을 때의 마지막 범위. */
     jiraFilterId: string;
+    /** 범위를 직접 준다. 차수 대신 최근 기간을 볼 때 쓴다 (`recentMenuScope`). */
+    scopeJql?: string;
+    /** 검색 결과가 100건을 넘을 때 어느 쪽을 남길지. */
+    orderBy?: string;
     onWarn?: (msg: string) => void;
   }
 ): Promise<SiblingMatch | null> {
   if (prefixes.length === 0) return null;
   const memberIds = new Set(members.map((m) => m.accountId));
-  const scope = cycleScopeJql(issue, ctx);
+  const scope = ctx.scopeJql ?? cycleScopeJql(issue, ctx);
   /*
     `assignee is not EMPTY` 만 걸고 **트리아지를 안 뺀다.**
 
@@ -847,10 +932,32 @@ export async function findViaSiblings(
     티켓도 **그 전에 우리 팀원이 맡았던** 근거를 갖고 있을 수 있다.
     트리아지 본인은 `heldByMembers` 가 어차피 뺀다.
   */
-  const sibs = await jira.search(
-    scope + ` AND assignee is not EMPTY AND key != ${issue.key}`,
-    ['summary', 'assignee']
-  );
+  const where = scope + ` AND assignee is not EMPTY AND key != ${issue.key}`;
+  const order = ctx.orderBy ? ` ORDER BY ${ctx.orderBy}` : '';
+  const fields = ['summary', 'assignee', ...(ctx.orderBy ? ['created'] : [])];
+  const sibs = await jira.search(where + order, fields);
+  /*
+    ── 100건에서 자르지 않는다 (최근 기간을 볼 때) ──
+
+    `summary ~ "BO 상품화"` 는 상품화RO입력관리, 상품화마이그레션까지 걸린다.
+    실측 KQ-16580: 100건 중 진짜 [BO_상품화] 는 33건, 손현지 기록이 잘려 나가
+    박성찬 8 = 조한빈 8 동률로 기권했다. 가장 오래된 것의 시각으로 이어 받는다.
+  */
+  if (ctx.orderBy) {
+    let raw = sibs;
+    for (let i = 1; i < RECENT_MENU_PAGES && raw.length >= 100; i++) {
+      const oldest = raw.at(-1)?.fields?.created;
+      if (typeof oldest !== 'string') break;
+      raw = await jira.search(
+        where + ` AND created <= "${kstMinute(Date.parse(oldest))}"` + order,
+        fields
+      );
+      const have = new Set(sibs.map((x) => x.key));
+      const fresh = raw.filter((x) => !have.has(x.key));
+      if (fresh.length === 0) break;
+      sibs.push(...fresh);
+    }
+  }
 
   /*
     형제의 담당 **이력**을 한 번에 받아 온다. 조회 한 번이 더 늘지만, 실측
@@ -1131,13 +1238,18 @@ export interface JudgeContext {
    * 있어도 동작이 안 바뀌게 하려는 것이고, 픽스처 재생이 그걸 지킨다.
    */
   coAssigneeField?: string;
+  /**
+   * 판정 시각. 최근 기간을 JQL 날짜로 적을 때 쓴다. 안 넘기면 지금.
+   * 백테스트는 판정 시각을 넘겨 그 뒤에 생긴 티켓을 못 보게 한다.
+   */
+  now?: Date;
   onWarn?: (msg: string) => void;
 }
 
 export interface JudgeResult extends Judgement {
   links?: RelatedLinks;
   /** 이 판정이 어느 단계에서 나왔는지 */
-  via: 'assigned' | 'epic' | 'siblings' | 'routing_map' | 'ref_owner' | 'none';
+  via: 'assigned' | 'epic' | 'siblings' | 'routing_map' | 'ref_owner' | 'guess' | 'none';
   /**
    * 알림을 보내지 않는다. 그래도 **기록은 남긴다.**
    *
@@ -1216,6 +1328,13 @@ export async function judge(
     if (result) return result;
   }
 
+  try {
+    const guess = await guessResult(issue, jira, ctx);
+    if (guess) return guess;
+  } catch (e) {
+    ctx.onWarn?.(`추정 조회 실패: ${(e as Error).message}`);
+  }
+
   return {
     classification: 'unknown',
     reason: unknownReason(prefix, ran),
@@ -1232,17 +1351,17 @@ function unknownReason(prefix: string | null, ran: JudgeTier[]): string {
     .join(', ');
   if (!prefix) {
     return (
-      `${looked} 를 봤지만 담당자 단서 없음 · ` +
+      `${looked}까지 봤지만 우리 팀 단서 없음 · ` +
       `제목에서 메뉴 프리픽스를 못 찾아 형제 티켓은 세지 못했습니다`
     );
   }
-  return `[${prefix}] ${looked} 를 모두 봤지만 담당자 단서 없음`;
+  return `[${prefix}] ${looked}까지 봤지만 우리 팀 단서 없음`;
 }
 
 const TIER_SHORT: Record<JudgeTier, string> = {
   assigned: '티켓 담당자',
   epic: '에픽 추적',
-  siblings: '이번 차수 형제 티켓',
+  siblings: '같은 메뉴 티켓',
   ref_owner: '레이블 참조',
 };
 
@@ -1312,9 +1431,7 @@ async function epicResult(
         `${quoteSummary(epic.epicSummary)} 아래 개발처리 ` +
         `${countPhrase(epic.votes, epic.candidates, epic.name)}${note}` +
         (epic.outsiders.length > 0
-          ? ` · 나머지 ${epic.candidates - epic.votes}건은 ` +
-            `${epic.outsiders.map((o) => `${o.name} ${o.count}건`).join(', ')}` +
-            ` (우리 팀 밖)`
+          ? ` · ${outsidersPhrase(epic.candidates - epic.votes, epic.outsiders)}`
           : ''),
       /*
         문장에서 결론에 해당하는 도막. Slack 이 이 부분만 굵게 만든다.
@@ -1322,6 +1439,7 @@ async function epicResult(
         쓰기 때문이다 — 거기서는 `*` 가 그냥 별표로 보인다.
       */
       highlight: countPhrase(epic.votes, epic.candidates, epic.name),
+      short: epicShort(epic.epicKey, epic.votes, epic.ours, epic.name),
       /*
         센 티켓을 문장 뒤에 이어 붙이지 않는다. 키 여섯 개가 줄줄이 붙으면
         정작 결론인 이름이 문장 앞으로 밀려 안 읽힌다. 목록으로 내린다.
@@ -1357,6 +1475,109 @@ async function epicResult(
   통째로 끊고 바로 레이블 참조로 뛰었는데, 그러면 "순서" 가 코드 안의
   분기로 숨는다. 지금은 그냥 null 이고, 다음 단계는 루프가 정한다.
 */
+/**
+ * 이 티켓의 수정버전에서 우리 팀 개발처리 담당이 **한 명뿐이면** 그 사람.
+ *
+ * 앱 단독 배포(`release_assessment_mig`)처럼 작은 배포에서만 켜진다. 정기배포는
+ * 우리 팀원 2~5명이 나눠 맡아 답하지 않는다. 트리아지는 뺀다 (리그레션 요청 같은
+ * 관리 티켓을 맡는다).
+ *
+ * 실측(2026-11-20): 판정불가였던 [APP_매입평가] 5건. 새 메뉴의 첫 티켓이라 메뉴
+ * 기록도, 아직 배정 안 된 이번 차수 형제도 근거가 없었다. 같은 배포 12건 중 10건이
+ * 차성숙 정답, 나머지 2건은 타팀.
+ *
+ * 메뉴 기록보다 앞에 둔다. 담당이 바뀐 메뉴에서 과거 기록이 이번 차수를 이긴다
+ * (실측 [APP_인증검수] 3건: 기록은 조한빈, 이번 배포는 차성숙).
+ */
+/**
+ * 티켓 수정버전(없으면 이번 차수)의 우리 팀 개발처리를 담당자별로 센다. 트리아지는 뺀다.
+ * 같은 티켓에 팀원 둘(담당, 공동담당)이면 둘 다 센다. `total` 은 티켓 수다.
+ */
+async function ourDevTally(issue: JiraIssue, jira: JiraPort, ctx: JudgeContext) {
+  const own = (issue.fields?.fixVersions as { name?: string }[] | undefined)?.[0]?.name;
+  const fv = own ?? ctx.fixVersion;
+  if (!fv) return null;
+  const types = ctx.devIssueTypes ?? DEFAULT_DEV_ISSUE_TYPES;
+  const coField = ctx.coAssigneeField ?? CO_ASSIGNEE_FIELD;
+  const devs = await jira.search(
+    `project = ${ctx.projectKey} AND fixVersion = "${fv}"` +
+      ` AND issuetype in (${types.map((t) => `"${t}"`).join(', ')})`,
+    ['assignee', coField, 'created']
+  );
+  const count = new Map<string, { n: number; latest: string }>();
+  let total = 0;
+  for (const d of devs) {
+    const ids = new Set(
+      [d.fields?.assignee?.accountId, personAt(d.fields, coField)?.accountId].filter(
+        (id): id is string =>
+          !!id && id !== ctx.triageAccountId && ctx.members.some((m) => m.accountId === id)
+      )
+    );
+    if (ids.size > 0) total++;
+    const created = String(d.fields?.created ?? '');
+    for (const id of ids) {
+      const cur = count.get(id) ?? { n: 0, latest: '' };
+      count.set(id, { n: cur.n + 1, latest: created > cur.latest ? created : cur.latest });
+    }
+  }
+  return { fv, count, total };
+}
+
+async function roundOwnerResult(
+  issue: JiraIssue,
+  jira: JiraPort,
+  ctx: JudgeContext
+): Promise<JudgeResult | null> {
+  const t = await ourDevTally(issue, jira, ctx);
+  if (!t || t.count.size !== 1) return null;
+  const [[accountId, { n }]] = [...t.count];
+  const m = ctx.members.find((x) => x.accountId === accountId)!;
+  return {
+    classification: classify(accountId, ctx.selfAccountId),
+    accountId,
+    name: m.name,
+    slackId: m.slackId ?? null,
+    reason: `수정버전 ${t.fv} 의 우리 팀 개발처리 ${n}건이 모두 ${m.name} 담당`,
+    highlight: `모두 ${m.name} 담당`,
+    short: `수정버전 ${t.fv} 의 우리 팀 개발 ${n}건 모두 ${m.name} 담당`,
+    tier: 2,
+    via: 'siblings',
+  };
+}
+
+/**
+ * 마지막 추정. 어느 단계도 답하지 못했을 때 이번 수정버전 우리 팀 개발을 가장 많이
+ * 맡은 사람을 **근거 약함**으로 부른다. 동률이면 가장 최근 개발 티켓을 맡은 사람.
+ *
+ * 판정 못 함은 아무도 안 움직이는 알림이었다. 틀릴 수 있는 이름이라도 한 사람을 부르면
+ * 그 사람이 넘기든 가져가든 한다. 대신 "근거 약함" 을 달고 BE 후보를 같이 띄운다.
+ * 수정버전에 우리 팀 개발이 하나도 없으면 고를 근거가 없어 판정 못 함으로 남긴다.
+ */
+async function guessResult(
+  issue: JiraIssue,
+  jira: JiraPort,
+  ctx: JudgeContext
+): Promise<JudgeResult | null> {
+  const t = await ourDevTally(issue, jira, ctx);
+  if (!t || t.count.size === 0) return null;
+  const [accountId, { n }] = [...t.count].sort(
+    ([, a], [, b]) => b.n - a.n || b.latest.localeCompare(a.latest)
+  )[0];
+  const m = ctx.members.find((x) => x.accountId === accountId)!;
+  return {
+    classification: classify(accountId, ctx.selfAccountId),
+    accountId,
+    name: m.name,
+    slackId: m.slackId ?? null,
+    reason: `다른 단서가 없어 추정 · 수정버전 ${t.fv} 의 우리 팀 개발처리 ${t.total}건 중 ${n}건이 ${m.name} 담당`,
+    // "근거 약함" 은 담당자 줄이 말한다. 여기서 "추정" 을 또 하지 않는다.
+    short: `수정버전 ${t.fv} 의 우리 팀 개발 ${t.total}건 중 ${n}건 ${m.name} 담당`,
+    weak: true,
+    tier: 2,
+    via: 'guess',
+  };
+}
+
 async function siblingsResult(
   issue: JiraIssue,
   prefixes: string[],
@@ -1365,14 +1586,32 @@ async function siblingsResult(
 ): Promise<JudgeResult | null> {
   if (prefixes.length === 0) return null;
   try {
-    const sib = await findViaSiblings(issue, prefixes, ctx.members, jira, {
+    const base = {
       projectKey: ctx.projectKey,
       fixVersion: ctx.fixVersion,
       cycleAxisField: ctx.cycleAxisField,
       triageAccountId: ctx.triageAccountId,
       jiraFilterId: ctx.jiraFilterId,
       onWarn: ctx.onWarn,
-    });
+    };
+    let range = '이번 차수';
+    let sib = await findViaSiblings(issue, prefixes, ctx.members, jira, base);
+    if (!sib) {
+      const own = await roundOwnerResult(issue, jira, ctx);
+      if (own) return own;
+    }
+    /*
+      이번 차수에 근거가 없으면 최근 같은 메뉴로 넓힌다 (`recentMenuScope` 주석).
+      가장 좁은 앞머리 하나로만 넓힌다. 넓은 토큰(`BO`)으로 물러나지 않는 규칙은 그대로다.
+    */
+    if (!sib) {
+      sib = await findViaSiblings(issue, prefixes, ctx.members, jira, {
+        ...base,
+        scopeJql: recentMenuScope(prefixes[0], ctx),
+        orderBy: 'created DESC',
+      });
+      range = `최근 ${RECENT_MENU_DAYS}일`;
+    }
     if (sib) {
       const slackId =
         ctx.members.find((m) => m.accountId === sib.accountId)?.slackId ?? null;
@@ -1401,7 +1640,10 @@ async function siblingsResult(
         accountId: sib.accountId,
         name: sib.name,
         slackId,
-        reason: `이번 차수 [${sib.prefix}] ${count}`,
+        reason: `${range} [${sib.prefix}] ${count}`,
+        short: split
+          ? `${range} [${sib.prefix}] 티켓 중 ${sib.name} ${sib.votes}건으로 최다`
+          : `${range} [${sib.prefix}] 티켓 ${sib.votes}건 모두 ${sib.name} 담당`,
         evidence: { tickets: sib.tickets },
         tier: 2,
         via: 'siblings',

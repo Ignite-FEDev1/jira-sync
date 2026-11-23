@@ -33,7 +33,13 @@ import {
   type FixVersionRule,
 } from './derive';
 import { buildFailText, postRecovery } from './fail-alert';
-import { judge, type JudgeResult } from './judge';
+import {
+  extractRefKeys,
+  judge,
+  type JiraIssue,
+  type JiraPort,
+  type JudgeResult,
+} from './judge';
 import { collectPlanProgress } from './plan-tickets';
 import { resolveOutcomes } from './outcome';
 import {
@@ -45,6 +51,14 @@ import {
   type ReassignOutcome,
 } from './message';
 import { prodDayOf, resolveQaWindow } from './qa-window';
+import { collectHandoff, type WikiPort } from './handoff-collect';
+import {
+  computeHandoff,
+  toHandoffSources,
+  type HandoffHints,
+  type HandoffSources,
+  type RefTicket,
+} from './handoff';
 import { wantsQaAlerts } from './alert-rule';
 import { nextExpectedPollAt, readCyclePageTitle, tooSoon } from './status';
 import {
@@ -70,6 +84,26 @@ import type {
 } from './clients';
 
 const FILTER_TTL_MS = 4 * 3_600_000;
+/** 판정이 메모해 두지 않은 레이블 참조를 꼬리표 때문에 직접 읽는 상한 (알림 1건당). */
+const HANDOFF_DIRECT_READS = 3;
+const REF_FIELDS = ['summary', 'issuetype', 'assignee', 'components', 'labels'];
+
+function toRefTicket(r: JiraIssue): RefTicket {
+  const f = r.fields ?? {};
+  const a = f.assignee;
+  return {
+    key: r.key,
+    summary: f.summary ?? '',
+    issueType: f.issuetype?.name ?? '',
+    assignee: a?.accountId
+      ? { accountId: a.accountId, name: a.displayName ?? a.accountId }
+      : null,
+    components: ((f.components as { name?: string }[] | undefined) ?? [])
+      .map((c) => c.name ?? '')
+      .filter(Boolean),
+    labels: f.labels ?? [],
+  };
+}
 const DERIVE_TTL_MS = 4 * 3_600_000;
 /**
  * 사이클 스케줄 재조회 주기.
@@ -124,6 +158,8 @@ export interface TickDeps {
    * 없으면 스레드 관련 기능만 건너뛴다 (알림은 계속 나간다).
    */
   jiraBaseUrl: string;
+  /** "넘길 곳" 원천 수집용 컨플 읽기. 없으면 수집만 건너뛴다 (알림, 꼬리표 계산은 계속). */
+  wiki?: WikiPort;
   log?: Logger;
   now?: () => Date;
 }
@@ -857,6 +893,32 @@ export async function runTick(
       }
     });
 
+    // ── "넘길 곳" 원천 (하루 1회) ──
+    // BE 명세 버전 이력과 정기배포 안건 표를 모은다. 바뀐 페이지만 다시 읽어
+    // 첫날 이후로는 하루 몇 요청이다. 판정은 여기 결과를 DB 에서 읽기만 한다.
+    // 실패하면 20시간이 아니라 1시간 뒤 다시 본다 (꼬리표가 하루 통째로 비지 않게).
+    step = '넘길 곳 수집';
+    if (cfg.beSpecRootPageId && deps.wiki) {
+      const last = state.sideEffects?.handoff;
+      const waitMs = last?.error ? 3_600_000 : 20 * 3_600_000;
+      const due = !last || now().getTime() - new Date(last.at).getTime() > waitMs;
+      if (due) {
+        const wiki = deps.wiki;
+        const rootPageId = cfg.beSpecRootPageId;
+        await runAside(cfg.id, 'handoff', log, '넘길 곳 원천 수집', async () => {
+          const saved = await repo.listHandoffSources(cfg.id);
+          const r = await collectHandoff(
+            { rootPageId, space: 'CPO' },
+            wiki,
+            saved,
+            (row) => repo.upsertHandoffSource(cfg.id, row),
+            now()
+          );
+          log(`넘길 곳 원천: 명세 ${r.spec} · 안건 ${r.agenda} · 다시 읽음 ${r.refreshed}`);
+        });
+      }
+    }
+
     // ── 파생 (TTL 캐시) ──
     let derived = state.derived;
     let fixVersion = state.filterCache?.fixVersion ?? null;
@@ -1378,6 +1440,8 @@ export async function runTick(
       */
         derived.cycleAxisField,
         cfg.coAssigneeField,
+        // 판정이 티켓 자신의 수정버전을 본다 (이번 버전 우리 팀 담당이 한 명인지).
+        'fixVersions',
       ].filter((f): f is string => Boolean(f))
     );
     log(`${cfg.name} · 트리아지 배정 활성 티켓 ${found.length}건`);
@@ -1423,10 +1487,48 @@ export async function runTick(
     // 채널·토큰 문제는 루프를 다 돌아 이력을 남긴 뒤 tick 을 실패시킨다.
     let fatalSlackError: string | null = null;
 
+    /*
+      ── 넘길 곳 꼬리표 준비 ──
+
+      원천은 하루 1회 부수 작업이 DB 에 모아 둔 것을 여기서 한 번만 읽는다.
+      판정 루프 안에서는 컨플을 부르지 않는다. 읽기가 실패하거나 아직 모은 게
+      없어도 알림은 그대로 나간다 (꼬리표만 빠진다).
+
+      판정이 읽은 레이블 티켓을 메모해 두고 꼬리표가 다시 쓴다. 같은 티켓을
+      두 번 묻지 않으려는 것이고, 판정 자체에는 아무 영향이 없다.
+    */
+    let handoffSources: HandoffSources | null = null;
+    if (cfg.beSpecRootPageId) {
+      try {
+        handoffSources = toHandoffSources(await repo.listHandoffSources(cfg.id));
+      } catch (e) {
+        log(`넘길 곳 원천 읽기 실패 (꼬리표 없이 알림): ${(e as Error).message}`);
+      }
+    }
+    const refMemo = new Map<string, JiraIssue>();
+    const judgeJira: JiraPort = handoffSources
+      ? {
+          getIssue: async (key, fields) => {
+            const r = await deps.jira.getIssue(key, fields);
+            refMemo.set(key, r);
+            return r;
+          },
+          search: (jql, fields) => deps.jira.search(jql, fields),
+          getChangelogs: deps.jira.getChangelogs?.bind(deps.jira),
+        }
+      : deps.jira;
+    const triageMember = derived.members.find(
+      (m) => m.accountId === cfg.triageAccountId
+    );
+    const handoffExclude = new Set([
+      ...derived.members.map((m) => m.accountId),
+      cfg.triageAccountId,
+    ]);
+
     step = '판정';
     for (const issue of fresh) {
       try {
-        const result = await judge(issue, deps.jira, {
+        const result = await judge(issue, judgeJira, {
           projectKey: derived.projectKey!,
           fixVersion,
           cycleAxisField: derived.cycleAxisField,
@@ -1454,6 +1556,7 @@ export async function runTick(
             말한 것과 봇이 실제로 보는 칸이 같아야 한다.
           */
           coAssigneeField: cfg.coAssigneeField,
+          now: now(),
           /*
             ── 개발티켓 타입을 실제로 넘긴다 ──
 
@@ -1473,6 +1576,33 @@ export async function runTick(
         });
 
         const reassign = await maybeReassign(cfg, issue.key, result, deps, log);
+
+        // 알림을 보내는 판정에만 붙인다. 조용히 넘기는 건은 받을 사람이 없다.
+        let handoff: HandoffHints | undefined;
+        if (!result.silent && handoffSources) {
+          try {
+            const keys = extractRefKeys(issue.fields?.labels);
+            const missing = keys.filter((k) => !refMemo.get(k)?.fields?.issuetype);
+            for (const k of missing.slice(0, HANDOFF_DIRECT_READS)) {
+              refMemo.set(k, await deps.jira.getIssue(k, REF_FIELDS));
+            }
+            handoff = computeHandoff({
+              summary: issue.fields?.summary ?? '',
+              refs: keys
+                .map((k) => refMemo.get(k))
+                .filter((r): r is JiraIssue => !!r?.fields?.issuetype)
+                .map(toRefTicket),
+              sources: handoffSources,
+              at: now(),
+              exclude: handoffExclude,
+              planIssueTypeName: cfg.planIssueTypeName,
+              devIssueTypeName: cfg.devIssueTypeName,
+              aliases: cfg.handoffMenuAliases ?? undefined,
+            });
+          } catch (e) {
+            log(`넘길 곳 계산 실패 ${issue.key} (꼬리표 없이 알림): ${(e as Error).message}`);
+          }
+        }
 
         /*
           ── 이미 가져간 건은 알리지 않는다 ──
@@ -1499,6 +1629,10 @@ export async function runTick(
                 judgement: result,
                 links: result.links,
                 reassign,
+                handoff,
+                fallback: triageMember
+                  ? { name: triageMember.name, slackId: triageMember.slackId }
+                  : undefined,
               });
               return deps.slack.post(
                 cfg.slackChannelId,
@@ -1549,7 +1683,9 @@ export async function runTick(
           targetName: result.name ?? null,
           reason: result.reason,
           // 근거로 센 티켓. 화면이 목록으로 펼쳐 보여준다.
-          evidence: result.evidence ?? null,
+          evidence: handoff
+            ? { tickets: result.evidence?.tickets ?? [], handoff }
+            : (result.evidence ?? null),
           /*
             어느 단계가 답했나. judge() 가 늘 돌려주던 값인데 여기서 안 넘겨
             버려지고 있었다 — 그래서 설정 화면이 단계 순서를 보여 주면서도
