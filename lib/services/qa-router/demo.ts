@@ -790,9 +790,61 @@ export function demoPlanProgress(cycle: DeployCycle): PlanProgress {
       devDone: done || r() > 0.3,
     };
   });
+  /*
+    새 표의 모양을 데모에서도 보이게 한 줄씩 섞는다.
+    - 노란 칩 기획 (수정버전 없음)
+    - 기획 없는 개발: QA 중 하나, QA 전 하나 (흐린 행)
+    - 다른 차수 기획에 묶인 개발 (회색 칩)
+  */
+  const lead = names[0];
+  const extra: PlanProgress['tickets'] = [
+    {
+      ...tickets[0],
+      key: 'KQ-19185',
+      summary: '[기획][BO] 데모 수정버전 없는 기획',
+      fixVersionMissing: true,
+      plannerName: '김기획',
+    },
+    devOnly('KQ-18804', '[CPO] [BO] 데모 기획 없는 개발 (QA 중)', lead, 'in'),
+    devOnly('KQ-19604', '[CPO] 데모 기획 없는 개발 (QA 전)', lead, 'none'),
+    {
+      ...devOnly(
+        'KQ-16787',
+        '[CPO][BO-FE] 데모 다른 차수 기획의 개발',
+        lead,
+        'none'
+      ),
+      otherPlan: { key: 'KQ-15900', fixVersion: 'release_20261029' },
+    },
+  ];
+  const all: PlanProgress['tickets'] = [...tickets, ...extra];
+  const counted = all.filter((t) => t.counted !== false);
   return {
-    tickets,
-    total: tickets.length,
-    ticketDone: tickets.filter((t) => t.statusCategory === 'done').length,
+    tickets: all,
+    total: counted.length,
+    ticketDone: counted.filter((t) => t.statusCategory === 'done').length,
+    missingFixVersion: 1,
+  };
+}
+
+/** 데모용 기획 없는 개발 행 */
+function devOnly(
+  key: string,
+  summary: string,
+  name: string,
+  qa: 'in' | 'none'
+): PlanProgress['tickets'][number] {
+  return {
+    key,
+    summary,
+    status: qa === 'in' ? 'Verify in QA' : 'TO_DO',
+    statusCategory: qa === 'in' ? 'indeterminate' : 'new',
+    devNames: [name],
+    devLabels: ['FE1'],
+    devTickets: [],
+    devDone: false,
+    kind: 'dev',
+    qa,
+    counted: qa === 'in',
   };
 }
