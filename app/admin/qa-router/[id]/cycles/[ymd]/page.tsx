@@ -16,6 +16,11 @@ import {
 
 import { Badge, StatusLed } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -33,7 +38,10 @@ import type {
   PlanProgress,
   StatusCategory,
 } from '@/lib/services/qa-router/plan-tickets';
-import { STATUS_CATEGORY_ORDER } from '@/lib/services/qa-router/plan-tickets';
+import {
+  normalizeProgress,
+  STATUS_CATEGORY_ORDER,
+} from '@/lib/services/qa-router/plan-tickets';
 import type { JudgeEvidence } from '@/lib/services/qa-router/judge';
 import {
   isMissed,
@@ -467,6 +475,8 @@ export default function CycleDetailPage() {
         collectedAt={demo ? null : cycle.planCollectedAt}
         collectError={demo ? null : (state?.sideEffects?.plan?.error ?? null)}
         onRefreshed={t.reload}
+        fixVersion={cycle.fixVersion}
+        canFix={!demo && state?.activeCycle?.fixVersion === cycle.fixVersion}
         progress={demo ? demoPlanProgress(cycle) : (cycle.planProgress ?? null)}
       />
 
@@ -1905,7 +1915,9 @@ const CATEGORY_BADGE = {
 type SegKey = string;
 
 function PlanSection({
-  progress,
+  progress: rawProgress,
+  fixVersion,
+  canFix,
   configId,
   collectedAt,
   collectError,
@@ -1914,6 +1926,10 @@ function PlanSection({
   className,
 }: {
   progress: PlanProgress | null;
+  /** 이 차수 이름. [수정버전 넣기] 확인 문구에 쓴다 */
+  fixVersion: string;
+  /** 지금 차수일 때만 수정버전을 넣을 수 있다. 지난 차수 화면은 보기만 */
+  canFix: boolean;
   instance: 'ignite' | 'hmg';
   /** 갱신 API 를 부를 대상 id. 데모에서는 넘기지 않는다. */
   configId?: string;
@@ -1932,6 +1948,8 @@ function PlanSection({
     조합인데 화면이 한 번에 못 보여 줬다.
     비어 있으면 전부 보여 준다.
   */
+  // 저장된 옛 값에는 행 종류, QA 열이 없다. 여기서 한 번 채운다
+  const progress = rawProgress ? normalizeProgress(rawProgress) : null;
   const [statuses, setStatuses] = useState<ReadonlySet<SegKey>>(
     () => new Set()
   );
@@ -1962,7 +1980,7 @@ function PlanSection({
         toast.error(body.error ?? '갱신 실패');
         return;
       }
-      toast.success(`기획건 ${body.total}건 다시 읽었습니다`, {
+      toast.success(`QA 대상 ${body.total}건 다시 읽었습니다`, {
         description: `완료 ${body.ticketDone}건`,
       });
       onRefreshed?.();
@@ -1994,7 +2012,10 @@ function PlanSection({
   }
 
   const { tickets, total, ticketDone } = progress;
-  if (total === 0) {
+  const missing = progress.missingFixVersion ?? 0;
+  /** QA 를 아직 안 탄 개발 행. 흐리게 두고 집계에서 뺀다 */
+  const preQa = tickets.filter((t) => !t.counted).length;
+  if (tickets.length === 0) {
     return (
       <section>
         <SectionHead
@@ -2004,7 +2025,7 @@ function PlanSection({
           refreshing={refreshing}
         />
         <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-          이 차수에 FE1팀이 개발한 기획건이 없습니다.
+          이 차수 FE1팀 QA 대상 없음
         </div>
       </section>
     );
@@ -2022,9 +2043,11 @@ function PlanSection({
     const status = new Map<string, { count: number; cat: StatusCategory }>();
     const dev = new Map<string, number>();
     for (const t of tickets) {
-      const prev = status.get(t.status);
+      // 파이는 집계에 세는 행만 그린다. 분모(total)와 합이 맞아야 한다
+      const prev = t.counted ? status.get(t.status) : undefined;
       if (prev) prev.count += 1;
-      else status.set(t.status, { count: 1, cat: t.statusCategory });
+      else if (t.counted)
+        status.set(t.status, { count: 1, cat: t.statusCategory });
       // 한 티켓에 개발자가 여럿일 수 있다. 사람마다 한 표씩 센다.
       for (const n of t.devNames) dev.set(n, (dev.get(n) ?? 0) + 1);
     }
@@ -2062,6 +2085,8 @@ function PlanSection({
       (statuses.size === 0 || statuses.has(t.status)) &&
       (!onlyDev || t.devNames.includes(onlyDev))
   );
+  // 개발 행은 펼칠 하위가 없다
+  const openable = rows.filter((t) => t.devTickets.length > 0);
 
   return (
     <section className={className}>
@@ -2082,11 +2107,22 @@ function PlanSection({
         상태를 가리키며 설명하게 된다.
       */}
       <p className="mb-2 text-xs text-muted-foreground">
-        <span className="text-foreground">기획티켓의 Jira 상태</span> 기준입니다
+        <span className="text-foreground">QA 대상의 Jira 상태</span> 기준입니다
         · QA 팀이 차수를 닫을 때 한꺼번에 완료로 바꾸므로 그전까지 진행 중인
         것이 정상 (지금 완료{' '}
         <span className="font-mono tabular-nums">{ticketDone}건</span>)
       </p>
+      {/*
+        숫자만 둔다. 고치는 버튼은 그 행 안에 있다. 경고 줄에 버튼을 두면
+        어느 행 얘기인지 다시 찾아야 한다.
+      */}
+      {missing > 0 && (
+        <p className="mb-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
+          <span className="font-semibold">수정버전 없는 기획 {missing}건</span>{' '}
+          · 이번 차수 우리 팀 개발이 붙어 있는데 기획에 {fixVersion} 이 없습니다.
+          행의 [수정버전 넣기] 로 고칠 수 있어요
+        </p>
+      )}
 
       {/*
         진행바를 뺐다.
@@ -2119,13 +2155,14 @@ function PlanSection({
       <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-stretch">
         <div className="relative flex shrink-0 flex-col rounded-lg border px-3 py-3 2xl:w-[17rem]">
             <p className="shrink-0 text-xs font-medium">
-              {ticketDone}/{total}건 완료{' '}
+              {total > 0 ? `${ticketDone}/${total}건 완료` : 'QA 탄 대상 없음'}{' '}
               {/*
                 범위를 숫자 바로 옆에 적는다. 제목 옆에 두면 무엇을 한정하는
                 말인지 멀고, 표로 빼면 줄 하나를 위해 표가 생긴다.
               */}
               <span className="font-normal text-muted-foreground">
-                FE1팀 기획건
+                FE1팀 QA 대상
+                {preQa > 0 && ` · QA 전 ${preQa}건은 집계 밖`}
               </span>
             </p>
             {/*
@@ -2143,14 +2180,14 @@ function PlanSection({
                 <StatusPie
                   segments={statusPie}
                   total={total}
-                  unit="기획건"
+                  unit="QA 대상"
                   picked={statuses}
                   onPick={(k: string) => toggleStatus(k as SegKey)}
                 />
               </div>
             ) : (
               <p className="mt-2 flex flex-1 items-center text-xs text-muted-foreground">
-                아직 기획건을 읽지 않았습니다.
+                QA 를 탄 대상이 아직 없습니다.
               </p>
             )}
         </div>
@@ -2190,14 +2227,17 @@ function PlanSection({
                   상태 **이름**이라 길다 — `Verify in QA` 가 112px 에서 두 줄로
                   쪼개졌고, 프로젝트마다 더 긴 이름이 나올 수 있다.
 
-                  고정 합 28+88+112+128 = 356. 최소폭은 "내용" 몫 200 을 더해 35rem.
+                  고정 합 28+88+48+112+56+128 = 460. 최소폭은 "내용" 몫 200 을 더해 41.25rem.
+                  종류(48)와 QA(56)는 칩 하나, 낱말 하나라 헤더 글자 폭이 곧 최솟값이다.
                 */}
-                <table className="w-full min-w-[35rem] table-fixed text-sm">
+                <table className="w-full min-w-[41.25rem] table-fixed text-sm">
                   <colgroup>
                     <col className="w-7" />
                     <col className="w-[5.5rem]" />
+                    <col className="w-12" />
                     <col />
                     <col className="w-28" />
+                    <col className="w-14" />
                     <col className="w-32" />
                   </colgroup>
                   {/*
@@ -2211,17 +2251,24 @@ function PlanSection({
                       <th>
                         <ExpandAll
                           allOpen={
-                            rows.length > 0 &&
-                            rows.every((t) => expanded.has(t.key))
+                            openable.length > 0 &&
+                            openable.every((t) => expanded.has(t.key))
                           }
                           onToggle={() =>
-                            toggleAllTickets(rows.map((t) => t.key))
+                            toggleAllTickets(openable.map((t) => t.key))
                           }
-                          disabled={rows.length === 0}
+                          disabled={openable.length === 0}
                         />
                       </th>
+                      {/*
+                        "기획티켓" 이 아니다. QA 가 상태를 옮기는 티켓이라
+                        기획이 없으면 개발티켓 자신이 이 자리에 온다.
+                      */}
                       <th className="py-1.5 pr-2 text-left whitespace-nowrap">
-                        기획티켓
+                        QA 대상
+                      </th>
+                      <th className="py-1.5 pr-2 text-left whitespace-nowrap">
+                        종류
                       </th>
                       <th className="py-1.5 pr-2 text-left whitespace-nowrap">
                         내용
@@ -2253,6 +2300,9 @@ function PlanSection({
                           ]}
                         />
                       </th>
+                      <th className="py-1.5 pr-2 text-left whitespace-nowrap">
+                        QA
+                      </th>
                       <th className="py-1.5 pr-3 text-right whitespace-nowrap">
                         Jira
                       </th>
@@ -2260,7 +2310,8 @@ function PlanSection({
                   </thead>
                   <tbody>
                     {rows.map((t) => {
-                      const open = expanded.has(t.key);
+                      const canOpen = t.devTickets.length > 0;
+                      const open = canOpen && expanded.has(t.key);
                       return (
                         <Fragment key={t.key}>
                           {/*
@@ -2269,26 +2320,50 @@ function PlanSection({
                           Jira 에서 다시 찾아야 했다.
                         */}
                           <tr
-                            className={`cursor-pointer border-b last:border-0 hover:bg-muted/60 ${open ? 'bg-muted/40' : ''}`}
-                            onClick={() => toggleTicket(t.key)}
+                            className={cn(
+                              'border-b last:border-0',
+                              canOpen && 'cursor-pointer hover:bg-muted/60',
+                              open && 'bg-muted/40',
+                              t.fixVersionMissing &&
+                                'bg-amber-50/70 dark:bg-amber-950/40',
+                              // QA 전 개발 행만 흐리게. 기획 행은 QA 전이어도 센다
+                              !t.counted && 'opacity-50'
+                            )}
+                            onClick={
+                              canOpen ? () => toggleTicket(t.key) : undefined
+                            }
                           >
                             <td className="align-middle">
-                              <button
-                                type="button"
-                                aria-expanded={open}
-                                aria-label={`${t.key} 개발티켓 펼치기`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleTicket(t.key);
-                                }}
-                                className="flex size-7 items-center justify-center"
-                              >
-                                <ExpandIcon open={open} />
-                              </button>
+                              {canOpen && (
+                                <button
+                                  type="button"
+                                  aria-expanded={open}
+                                  aria-label={`${t.key} 개발티켓 펼치기`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleTicket(t.key);
+                                  }}
+                                  className="flex size-7 items-center justify-center"
+                                >
+                                  <ExpandIcon open={open} />
+                                </button>
+                              )}
                             </td>
                             <td className="py-2 pr-2 align-middle">
                               <span className="font-mono text-xs font-semibold text-blue-700 dark:text-blue-300">
                                 {t.key}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-2 align-middle">
+                              <span
+                                className={cn(
+                                  'rounded px-1.5 text-[11px]',
+                                  t.kind === 'plan'
+                                    ? 'bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                                    : 'bg-muted text-foreground/75'
+                                )}
+                              >
+                                {t.kind === 'plan' ? '기획' : '개발'}
                               </span>
                             </td>
                             <td className="py-2 pr-2 align-middle">
@@ -2312,6 +2387,21 @@ function PlanSection({
                                   </span>
                                 ))}
                               </div>
+                              {t.fixVersionMissing && (
+                                <MissingFixVersion
+                                  issueKey={t.key}
+                                  plannerName={t.plannerName ?? null}
+                                  fixVersion={fixVersion}
+                                  configId={canFix ? configId : undefined}
+                                  instance={instance}
+                                  onDone={onRefreshed}
+                                />
+                              )}
+                              {t.otherPlan && (
+                                <span className="mt-1 inline-block rounded-full bg-muted px-2 text-[11px] text-muted-foreground">
+                                  기획 {t.otherPlan.key} · {t.otherPlan.fixVersion}
+                                </span>
+                              )}
                             </td>
                             <td className="py-2 pr-2 align-middle text-right">
                               <span className="flex flex-wrap justify-end gap-1">
@@ -2325,6 +2415,9 @@ function PlanSection({
                                   </span>
                                 )}
                               </span>
+                            </td>
+                            <td className="py-2 pr-2 align-middle text-xs whitespace-nowrap">
+                              {QA_LABEL[t.qa ?? 'in']}
                             </td>
                             <td className="py-2 pr-3 align-middle text-right">
                               {/*
@@ -2381,6 +2474,7 @@ function PlanSection({
                                     />
                                   </span>
                                 </td>
+                                <td />
                                 <td className="py-1.5 pr-2 align-middle">
                                   <span
                                     className="block truncate text-muted-foreground"
@@ -2392,6 +2486,7 @@ function PlanSection({
                                 <td className="py-1.5 pr-2 align-middle text-right">
                                   {d.name && <PersonChip name={d.name} />}
                                 </td>
+                                <td />
                                 <td className="py-1.5 pr-3 align-middle text-right">
                                   <Badge
                                     variant={CATEGORY_BADGE[d.statusCategory]}
@@ -2887,6 +2982,119 @@ function LinkedReason({
 }
 
 /** 섹션 제목 + 수집 상태 + 갱신 버튼. */
+const QA_LABEL = { in: 'QA 중', done: 'QA 끝', none: 'QA 전' } as const;
+
+/**
+ * 노란 칩 + [수정버전 넣기].
+ *
+ * 자동으로 넣지 않는다. 남의 팀(기획) 티켓이고 일부러 비운 수정버전일 수
+ * 있어서, 사람이 한 번 보고 누른다. 서버도 저장된 표의 노란 칩 키만 받는다.
+ */
+function MissingFixVersion({
+  issueKey,
+  plannerName,
+  fixVersion,
+  configId,
+  instance,
+  onDone,
+}: {
+  issueKey: string;
+  plannerName: string | null;
+  fixVersion: string;
+  /** 없으면 데모거나 지난 차수다. 버튼을 보이되 누를 수 없게 둔다 */
+  configId?: string;
+  instance: 'ignite' | 'hmg';
+  onDone?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const add = async () => {
+    // 두 번 눌러도 요청은 한 번
+    if (!configId || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/qa-router/${configId}/plan-progress/fix-version`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ issueKey, fixVersion }),
+        }
+      );
+      const body = await res.json();
+      if (!res.ok) {
+        setError(body.error ?? '수정버전을 넣지 못했습니다');
+        return;
+      }
+      setOpen(false);
+      toast.success(`${issueKey} 수정버전 추가`);
+      onDone?.();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="mt-1 flex flex-wrap items-center gap-1.5"
+      // 행 클릭(펼치기)으로 번지지 않게
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span className="rounded-full border border-amber-300 bg-amber-50 px-2 text-[11px] text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
+        수정버전 없음 · 기획 {plannerName ?? '미상'}
+      </span>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button size="sm" className="h-6 px-2 text-[11px]" disabled={!configId}>
+            수정버전 넣기
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-72 text-xs">
+          <p>
+            <span className="font-mono font-semibold">{issueKey}</span> 에{' '}
+            <span className="font-mono">{fixVersion}</span> 을 추가합니다
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            기획 담당 {plannerName ?? '미상'} · 기존 수정버전은 유지
+          </p>
+          <div className="mt-3 flex justify-end gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setOpen(false)}
+              disabled={busy}
+            >
+              취소
+            </Button>
+            <Button size="sm" onClick={() => void add()} disabled={busy}>
+              {busy && <RefreshCw className="size-3 animate-spin" />}
+              추가
+            </Button>
+          </div>
+        </PopoverContent>
+      </Popover>
+      {error && (
+        <span className="text-[11px] text-red-700 dark:text-red-300">
+          {error} ·{' '}
+          <a
+            href={`${jiraBaseUrl(instance)}/browse/${issueKey}`}
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+          >
+            Jira 에서 열기
+          </a>
+        </span>
+      )}
+    </div>
+  );
+}
+
 function SectionHead({
   collectedAt,
   collectError,

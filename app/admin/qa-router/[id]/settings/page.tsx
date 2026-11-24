@@ -1122,7 +1122,7 @@ function CycleLive({
                 /{p.total}
               </span>
             </span>
-            <span className="text-[12px]">기획건 완료</span>
+            <span className="text-[12px]">QA 대상 완료</span>
           </p>
         </>
       )}

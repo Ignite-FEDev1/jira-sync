@@ -129,6 +129,8 @@ export interface JiraClient extends JiraPort {
   ): Promise<ChangelogEntry[]>;
   /** 담당자 + 공동담당자를 함께 바꾼다. */
   reassign(issueKey: string, accountId: string): Promise<void>;
+  /** 수정버전을 하나 더한다. 기존 값은 그대로 둔다 (`add`, 덮어쓰기 아님). */
+  addFixVersion(issueKey: string, versionName: string): Promise<void>;
   searchAll(
     jql: string,
     fields: string[],
@@ -306,6 +308,15 @@ export function createJiraClient(opts: {
             // 공동담당자도 같이 바꾼다 (기존 봇과 동일)
             customfield_10132: { accountId },
           },
+        }),
+      });
+    },
+
+    async addFixVersion(issueKey, versionName) {
+      await call<void>(`/issue/${issueKey}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          update: { fixVersions: [{ add: { name: versionName } }] },
         }),
       });
     },
@@ -534,4 +545,3 @@ export function createSlackClient(opts: {
     },
   };
 }
-
