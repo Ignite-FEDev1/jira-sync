@@ -183,7 +183,7 @@ export function stripAdfMediaNodes(adf: any): any {
   if (!adf || typeof adf !== 'object') return adf;
   if (!adf.content || !Array.isArray(adf.content)) return adf;
 
-  const REMOVE_TYPES = ['mediaGroup', 'mediaSingle', 'media'];
+  const REMOVE_TYPES = ['mediaGroup', 'mediaSingle', 'media', 'mediaInline'];
 
   const cleaned = adf.content
     .filter((node: { type?: string }) => !REMOVE_TYPES.includes(node.type || ''))
