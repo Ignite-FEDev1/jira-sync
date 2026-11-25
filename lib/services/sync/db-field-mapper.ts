@@ -297,8 +297,17 @@ function getFieldValue(
       return ticket.fields.assignee;
     case 'duedate':
       return fields.duedate;
-    case 'timetracking':
-      return fields.timetracking;
+    case 'timetracking': {
+      // 소요 시간(timeSpent)은 Jira API로 직접 설정 불가 → 추정치만 전달
+      const tt = fields.timetracking as
+        | { originalEstimate?: string; remainingEstimate?: string }
+        | undefined;
+      if (!tt) return tt;
+      const estimates: Record<string, string> = {};
+      if (tt.originalEstimate) estimates.originalEstimate = tt.originalEstimate;
+      if (tt.remainingEstimate) estimates.remainingEstimate = tt.remainingEstimate;
+      return estimates;
+    }
     default:
       // 커스텀 필드 (customfield_XXXXX)
       return fields[fieldId];
