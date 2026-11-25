@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
@@ -56,7 +56,6 @@ import type {
   AlertRule,
   AlertShift,
   DeployCycle,
-  QaScheduleRule,
   QaRouterEvent,
   QaWindowSource,
 } from '@/lib/services/qa-router/types';
@@ -126,10 +125,17 @@ import {
   ANCHOR_OPTIONS,
   anchorWhen,
   DayStepper,
+  alertRuleRows,
+  type AlertRuleRow,
+  groupAlertRows,
+  inDaysText,
   NativeSelect,
+  nextAlert,
   RuleList,
+  ruleName,
   SHIFT_OPTIONS,
   whenText,
+  ymdDow,
 } from '../../pipeline';
 
 /**
@@ -181,9 +187,8 @@ export default function CycleDetailPage() {
 
   const { config, state, events } = t;
   const now = new Date();
-  const todayKst = new Date(now.getTime() + 9 * 3_600_000)
-    .toISOString()
-    .slice(0, 10);
+  const nowKst = new Date(now.getTime() + 9 * 3_600_000).toISOString();
+  const todayKst = nowKst.slice(0, 10);
   const st = cycleStage(
     cycle,
     state?.activeCycle?.fixVersion ?? null,
@@ -195,7 +200,7 @@ export default function CycleDetailPage() {
   const deploy = resolveDeployYmd(cycle);
   const qaEnd = resolveQaEndYmd(cycle);
   /*
-    알림 기준 목록이 쓸 QA 기간. 아래 `QaScheduleSection` 이 보여주는 것과
+    알림 기준 목록이 쓸 QA 기간. 표의 "QA 기간" 칸이 보여주는 것과
     같은 사다리다 — 09:10 배치가 이 값으로 울릴 날을 고르기 때문이다.
   */
   const alertWindow = resolveQaWindow({
@@ -374,6 +379,15 @@ export default function CycleDetailPage() {
               {alertNote.label}
             </Badge>
           )}
+          {/* 데모에서는 저장할 곳이 없어 열지 않는다 */}
+          {!demo && (
+            <QaWindowEditor
+              configId={id}
+              cycle={cycle}
+              source={alertWindow.source}
+              onSaved={t.reload}
+            />
+          )}
           {alertNote?.detail && <Note>{alertNote.detail}</Note>}
           {/* 어긋났거나 없는 날짜로 진행률을 세지 않는다. */}
           {alertWindow.source !== 'invalid' &&
@@ -413,52 +427,56 @@ export default function CycleDetailPage() {
         </> }}
         />
         {/*
-          봇이 이 차수 알림을 모으는 스레드. 지금 보는 차수일 때만 나온다 —
-          스레드 ts 는 activeCycle 에만 있다.
+          알림 기준과 알림 스레드를 한 행으로 둔다. 둘 다 "이 차수 알림은
+          언제, 어디로" 라는 한 질문의 답이다. 전에는 기준은 맨 아래 섹션,
+          스레드는 표의 따로 한 행이었다. 고칠 때만 같은 칸 안에서 편집기가
+          펼쳐진다.
 
-          전에는 여기 "QA 스레드" 행이 같이 있었다. QA 팀이 파는 Slack
-          스레드를 읽어 오던 기능인데 걷어냈다 — 개인 토큰이 필요하고 KQ
-          에만 있는 흐름이라 다른 프로젝트로 옮길 수 없었다. 그 행은 GW 에서
-          영원히 "아직 찾지 못했습니다" 였다.
+          스레드 링크는 지금 보는 차수일 때만 나온다 — 스레드 ts 는
+          activeCycle 에만 있다.
         */}
-        {threadUrl && (
-          <DescRowPair
-            left={{
-              label: '알림 스레드',
-              node: (
-                <>
-                  <a
-                    className="inline-flex items-baseline gap-1 text-blue-700 underline decoration-blue-700/40 underline-offset-2 dark:text-blue-300 dark:decoration-blue-300/40"
-                    href={threadUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    #{state?.derived?.channelNames?.[config.slackChannelId] ?? '알림'}{' '}
-                    스레드 열기 <ExternalLinkIcon />
-                  </a>
-                  <Note>이 차수 판정 알림과 마감 요약이 쌓이는 곳</Note>
-                </>
-              ),
-            }}
-            right={null}
-          />
-        )}
+        <DescRowPair
+          left={{
+            label: '알림',
+            node: (
+              <AlertRulesSection
+                configId={demo ? null : id}
+                configRules={config.alertRules}
+                override={cycle.alertRulesOverride ?? null}
+                deployYmd={cycle.deployYmd}
+                /*
+                  09:10 배치가 쓰는 값과 같아야 한다. 대장 칸(`cycle.qaEndYmd`)을
+                  넘기면 기간이 직접 입력이나 규칙에서 온 차수에서 **울리지도 않을
+                  날짜가 목록에 적힌다.**
+                */
+                schedule={{
+                  qaStartYmd: alertWindow.qaStartYmd,
+                  qaEndYmd: alertWindow.qaEndYmd,
+                  prodYmd: prodDayOf({
+                    deployYmd: cycle.deployYmd,
+                    prodYmd: cycle.prodYmd,
+                  }),
+                }}
+                todayYmd={todayKst}
+                nowHm={nowKst.slice(11, 16)}
+                thread={
+                  threadUrl
+                    ? {
+                        url: threadUrl,
+                        channel:
+                          state?.derived?.channelNames?.[
+                            config.slackChannelId
+                          ] ?? '알림',
+                      }
+                    : null
+                }
+                onSaved={t.reload}
+              />
+            ),
+          }}
+          right={null}
+        />
       </Descriptions>
-
-      {/*
-        QA 기간을 정하는 사다리(직접 입력 → 배포대장 → 라우터 기본 규칙)의
-        결과를 여기서 보여준다. 위 Descriptions 의 "QA 기간" 행은 대장 값만
-        보므로, 대장이 비었거나 앞뒤가 안 맞을 때(직접 입력·규칙까지 본
-        진짜 판정)는 이 섹션이 답한다 — 차수 정보와 같은 층이라 선으로
-        가르지 않는다.
-      */}
-      <QaScheduleSection
-        configId={demo ? null : id}
-        cycle={cycle}
-        rule={config.qaScheduleRule}
-        jiraBase={jiraBase}
-        onSaved={t.reload}
-      />
 
       {/*
         여기부터 "지금 어떻게 되고 있나" 다. 위의 차수 정보와 층이 다르므로
@@ -509,93 +527,40 @@ export default function CycleDetailPage() {
         />
       </section>
 
-      {/*
-        알림 기준은 맨 아래다. 위의 것들은 "이 차수가 어떻게 되고 있나" 라는
-        사실이고 이건 손잡이다 — 사실을 읽으러 온 사람이 손잡이를 먼저 보면
-        안 된다. 대신 덮어쓴 경우에는 제목 옆 배지가 위에서 한 번 말한다.
-      */}
-      <Separator className="!mt-7" />
-      <AlertRulesSection
-        className="!mt-7"
-        configId={demo ? null : id}
-        configRules={config.alertRules}
-        override={cycle.alertRulesOverride ?? null}
-        deployYmd={cycle.deployYmd}
-        /*
-          09:10 배치가 쓰는 값과 같아야 한다. 대장 칸(`cycle.qaEndYmd`)을
-          넘기면 기간이 직접 입력이나 규칙에서 온 차수에서 **울리지도 않을
-          날짜가 목록에 적힌다.**
-        */
-        schedule={{
-          qaStartYmd: alertWindow.qaStartYmd,
-          qaEndYmd: alertWindow.qaEndYmd,
-          prodYmd: prodDayOf({
-            deployYmd: cycle.deployYmd,
-            prodYmd: cycle.prodYmd,
-          }),
-        }}
-        onSaved={t.reload}
-      />
     </div>
   );
 }
 
-/** `QaWindow.source` 를 사람 말로. `none` 은 채울 값, `invalid` 는 고칠 값이다. */
-const QA_WINDOW_SOURCE_LABEL: Record<QaWindowSource, string> = {
-  manual: '직접 입력한 값',
-  ledger: '배포대장 본문',
-  rule: '라우터 기본 규칙',
-  // 미정·어긋남은 목록·상세 표의 배지와 같은 말이어야 한다. 그래서 직접 쓰지 않고 windowNote 에서 가져온다.
-  none: windowNote({ qaStartYmd: null, qaEndYmd: null, source: 'none', why: null })!
-    .label,
-  invalid: windowNote({
-    qaStartYmd: null,
-    qaEndYmd: null,
-    source: 'invalid',
-    why: null,
-  })!.label,
-};
-
 /**
- * QA 기간 — 어디서 왔고, 미정이거나 이상하면 무엇을 해야 하나.
+ * QA 기간 직접 입력. 차수 정보 표의 "QA 기간" 칸 안에서 연다.
  *
- * `resolveQaWindow` 가 직접 입력 → 배포대장 → 라우터 기본 규칙 순서로
- * 값을 찾는다. **`none` 과 `invalid` 를 같은 문구로 묶지 않는다** — 전자는
- * 아무도 값을 안 넣은 것이고("채워야 한다"), 후자는 값이 있는데 앞뒤가
- * 안 맞는 것이다("고쳐야 한다", 보통 배포대장을). 둘을 한 문장으로
- * 뭉치면 배포대장이 틀렸는데 사람이 직접 입력으로 덮어쓰고 끝내서,
- * 다음 차수도 같은 자리에서 또 틀린다.
+ * 전에는 표 아래 따로 섹션을 두고 입력칸을 늘 펼쳐 뒀다. 값과 출처(배지)가
+ * 표에 이미 있어 같은 말을 두 번 했고, 대부분의 차수는 고칠 일이 없다.
+ * 그래서 칸 안 버튼 하나로 줄인다.
+ *   - 미정, 어긋남: "입력" 으로 눈에 띄게
+ *   - 그 밖: "수정" 으로 조용히
  */
-function QaScheduleSection({
+function QaWindowEditor({
   configId,
   cycle,
-  rule,
-  jiraBase,
+  source,
   onSaved,
 }: {
-  /** 저장 대상. 데모에서는 null 이고 입력칸을 열지 않는다. */
-  configId: string | null;
+  configId: string;
   cycle: DeployCycle;
-  rule: QaScheduleRule | null;
-  jiraBase: string;
+  source: QaWindowSource;
   onSaved: () => void;
 }) {
-  const win = resolveQaWindow({
-    manualStartYmd: cycle.qaStartYmdManual ?? null,
-    manualEndYmd: cycle.qaEndYmdManual ?? null,
-    ledgerStartYmd: cycle.qaStartYmd,
-    ledgerEndYmd: cycle.qaEndYmd,
-    prodYmd: cycle.prodYmd,
-    deployYmd: cycle.deployYmd,
-    rule,
-  });
-
+  const [open, setOpen] = useState(false);
   const [manualStart, setManualStart] = useState(cycle.qaStartYmdManual ?? '');
   const [manualEnd, setManualEnd] = useState(cycle.qaEndYmdManual ?? '');
   const [saving, setSaving] = useState(false);
+  const needsInput = source === 'none' || source === 'invalid';
+  // 둘 다 있을 때만 순서를 본다. 한쪽만 넣으면 나머지는 대장, 규칙이 채운다
+  const reversed = !!manualStart && !!manualEnd && manualStart > manualEnd;
+  const hasManual = !!(cycle.qaStartYmdManual || cycle.qaEndYmdManual);
 
   const save = async (clear: boolean) => {
-    if (!configId) return;
     setSaving(true);
     try {
       const res = await fetch(
@@ -621,6 +586,7 @@ function QaScheduleSection({
       toast.success(
         clear ? '지우고 배포대장 값을 다시 씁니다' : '저장했습니다'
       );
+      setOpen(false);
       onSaved();
     } finally {
       setSaving(false);
@@ -628,86 +594,89 @@ function QaScheduleSection({
   };
 
   return (
-    <section>
-      <div className="mb-2 flex flex-wrap items-baseline gap-x-2">
-        <h3 className="text-base font-semibold">QA 기간</h3>
-        <span className="text-xs text-muted-foreground">
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        // 열 때마다 저장된 값으로. 취소한 입력이 저장된 값처럼 남지 않게
+        if (next) {
+          setManualStart(cycle.qaStartYmdManual ?? '');
+          setManualEnd(cycle.qaEndYmdManual ?? '');
+        }
+        setOpen(next);
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button
+          size="sm"
+          variant={needsInput ? 'default' : 'outline'}
+          className="h-6 w-fit px-2 text-[11px]"
+        >
+          {needsInput ? '입력' : '수정'}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 text-xs">
+        <p className="font-medium">QA 기간 직접 입력</p>
+        <p className="mt-0.5 text-muted-foreground">
           직접 입력 → 배포대장 → 라우터 기본 규칙 순서로 정합니다
-        </span>
-      </div>
-
-      {win.source === 'none' && (
-        <p className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
-          QA 기간이 미정입니다. QA 시작·종료 알림이 이 차수엔 나가지 않습니다.
         </p>
-      )}
-      {win.source === 'invalid' && (
-        <div className="rounded-md border border-red-200 bg-red-50/60 px-2.5 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
-          <p>
-            {win.why} 배포일이 당겨질 때 QA 줄이 같이 안 고쳐진 경우가 많습니다.
-          </p>
-          <p className="mt-1 flex flex-wrap items-baseline gap-x-2">
-            <span>배포대장을 고치거나 아래에 직접 넣어 주세요.</span>
-            {cycle.deployPageId && (
-              <a
-                className="inline-flex items-baseline gap-1 underline decoration-current/40 underline-offset-2"
-                href={`${jiraBase}/wiki/spaces/CPO/pages/${cycle.deployPageId}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                배포대장 열기 <ExternalLinkIcon />
-              </a>
-            )}
-          </p>
-        </div>
-      )}
-      {win.source !== 'none' && win.source !== 'invalid' && (
-        <p className="text-sm text-muted-foreground">
-          <span className="font-mono tabular-nums text-foreground">
-            {win.qaStartYmd} ~ {win.qaEndYmd}
-          </span>{' '}
-          · {QA_WINDOW_SOURCE_LABEL[win.source]}
-        </p>
-      )}
-
-      {configId && (
-        <div className="mt-3 flex flex-wrap items-end gap-2">
-          <label className="text-xs text-muted-foreground">
+        <div className="mt-3 flex gap-2">
+          <label className="text-muted-foreground">
             QA 시작
             <Input
               type="date"
               value={manualStart}
               onChange={(e) => setManualStart(e.target.value)}
-              className="mt-1 h-8 w-[150px] text-xs"
+              className="mt-1 h-8 w-[140px] text-xs"
               aria-label="QA 시작"
             />
           </label>
-          <label className="text-xs text-muted-foreground">
+          <label className="text-muted-foreground">
             QA 종료
             <Input
               type="date"
               value={manualEnd}
               onChange={(e) => setManualEnd(e.target.value)}
-              className="mt-1 h-8 w-[150px] text-xs"
+              className="mt-1 h-8 w-[140px] text-xs"
               aria-label="QA 종료"
+              aria-invalid={reversed}
             />
           </label>
-          <Button size="sm" disabled={saving} onClick={() => void save(false)}>
-            {saving ? '저장 중…' : '저장'}
-          </Button>
-          {(cycle.qaStartYmdManual || cycle.qaEndYmdManual) && (
+        </div>
+        {reversed && (
+          <p role="alert" className="mt-1.5 text-destructive">
+            종료일이 시작일보다 앞섭니다
+          </p>
+        )}
+        <div className="mt-3 flex items-center justify-end gap-1.5">
+          {hasManual && (
             <Button
               variant="ghost"
               size="sm"
+              className="mr-auto"
               disabled={saving}
               onClick={() => void save(true)}
             >
               지우고 대장 값 쓰기
             </Button>
           )}
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={saving}
+            onClick={() => setOpen(false)}
+          >
+            취소
+          </Button>
+          <Button
+            size="sm"
+            disabled={saving || reversed}
+            onClick={() => void save(false)}
+          >
+            {saving ? '저장 중…' : '저장'}
+          </Button>
         </div>
-      )}
-    </section>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -732,8 +701,10 @@ function AlertRulesSection({
   override,
   deployYmd,
   schedule,
+  todayYmd,
+  nowHm,
+  thread,
   onSaved,
-  className,
 }: {
   /** 저장 대상. 데모에서는 null 이고 편집을 열지 않는다. */
   configId: string | null;
@@ -746,8 +717,12 @@ function AlertRulesSection({
     qaEndYmd: string | null;
     prodYmd: string | null;
   };
+  todayYmd: string;
+  /** KST `HH:MM`. 오늘 알림이 이미 나갔는지 가른다 */
+  nowHm: string;
+  /** 알림이 쌓이는 스레드. 지금 보는 차수가 아니면 null */
+  thread: { url: string; channel: string } | null;
   onSaved: () => void;
-  className?: string;
 }) {
   /** 편집 중인 규칙. null 이면 읽기 상태다. */
   const [draft, setDraft] = useState<AlertRule[] | null>(null);
@@ -790,14 +765,8 @@ function AlertRulesSection({
   };
 
   return (
-    <section className={className}>
-      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <div className="flex flex-wrap items-baseline gap-x-2">
-          <h3 className="text-base font-semibold">알림 기준</h3>
-          <span className="text-xs text-muted-foreground">
-            이 차수 이야기를 언제 채널에 올리나
-          </span>
-        </div>
+    <div className="flex w-full min-w-0 flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
         {/*
           출처를 배지로 말한다. 규칙 목록만 있으면 그 값이 설정에서 온 것인지
           이 차수가 따로 가진 것인지 구분할 방법이 없다.
@@ -805,53 +774,55 @@ function AlertRulesSection({
         <Badge variant={overridden ? 'warn' : 'muted'}>
           {overridden ? '이 차수만 다름' : '설정값을 씁니다'}
         </Badge>
-      </div>
-
-      {draft === null ? (
-        <>
-          <RuleList rules={live} schedule={schedule} />
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
-            {overridden ? (
-              <>
-                이 차수는 설정의 알림 기준을 쓰지 않습니다. 되돌리면 설정값을
-                다시 씁니다.
-              </>
-            ) : (
-              <>
-                설정(대상 설정 → 언제 요약을 보내나)의 값입니다. 날짜는 이 차수
-                기준으로 계산했습니다.
-              </>
-            )}
-          </p>
-          {configId && (
-            <div className="mt-2 flex flex-wrap items-center gap-2">
+        {configId && draft === null && (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              /*
+                켤 때 **설정값을 복사해 넣는다.** 빈 목록에서 시작하게 하면
+                사람이 규칙을 처음부터 다시 쓰는데, 고치고 싶은 것은 보통
+                날짜 하나뿐이다.
+              */
+              onClick={() => setDraft(live.map((r) => ({ ...r })))}
+            >
+              {overridden ? '이 차수 기준 고치기' : '이 차수만 다르게'}
+            </Button>
+            {overridden && (
               <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                /*
-                  켤 때 **설정값을 복사해 넣는다.** 빈 목록에서 시작하게 하면
-                  사람이 규칙을 처음부터 다시 쓰는데, 고치고 싶은 것은 보통
-                  날짜 하나뿐이다.
-                */
-                onClick={() =>
-                  setDraft(live.map((r) => ({ ...r })))
-                }
+                className="h-6 px-2 text-[11px]"
+                disabled={saving}
+                onClick={() => void save(null)}
               >
-                {overridden ? '이 차수 기준 고치기' : '이 차수만 다르게'}
+                설정값으로 되돌리기
               </Button>
-              {overridden && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => void save(null)}
-                >
-                  설정값으로 되돌리기
-                </Button>
-              )}
-            </div>
-          )}
-        </>
+            )}
+          </>
+        )}
+        {thread && (
+          <span className="ml-auto text-xs text-muted-foreground">
+            <a
+              className="inline-flex items-baseline gap-1 text-blue-700 underline decoration-blue-700/40 underline-offset-2 dark:text-blue-300 dark:decoration-blue-300/40"
+              href={thread.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              #{thread.channel} 스레드 <ExternalLinkIcon />
+            </a>{' '}
+            로 보냅니다
+          </span>
+        )}
+      </div>
+      {draft === null ? (
+        <AlertTimeline
+          rules={live}
+          schedule={schedule}
+          todayYmd={todayYmd}
+          nowHm={nowHm}
+        />
       ) : (
         <CycleRuleEditor
           draft={draft}
@@ -862,7 +833,251 @@ function AlertRulesSection({
           onSave={() => void save(draft)}
         />
       )}
-    </section>
+    </div>
+  );
+}
+
+const DAY_MS = 86_400_000;
+const dayNum = (ymd: string) => Date.parse(`${ymd}T00:00:00Z`) / DAY_MS;
+
+/**
+ * 알림 기준 읽기 화면. 날짜 알림은 QA 기간 막대 위의 점으로, 조건형은
+ * 아래 알약으로 그린다.
+ *
+ * 목록(`RuleList`)은 시각순이라 "언제 끝나고 다음에 뭐가 나가나" 를 날짜를
+ * 하나씩 읽어 맞춰 봐야 했다. 시각은 거의 다 09:10 이라 시각순이 주는
+ * 정보가 적고, 사람이 궁금한 것은 **날** 이다. 그래서 날을 위치로 그린다.
+ *
+ * 계산은 `alertRuleRows`·`groupAlertRows` 를 그대로 쓴다. 편집기와 같은
+ * 함수여야 고친 결과가 같은 날로 보인다.
+ */
+function AlertTimeline({
+  rules,
+  schedule,
+  todayYmd,
+  nowHm,
+}: {
+  rules: AlertRule[];
+  schedule: {
+    qaStartYmd: string | null;
+    qaEndYmd: string | null;
+    prodYmd: string | null;
+  };
+  todayYmd: string;
+  nowHm: string;
+}) {
+  const { live, silent } = groupAlertRows(alertRuleRows(rules, schedule));
+  const dated = live.filter((r) => r.day);
+  const conditional = live.filter((r) => !r.day);
+
+  // 같은 날 여러 알림은 한 점에 모아 이름을 줄줄이 적는다
+  const byDay = new Map<string, AlertRuleRow[]>();
+  for (const r of dated) byDay.set(r.day!, [...(byDay.get(r.day!) ?? []), r]);
+  const days = [...byDay.keys()].sort();
+  /*
+    다음 알림은 날과 **시각** 을 같이 본다. 날만 보면 오늘 09:10 이 이미
+    지났어도 오늘 점을 "다음" 으로 강조했다.
+  */
+  const isPast = (r: AlertRuleRow) =>
+    r.day! < todayYmd || (r.day === todayYmd && r.rule.at <= nowHm);
+  const upcoming = nextAlert(rules, schedule, todayYmd, nowHm);
+  const nextRow = upcoming?.row ?? null;
+  const next = nextRow?.day ?? null;
+
+  const ends = [
+    ...days,
+    schedule.qaStartYmd,
+    schedule.qaEndYmd,
+    schedule.prodYmd,
+  ].filter((d): d is string => !!d);
+  const lo = Math.min(...ends.map(dayNum));
+  const hi = Math.max(...ends.map(dayNum));
+  // 양끝 라벨이 잘리지 않게 7% 씩 띄운다
+  const pos = (ymd: string) =>
+    hi === lo ? 50 : 7 + ((dayNum(ymd) - lo) / (hi - lo)) * 86;
+  // 오늘이 알림 날과 겹치면 선 대신 그 점에 "오늘" 을 붙인다
+  const todayLine =
+    ends.length > 0 &&
+    !byDay.has(todayYmd) &&
+    dayNum(todayYmd) >= lo &&
+    dayNum(todayYmd) <= hi;
+  const scheduleOk = !!(schedule.qaStartYmd && schedule.qaEndYmd);
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/*
+        사람이 이 행에서 제일 먼저 묻는 것("다음에 뭐가 나가나")을 글로 먼저
+        답한다. 그림은 그 근거다. 화면 낭독기도 이 줄로 요약을 듣는다.
+      */}
+      {nextRow ? (
+        <p className="text-xs">
+          {/*
+            언제를 먼저, 이름은 따옴표로. 이름에 "오늘" 이 든 알림이 있어
+            "오늘 운영 배포 (내일)" 처럼 날짜끼리 부딪혀 읽혔다
+          */}
+          <span className="text-muted-foreground">다음 알림</span>{' '}
+          <span className="font-semibold">
+            {inDaysText(upcoming!.inDays)}
+          </span>{' '}
+          <span className="font-mono tabular-nums">
+            {ymdDow(nextRow.day!)} {nextRow.rule.at}
+          </span>{' '}
+          <span className="text-muted-foreground">
+            ‘{ruleName(nextRow.rule)}’
+          </span>
+        </p>
+      ) : (
+        days.length > 0 && (
+          <p className="text-xs text-muted-foreground">
+            이 차수의 날짜 알림은 모두 지났습니다
+          </p>
+        )
+      )}
+      {days.length > 0 && (
+        // 좁은 화면에서는 라벨이 겹치므로 가로로 밀어 본다
+        <div className="overflow-x-auto">
+          <div
+            className="relative h-[62px] min-w-[30rem]"
+            // 그림은 위 "다음 알림" 줄과 아래 목록이 글로 대신한다
+            aria-hidden
+          >
+            <div className="absolute inset-x-0 top-[25px] h-px bg-border" />
+            {schedule.qaStartYmd && schedule.qaEndYmd && (
+              <div
+                className="absolute top-[22px] h-[7px] rounded-full bg-blue-100 dark:bg-blue-950"
+                style={{
+                  left: `${pos(schedule.qaStartYmd)}%`,
+                  width: `${pos(schedule.qaEndYmd) - pos(schedule.qaStartYmd)}%`,
+                }}
+              />
+            )}
+            {/* 막대가 무엇인지 이름표. 가운데는 점이 없어 비어 있다 */}
+            {schedule.qaStartYmd && schedule.qaEndYmd && (
+              <span
+                className="absolute top-[34px] -translate-x-1/2 text-[11px] text-blue-700 dark:text-blue-300"
+                style={{
+                  left: `${(pos(schedule.qaStartYmd) + pos(schedule.qaEndYmd)) / 2}%`,
+                }}
+              >
+                QA 기간{' '}
+                {dayNum(schedule.qaEndYmd) - dayNum(schedule.qaStartYmd) + 1}일
+              </span>
+            )}
+            {todayLine && (
+              <div
+                className="absolute top-[16px] flex -translate-x-1/2 flex-col items-center"
+                style={{ left: `${pos(todayYmd)}%` }}
+              >
+                <span className="h-4 border-l-2 border-dashed border-red-500" />
+                <span className="text-[11px] font-semibold text-red-600 dark:text-red-400">
+                  오늘
+                </span>
+              </div>
+            )}
+            {days.map((d) => {
+              const rows = byDay.get(d)!;
+              const past = rows.every(isPast);
+              const isNext = d === next;
+              const prod = rows.some(
+                (r) => anchorWhen(r.rule)?.anchor === 'prod'
+              );
+              const times = [...new Set(rows.map((r) => r.rule.at))].join(
+                ', '
+              );
+              return (
+                <div
+                  key={d}
+                  className={cn(
+                    'absolute top-0 flex -translate-x-1/2 flex-col items-center whitespace-nowrap',
+                    past && 'opacity-60'
+                  )}
+                  style={{ left: `${pos(d)}%` }}
+                >
+                  <span
+                    className={cn(
+                      'h-4 text-[11px] leading-4',
+                      isNext ? 'font-semibold' : 'text-foreground/80'
+                    )}
+                  >
+                    {rows.map((r) => ruleName(r.rule)).join(' · ')}
+                    {rows.some((r) => r.shadowed) && (
+                      <span className="text-amber-700 dark:text-amber-400">
+                        {' '}
+                        ⚠ 겹침
+                      </span>
+                    )}
+                  </span>
+                  {/* 점 가운데가 축(25.5px)에 오도록 높이 h-4 + 여백으로 맞춘다 */}
+                  <span className="flex h-5 items-center">
+                    <span
+                      className={cn(
+                        'rounded-full border-2 border-background',
+                        isNext ? 'size-3.5 ring-2' : 'size-2.5',
+                        prod
+                          ? 'bg-emerald-600 ring-emerald-200 dark:ring-emerald-900'
+                          : 'bg-blue-600 ring-blue-200 dark:ring-blue-900'
+                      )}
+                    />
+                  </span>
+                  <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+                    {ymdDow(d)} {times}
+                    {d === todayYmd && (
+                      <span className="ml-1 font-sans font-semibold text-red-600 dark:text-red-400">
+                        오늘
+                      </span>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {/*
+        날을 미리 정할 수 없는 알림. 타임라인에 점으로 못 찍으니 아래에
+        범례처럼 적는다 — 칩으로 두면 눌러지는 것처럼 보였다.
+      */}
+      {conditional.length > 0 && (
+        <dl className="grid grid-cols-[auto_auto_1fr] items-baseline gap-x-3 gap-y-0.5 border-t border-dashed pt-1.5 text-xs">
+          {conditional.map((r) => {
+            const idle =
+              r.rule.when.kind === 'scheduleUnusable' && scheduleOk;
+            return (
+              <Fragment key={r.rule.id}>
+                <dt className="text-[11px] text-muted-foreground">
+                  {r.rule.when.kind === 'activeCycle' ? '매일' : '필요할 때'}
+                </dt>
+                <dd
+                  className={cn(
+                    'font-mono font-semibold tabular-nums',
+                    idle && 'text-muted-foreground'
+                  )}
+                >
+                  {r.rule.at}
+                </dd>
+                <dd className={cn(idle && 'text-muted-foreground')}>
+                  {ruleName(r.rule)}
+                  <span className="ml-1.5 text-[11px] text-muted-foreground">
+                    {whenText(r.rule.when)}
+                    {idle && ' · 지금은 해당 없음'}
+                  </span>
+                </dd>
+              </Fragment>
+            );
+          })}
+        </dl>
+      )}
+      {silent.length > 0 && (
+        <p className="text-[11px] text-muted-foreground">
+          안 울림: {silent.map((r) => ruleName(r.rule)).join(', ')}
+        </p>
+      )}
+      {live.length === 0 && (
+        <p className="text-[11.5px] text-red-700 dark:text-red-300">
+          켜져 있는 알림이 하나도 없습니다
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -1174,6 +1389,23 @@ function verdictKey(e: QaRouterEvent): string {
 }
 
 /**
+ * 이 알림이 최종 담당자 필터의 어느 칸에 들어가나. `matches` 의 갈래와 같다.
+ * 이름을 못 받은 우리 팀 건은 고를 칸이 없어 null (필터 없이 연다).
+ */
+function ownerFilterKey(e: QaRouterEvent): string | null {
+  const b = settlementBucket(e.outcome);
+  if (b === 'our_team') return e.outcomeName ?? null;
+  if (b === 'other_team') return OTHER_KEY;
+  return OPEN_KEY;
+}
+
+function ownerFilterLabel(key: string): string {
+  if (key === OTHER_KEY) return '타팀';
+  if (key === OPEN_KEY) return '미배정';
+  return `@${key}`;
+}
+
+/**
  * 이 차수에 누구에게 몇 건 알렸나.
  *
  * 이 봇은 Jira 담당자를 바꾸지 않는다 — 찾아서 알리기만 한다.
@@ -1198,7 +1430,36 @@ function CycleAssignments({
   instance: 'ignite' | 'hmg';
   stage: ReturnType<typeof cycleStage>['stage'];
 }) {
-  const [only, setOnly] = useState<string | null>(null);
+  /*
+    Slack 알림에서 타고 온 티켓 (`?ticket=KQ-…`).
+
+    처음 온 사람은 62건 중 자기 것을 찾으려 머리글 깔때기를 열 줄 모른다.
+    새 필터를 만들지 않고, 이미 있는 최종 담당자 필터를 그 티켓 주인으로
+    켜 둔 채 연다. 사람이 필터를 한 번이라도 만지면 그때부터는 그 값을 쓴다.
+  */
+  const [ticket, setTicket] = useState<string | null>(null);
+  useEffect(() => {
+    // 서버 렌더에는 주소창이 없다. 마운트 후에 한 번만 읽는다 (useDemoMode 와 같다)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTicket(new URLSearchParams(window.location.search).get('ticket'));
+  }, []);
+  const target = ticket
+    ? (events.find((e) => e.issueKey === ticket) ?? null)
+    : null;
+  const targetKey = target ? ownerFilterKey(target) : null;
+  /** undefined = 아직 안 만짐. 그동안은 링크가 정한 필터를 쓴다 */
+  const [picked, setOnly] = useState<string | null | undefined>(undefined);
+  const only = picked === undefined ? targetKey : picked;
+
+  // 그 행으로 한 번만 내린다. 표가 자기 스크롤 상자를 가져서 페이지만 내리면 안 보인다
+  const scrolled = useRef(false);
+  useEffect(() => {
+    if (!target || scrolled.current) return;
+    scrolled.current = true;
+    document
+      .getElementById(`assign-${target.id}`)
+      ?.scrollIntoView({ block: 'center' });
+  }, [target]);
   /** 펼친 알림. 근거는 한 번에 하나만 본다. */
   const {
     open: openIds,
@@ -1447,6 +1708,24 @@ function CycleAssignments({
         "어제 것 중 손볼 게 있나" 이고, 0건이면 줄에서 아예 사라진다 —
         **뜨는 것 자체가 신호**다.
       */}
+      {ticket && picked === undefined && (
+        <p
+          className={cn(
+            'mb-2 rounded-md border px-2.5 py-1.5 text-xs',
+            target
+              ? 'border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200'
+              : 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200'
+          )}
+        >
+          <span className="font-semibold">Slack 에서 연 티켓</span>{' '}
+          <span className="font-mono">{ticket}</span>
+          {!target
+            ? ': 이 차수 배정 기록에 없습니다. 다른 차수에서 보낸 알림일 수 있어요'
+            : targetKey
+              ? ` · 최종 담당자 ${ownerFilterLabel(targetKey)} 필터를 켰어요 (${shown.length}건)`
+              : ' · 아래 표의 노란 행입니다'}
+        </p>
+      )}
       <div className="mb-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
         <span>
           전체 <span className="font-mono tabular-nums">{events.length}</span>건
@@ -1653,7 +1932,14 @@ function CycleAssignments({
                     return (
                       <Fragment key={e.id}>
                         <tr
-                          className={`cursor-pointer border-b last:border-0 hover:bg-muted/60 ${open ? 'bg-muted/40' : ''}`}
+                          id={`assign-${e.id}`}
+                          className={cn(
+                            'cursor-pointer border-b last:border-0 hover:bg-muted/60',
+                            open && 'bg-muted/40',
+                            e.issueKey === ticket &&
+                              'bg-yellow-50 shadow-[inset_3px_0_0_theme(colors.yellow.500)] dark:bg-yellow-950/40'
+                          )}
+                          aria-current={e.issueKey === ticket || undefined}
                           onClick={() => toggleEvent(e.id)}
                         >
                           <td className="align-middle">
@@ -2155,15 +2441,18 @@ function PlanSection({
       <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-stretch">
         <div className="relative flex shrink-0 flex-col rounded-lg border px-3 py-3 2xl:w-[17rem]">
             <p className="shrink-0 text-xs font-medium">
-              {total > 0 ? `${ticketDone}/${total}건 완료` : 'QA 탄 대상 없음'}{' '}
               {/*
-                범위를 숫자 바로 옆에 적는다. 제목 옆에 두면 무엇을 한정하는
-                말인지 멀고, 표로 빼면 줄 하나를 위해 표가 생긴다.
+                모수를 문장에 넣는다. "4/4 완료" 만 두면 흐린 행까지 끝난
+                것으로 읽혀 배포해도 되는지를 잘못 판단했다 (페르소나 검토).
               */}
-              <span className="font-normal text-muted-foreground">
-                FE1팀 QA 대상
-                {preQa > 0 && ` · QA 전 ${preQa}건은 집계 밖`}
-              </span>
+              {total > 0
+                ? `FE1팀 QA 대상 ${total}건 중 ${ticketDone}건 완료`
+                : 'QA 탄 대상 없음'}
+              {preQa > 0 && (
+                <span className="mt-0.5 block font-normal text-muted-foreground">
+                  QA 안 거친 개발 {preQa}건은 따로 셉니다 (흐린 행)
+                </span>
+              )}
             </p>
             {/*
             조각이 하나뿐이어도 그린다.
@@ -2326,7 +2615,7 @@ function PlanSection({
                               open && 'bg-muted/40',
                               t.fixVersionMissing &&
                                 'bg-amber-50/70 dark:bg-amber-950/40',
-                              // QA 전 개발 행만 흐리게. 기획 행은 QA 전이어도 센다
+                              // QA 안 거친 개발 행만 흐리게. 기획 행은 QA 안 거쳤어도 센다
                               !t.counted && 'opacity-50'
                             )}
                             onClick={
@@ -2349,9 +2638,14 @@ function PlanSection({
                                 </button>
                               )}
                             </td>
+                            {/* 키는 Jira 로 가고, 행 클릭(펼치기)은 타지 않는다 */}
                             <td className="py-2 pr-2 align-middle">
-                              <span className="font-mono text-xs font-semibold text-blue-700 dark:text-blue-300">
-                                {t.key}
+                              <span onClick={(e) => e.stopPropagation()}>
+                                <IssueLink
+                                  issueKey={t.key}
+                                  isSystem={false}
+                                  instance={instance}
+                                />
                               </span>
                             </td>
                             <td className="py-2 pr-2 align-middle">
@@ -2982,7 +3276,8 @@ function LinkedReason({
 }
 
 /** 섹션 제목 + 수집 상태 + 갱신 버튼. */
-const QA_LABEL = { in: 'QA 중', done: 'QA 끝', none: 'QA 전' } as const;
+// none 은 "아직 QA 전" 이 아니라 "QA 를 한 번도 안 거침" 이다. Jira 가 완료여도 none 일 수 있다
+const QA_LABEL = { in: 'QA 중', done: 'QA 끝', none: 'QA 안 거침' } as const;
 
 /**
  * 노란 칩 + [수정버전 넣기].
@@ -3050,7 +3345,12 @@ function MissingFixVersion({
       </span>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Button size="sm" className="h-6 px-2 text-[11px]" disabled={!configId}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[11px]"
+            disabled={!configId}
+          >
             수정버전 넣기
           </Button>
         </PopoverTrigger>
@@ -3062,6 +3362,12 @@ function MissingFixVersion({
           <p className="mt-1 text-muted-foreground">
             기획 담당 {plannerName ?? '미상'} · 기존 수정버전은 유지
           </p>
+          {/* 남의 팀 티켓을 바로 바꾼다. 누르기 전에 결과를 알아야 한다 */}
+          <ul className="mt-2 list-disc space-y-0.5 pl-4 text-muted-foreground">
+            <li>Jira 에 바로 반영됩니다</li>
+            <li>되돌리려면 Jira 에서 직접 빼야 합니다</li>
+            <li>봇이 기획 담당에게 따로 알리지 않습니다</li>
+          </ul>
           <div className="mt-3 flex justify-end gap-1.5">
             <Button
               size="sm"
@@ -3177,7 +3483,7 @@ function SectionHead({
             <RefreshCw
               className={`size-3 ${refreshing ? 'animate-spin' : ''}`}
             />
-            {refreshing ? '읽는 중' : '지금 갱신'}
+            {refreshing ? '읽는 중' : 'Jira 상태 다시 읽기'}
           </button>
         )}
       </div>

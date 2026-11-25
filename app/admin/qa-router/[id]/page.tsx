@@ -3,13 +3,19 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { ArrowLeft, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ChevronRight, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { db } from '@/lib/db';
 
 import { Badge, StatusLed } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
 import {
   cycleStage,
   describeQaProgress,
@@ -19,9 +25,13 @@ import type {
   DeployCycle,
   QaRouterEvent,
 } from '@/lib/services/qa-router/types';
-import { hasAlertOverride } from '@/lib/services/qa-router/types';
+import {
+  effectiveAlertRules,
+  hasAlertOverride,
+} from '@/lib/services/qa-router/types';
 import type { QaRouterConfig } from '@/lib/services/qa-router/types';
 import { windowNote } from '../window-note';
+import { inDaysText, nextAlert, ruleName } from './pipeline';
 
 import {
   Code,
@@ -239,32 +249,39 @@ export default function QaRouterDetailPage() {
         />
       )}
 
-      <section>
-        <div className="mb-2 flex flex-wrap items-baseline gap-2">
-          <h3 className="text-sm font-semibold">정기배포 차수</h3>
-          {/*
-            "몇 개인가"는 여기서 답한다. 전에는 이걸 세라고 표 맨 앞에 # 열을
-            뒀는데, 그 번호는 어디에도 없는 값이라 차수가 하나 늘면 모든 행의
-            번호가 바뀌었다 — 오늘의 1번이 내일 2번이라 부를 수가 없었다.
-          */}
-          <span className="text-xs tabular-nums text-muted-foreground">
-            {cycles.length}건
-          </span>
-          <span className="ml-auto flex items-baseline gap-2 text-xs text-muted-foreground">
-            배포대장에서 하루 1회 읽습니다
-            <button
-              type="button"
-              onClick={() => void rereadLedger()}
-              disabled={rereading || demo}
-              className="inline-flex items-center gap-1 text-blue-700 hover:underline disabled:opacity-50 disabled:hover:no-underline dark:text-blue-300"
-            >
-              <RefreshCw
-                className={`size-3 ${rereading ? 'animate-spin' : ''}`}
-              />
-              {rereading ? '읽는 중' : '지금 다시 읽기'}
-            </button>
-          </span>
-        </div>
+      {/*
+        표를 카드로 감싸 제목, 설명, 동작을 한 머리에 모은다. 전에는 제목은
+        왼쪽, 설명과 링크 모양 버튼은 오른쪽 끝에 흩어져 있었고, 표 테두리와
+        머리가 따로 놀았다.
+      */}
+      <Card className="overflow-hidden">
+        <CardHeader className="flex-row flex-wrap items-center justify-between gap-3 space-y-0 px-4 py-3">
+          <div className="flex flex-col gap-0.5">
+            <CardTitle className="flex items-center gap-2 text-base">
+              정기배포 차수
+              {/*
+                "몇 개인가"는 여기서 답한다. 전에는 이걸 세라고 표 맨 앞에 # 열을
+                뒀는데, 그 번호는 어디에도 없는 값이라 차수가 하나 늘면 모든 행의
+                번호가 바뀌었다 — 오늘의 1번이 내일 2번이라 부를 수가 없었다.
+              */}
+              <Badge variant="muted" className="tabular-nums">
+                {cycles.length}
+              </Badge>
+            </CardTitle>
+            <CardDescription className="text-xs">
+              배포대장에서 하루 1회 읽습니다
+            </CardDescription>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void rereadLedger()}
+            disabled={rereading || demo}
+          >
+            <RefreshCw className={rereading ? 'animate-spin' : ''} />
+            {rereading ? '읽는 중' : '배포대장 다시 읽기'}
+          </Button>
+        </CardHeader>
 
         <CycleTable
           cycles={cycles}
@@ -275,8 +292,12 @@ export default function QaRouterDetailPage() {
           demo={demo}
           enabled={config.enabled}
           qaScheduleRule={config.qaScheduleRule}
+          configRules={config.alertRules}
+          nowHm={new Date(now.getTime() + 9 * 3_600_000)
+            .toISOString()
+            .slice(11, 16)}
         />
-      </section>
+      </Card>
     </div>
   );
 }
@@ -389,6 +410,8 @@ function CycleTable({
   demo,
   enabled,
   qaScheduleRule,
+  configRules,
+  nowHm,
 }: {
   cycles: DeployCycle[];
   activeFixVersion: string | null;
@@ -413,6 +436,10 @@ function CycleTable({
    * `activeWindow` 와 같은 이유).
    */
   qaScheduleRule: QaRouterConfig['qaScheduleRule'];
+  /** 설정의 알림 기준. 지금 차수의 "다음 알림" 을 구한다 */
+  configRules: QaRouterConfig['alertRules'];
+  /** KST `HH:MM` */
+  nowHm: string;
 }) {
   const [page, setPage] = useState(0);
 
@@ -448,7 +475,7 @@ function CycleTable({
   /** 이 차수 기간에 차수 표시 없는 기록이 있는가. 있으면 숫자를 믿을 수 없다. */
   const ambiguous = (c: DeployCycle) => {
     const from = c.qaStartYmd ?? c.deployYmd;
-    // 배포일은 제목 기준이다 (ProdDate 주석 참고).
+    // 배포일은 제목 기준이다 (ProdDrift 주석 참고).
     const to = c.deployYmd;
     return orphanYmds.some((ymd) => ymd >= from && ymd <= to);
   };
@@ -477,6 +504,15 @@ function CycleTable({
     return rank(a) - rank(b);
   });
 
+  /*
+    같은 버전을 두 차수가 쓰면 배포대장 오기일 가능성이 크다. 실측:
+    11-09 차수가 release_20261007 을 달고 있어 10-07 차수와 겹쳤다.
+    배정 알림 수는 버전으로 세므로 두 행에 같은 수가 찍힌다. 표에서 바로 보여야 한다.
+  */
+  const versionUse = new Map<string, number>();
+  for (const c of cycles)
+    versionUse.set(c.fixVersion, (versionUse.get(c.fixVersion) ?? 0) + 1);
+
   const pageCount = Math.ceil(ordered.length / PAGE_SIZE);
   const shown = ordered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
@@ -488,23 +524,32 @@ function CycleTable({
         셀에 px-3 을 준다: 전에는 첫 열이 왼쪽 벽에, 마지막 열이 오른쪽 벽에
         붙어 표가 잘린 것처럼 보였다.
       */}
-      <div className="overflow-hidden rounded-lg border">
+      <div className="border-t">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/50 text-left text-xs text-muted-foreground">
-                <th className="px-3 py-2 font-medium">차수</th>
+                {/*
+                  차수 이름과 운영 배포일이 같은 날짜라 열을 합쳤다. 배포대장
+                  제목("Dev) 배포 - 2026-11-26(목)")은 앞부분이 모든 행에서
+                  같으므로 날짜만 남긴다 — 전체 제목은 툴팁에 있다.
+                */}
+                <th className="px-3 py-2 font-medium">차수 · 운영 배포</th>
                 <th className="px-3 py-2 font-medium">배포 버전</th>
                 <th className="px-3 py-2 font-medium">QA 기간</th>
-                <th className="px-3 py-2 font-medium">운영 배포</th>
                 <th className="px-3 py-2 font-medium">상태</th>
                 {/*
-              "배정"은 이 봇이 담당자를 배정하는 것처럼 읽힌다. 실제로는
-              Jira 를 건드리지 않고 Slack 으로 알리기만 한다.
-            */}
-                <th className="px-3 py-2 text-right font-medium whitespace-nowrap">
-                  알림
+                  "배정" 만 쓰면 봇이 Jira 담당자를 바꾸는 것처럼 읽히고,
+                  "알림" 만 쓰면 알림 기준(QA 시작 등)이 나간 횟수로 읽혔다.
+                  담당자를 정해 Slack 으로 알린 티켓 수다.
+                */}
+                <th
+                  className="px-3 py-2 text-right font-medium whitespace-nowrap"
+                  title="봇이 티켓마다 담당자를 정해 Slack 으로 알린 건수"
+                >
+                  배정 알림
                 </th>
+                <th className="w-6" aria-hidden />
               </tr>
             </thead>
             {/*
@@ -573,13 +618,34 @@ function CycleTable({
                   note?.tone === 'warn'
                     ? 'bg-amber-50/60 dark:bg-amber-950/20'
                     : '';
+                // 지난 차수는 볼 일이 적다. 글자를 한 단 내리고 상태 칸을 비운다
+                const faded = st.label === '지난 차수';
+                const upNext = isWatching
+                  ? nextAlert(
+                      effectiveAlertRules(c.alertRulesOverride, configRules),
+                      {
+                        qaStartYmd: win.qaStartYmd,
+                        qaEndYmd: win.qaEndYmd,
+                        prodYmd: prodDayOf(c),
+                      },
+                      todayYmd,
+                      nowHm
+                    )
+                  : null;
                 return (
                   <tr
                     key={c.deployYmd}
                     // relative: RowLink 의 덮개가 이 행 안에 갇히게 한다.
-                    className={`relative cursor-pointer border-b last:border-0 hover:bg-muted/60 ${scheduleTint || (isCurrentCycle ? 'bg-muted/40' : '')}`}
+                    className={`group relative cursor-pointer border-b last:border-0 hover:bg-muted/60 ${scheduleTint || (isCurrentCycle ? 'bg-muted/40' : '')} ${faded ? 'text-foreground/70' : ''}`}
                   >
                     <td className="px-3 py-2.5 align-baseline">
+                      {/* 지금 차수 표시. 배경만으로는 옅어서 띠를 둔다 */}
+                      {isCurrentCycle && (
+                        <span
+                          aria-hidden
+                          className={`absolute inset-y-0 left-0 w-[3px] ${isWatching ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`}
+                        />
+                      )}
                       {/*
                     차수 상세로 간다. 배포대장(Confluence) 링크는 그 안에 있다 —
                     한 행에 내부·외부 링크가 둘이면 어디로 가는지 모른다.
@@ -597,20 +663,47 @@ function CycleTable({
                   */}
                       <RowLink
                         href={`/admin/qa-router/${configId}/cycles/${c.deployYmd}${demo ? '?demo=1' : ''}`}
-                        className={`rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${isCurrentCycle ? 'font-medium' : ''}`}
+                        className={`rounded-sm font-mono tabular-nums focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${isCurrentCycle ? 'font-semibold' : ''}`}
                       >
-                        {c.deployPageTitle ?? c.deployYmd}
-                      </RowLink>
+                        <span title={c.deployPageTitle ?? undefined}>
+                          {cycleLabel(c)}
+                        </span>
+                      </RowLink>{' '}
+                      <ProdDrift cycle={c} />
                     </td>
                     <td className="px-3 py-2.5 align-baseline">
-                      <Code>{c.fixVersion}</Code>
+                      <span className="inline-flex flex-wrap items-baseline gap-1.5">
+                        <Code>{c.fixVersion}</Code>
+                        {(versionUse.get(c.fixVersion) ?? 0) > 1 && (
+                          <span
+                            className="whitespace-nowrap text-xs text-amber-700 dark:text-amber-400"
+                            title="다른 차수도 이 버전을 씁니다. 배포대장의 버전을 확인해 주세요. 배정 알림 수는 버전으로 세서 두 차수에 같은 수가 찍힙니다."
+                          >
+                            버전 중복
+                          </span>
+                        )}
+                      </span>
                     </td>
                     <td className="px-3 py-2.5 align-baseline">
                       <div className="flex flex-col gap-0.5">
+                        {/*
+                          기간, 길이, 출처를 한 줄에. 전에는 출처 배지가
+                          둘째 줄을 차지해 이 행만 세 줄로 높아졌다.
+                        */}
                         {win.qaStartYmd ? (
-                          <span className="whitespace-nowrap font-mono tabular-nums">
-                            {win.qaStartYmd.slice(5)} ~{' '}
-                            {win.qaEndYmd?.slice(5) ?? '?'}
+                          <span className="inline-flex flex-wrap items-center gap-x-1.5 whitespace-nowrap">
+                            <span className="font-mono tabular-nums">
+                              {win.qaStartYmd.slice(5)} ~{' '}
+                              {win.qaEndYmd?.slice(5) ?? '?'}
+                            </span>
+                            {win.qaEndYmd && win.source !== 'invalid' && (
+                              <span className="text-xs text-muted-foreground tabular-nums">
+                                {spanDays(win.qaStartYmd, win.qaEndYmd)}일
+                              </span>
+                            )}
+                            {note?.tone === 'off' && (
+                              <Badge variant="outline">{note.label}</Badge>
+                            )}
                           </span>
                         ) : (
                           // note 가 이미 "일정 미정" 을 배지로 말한다. 둘 다
@@ -619,11 +712,8 @@ function CycleTable({
                             <span className="text-muted-foreground">미정</span>
                           )
                         )}
-                        {note && (
-                          <Badge
-                            variant={note.tone === 'off' ? 'muted' : note.tone}
-                            className="w-fit"
-                          >
+                        {note && note.tone !== 'off' && (
+                          <Badge variant={note.tone} className="w-fit">
                             {note.label}
                           </Badge>
                         )}
@@ -636,6 +726,19 @@ function CycleTable({
                           어긋난 날짜로 "6일 남음"을 세지 않는다. 대신 알림이
                           안 나간다는 사실만 말한다.
                         */}
+                        {/*
+                          지난 차수는 경고 색을 끄지만(위 주석), 어긋났다는
+                          사실은 남긴다. 아니면 나중에 기록을 볼 때 맞는
+                          기간으로 읽힌다.
+                        */}
+                        {win.source === 'invalid' && !upcoming && (
+                          <span
+                            className="whitespace-nowrap text-xs text-muted-foreground"
+                            title={win.why ?? undefined}
+                          >
+                            날짜 어긋남
+                          </span>
+                        )}
                         {win.source === 'invalid' && upcoming && (
                           <span className="whitespace-nowrap text-xs text-muted-foreground">
                             이 차수 QA 날짜 알림 안 나감
@@ -646,46 +749,66 @@ function CycleTable({
                           win.source !== 'invalid' &&
                           win.source !== 'none' &&
                           win.qaStartYmd && (
-                            <span className="whitespace-nowrap text-xs text-muted-foreground">
-                              {describeQaProgress(
-                                win.qaStartYmd,
-                                win.qaEndYmd,
-                                todayYmd
-                              )}
-                            </span>
+                            <QaProgress
+                              startYmd={win.qaStartYmd}
+                              endYmd={win.qaEndYmd}
+                              todayYmd={todayYmd}
+                            />
                           )}
                       </div>
                     </td>
                     <td className="px-3 py-2.5 align-baseline">
-                      <ProdDate cycle={c} />
-                    </td>
-                    <td className="px-3 py-2.5 align-baseline">
-                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                        <StatusLed tone={st.tone} pulse={isWatching} />
-                        <span className={isCurrentCycle ? 'font-medium' : ''}>
-                          {st.label}
-                        </span>
-                        {/*
+                      {faded ? (
+                        <span className="sr-only">{st.label}</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                          <StatusLed tone={st.tone} pulse={isWatching} />
+                          <span className={isCurrentCycle ? 'font-medium' : ''}>
+                            {st.label}
+                          </span>
+                          {/*
                           알림 기준을 이 차수만 덮어쓴 경우. 목록에서 보이지
                           않으면 "왜 이 차수만 알림이 다르지" 를 나중에 아무도
                           못 푼다 — 상세를 하나씩 열어 봐야 알게 된다.
                         */}
-                        {hasAlertOverride(c) && (
-                          <Badge
-                            variant="warn"
-                            title="이 차수는 설정의 알림 기준을 쓰지 않습니다"
-                          >
-                            알림 기준 덮어씀
-                          </Badge>
-                        )}
-                      </span>
+                          {hasAlertOverride(c) && (
+                            <Badge
+                              variant="warn"
+                              title="이 차수는 설정의 알림 기준을 쓰지 않습니다"
+                            >
+                              알림 기준 덮어씀
+                            </Badge>
+                          )}
+                        </span>
+                      )}
+                      {/* 차수 상세의 "다음 알림" 과 같은 함수, 같은 답 */}
+                      {upNext && (
+                        <span className="mt-0.5 block whitespace-nowrap text-xs text-muted-foreground">
+                          다음 알림: {inDaysText(upNext.inDays)}{' '}
+                          {upNext.row.rule.at} ‘{ruleName(upNext.row.rule)}’
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2.5 text-right align-baseline font-mono tabular-nums">
-                      {n === 0 ? (
+                      {n === undefined ? (
+                        <span
+                          className="text-muted-foreground"
+                          title="이 기간에 차수 표시 없이 남은 기록이 있어 셀 수 없습니다"
+                        >
+                          –
+                        </span>
+                      ) : n === 0 ? (
                         <span className="text-muted-foreground">0</span>
                       ) : (
                         n
                       )}
+                    </td>
+                    <td className="pr-3 align-middle text-muted-foreground">
+                      {/* 행 전체가 상세로 간다는 표시. 평소엔 숨겨 둔다 */}
+                      <ChevronRight
+                        aria-hidden
+                        className="size-4 opacity-0 transition-opacity group-hover:opacity-100"
+                      />
                     </td>
                   </tr>
                 );
@@ -721,21 +844,72 @@ function CycleTable({
  * 본문 값은 지우지 않고 옆에 적는다 — 배포대장이 어긋나 있다는 사실 자체가
  * 누군가 고쳐야 할 일이라, 화면에서 사라지면 아무도 모른다.
  */
-function ProdDate({ cycle }: { cycle: DeployCycle }) {
-  const drifted = cycle.prodYmd && cycle.prodYmd !== cycle.deployYmd;
+function ProdDrift({ cycle }: { cycle: DeployCycle }) {
+  if (!cycle.prodYmd || cycle.prodYmd === cycle.deployYmd) return null;
   return (
-    <span className="inline-flex flex-wrap items-baseline gap-x-1.5">
-      <span className="whitespace-nowrap font-mono tabular-nums">
-        {cycle.deployYmd.slice(5)}
-      </span>
-      {drifted && (
-        <span
-          className="whitespace-nowrap text-xs text-muted-foreground"
-          title="배포대장 본문의 '운영계 배포' 줄이 제목과 다릅니다. 본문이 갱신되지 않은 것으로 보고 제목을 씁니다."
-        >
-          (본문 {cycle.prodYmd!.slice(5)})
-        </span>
-      )}
+    <span
+      className="whitespace-nowrap text-xs text-muted-foreground"
+      title="배포대장 본문의 '운영계 배포' 줄이 제목과 다릅니다. 본문이 갱신되지 않은 것으로 보고 제목을 씁니다."
+    >
+      (본문 {cycle.prodYmd.slice(5)})
     </span>
   );
+}
+
+/** 시작일부터 종료일까지 며칠인가 (양끝 포함) */
+function spanDays(startYmd: string, endYmd: string): number {
+  return (
+    Math.round((Date.parse(endYmd) - Date.parse(startYmd)) / 86_400_000) + 1
+  );
+}
+
+/**
+ * 지금 차수의 QA 진행. 막대와 글을 같이 둔다 — "7일차 · 오늘 마감" 은
+ * 읽어야 알고, 막대는 보면 안다. 글은 그대로 두어 색에만 기대지 않는다.
+ */
+function QaProgress({
+  startYmd,
+  endYmd,
+  todayYmd,
+}: {
+  startYmd: string;
+  endYmd: string | null;
+  todayYmd: string;
+}) {
+  const total = endYmd ? spanDays(startYmd, endYmd) : null;
+  const nth = Math.min(
+    Math.max(spanDays(startYmd, todayYmd), 0),
+    total ?? Infinity
+  );
+  return (
+    <span className="flex flex-col gap-1">
+      {total && (
+        <span
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={total}
+          aria-valuenow={nth}
+          aria-label="QA 진행"
+          className="h-1 w-36 overflow-hidden rounded-full bg-muted"
+        >
+          <span
+            className="block h-full rounded-full bg-primary"
+            style={{ width: `${(nth / total) * 100}%` }}
+          />
+        </span>
+      )}
+      <span className="whitespace-nowrap text-xs text-muted-foreground">
+        {describeQaProgress(startYmd, endYmd, todayYmd)}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * 차수 이름. 배포대장 제목에서 `MM-DD(요일)` 만 남긴다.
+ * 요일 자리에 "정기" 처럼 다른 말이 있으면 그대로 둔다.
+ */
+function cycleLabel(cycle: DeployCycle): string {
+  const m = cycle.deployPageTitle?.match(/\d{4}-(\d{2}-\d{2})(\([^)]*\))?/);
+  return m ? `${m[1]}${m[2] ?? ''}` : cycle.deployYmd.slice(5);
 }

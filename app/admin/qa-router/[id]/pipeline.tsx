@@ -1381,6 +1381,39 @@ export function groupAlertRows(rows: AlertRuleRow[]): AlertGroups {
   };
 }
 
+/**
+ * 이 차수에서 다음에 나갈 날짜 알림. 날과 **시각** 을 같이 본다 — 날만
+ * 보면 오늘 09:10 이 이미 지났어도 오늘 것을 "다음" 이라 한다.
+ *
+ * 차수 목록의 상태 칸과 차수 상세의 타임라인이 같은 답을 내야 해서 한
+ * 함수로 둔다. 조건형(날을 미리 못 정하는 것)은 고르지 않는다.
+ */
+export function nextAlert(
+  rules: AlertRule[],
+  schedule: AlertSchedule | null,
+  todayYmd: string,
+  nowHm: string
+): { row: AlertRuleRow; inDays: number } | null {
+  const row =
+    groupAlertRows(alertRuleRows(rules, schedule))
+      .live.filter(
+        (r) =>
+          r.day &&
+          (r.day > todayYmd || (r.day === todayYmd && r.rule.at > nowHm))
+      )
+      .sort((a, b) =>
+        `${a.day} ${a.rule.at}`.localeCompare(`${b.day} ${b.rule.at}`)
+      )[0] ?? null;
+  if (!row) return null;
+  const day = (ymd: string) => Date.parse(`${ymd}T00:00:00Z`) / 86_400_000;
+  return { row, inDays: day(row.day!) - day(todayYmd) };
+}
+
+/** "오늘"·"내일"·"N일 뒤" */
+export function inDaysText(n: number): string {
+  return n === 0 ? '오늘' : n === 1 ? '내일' : `${n}일 뒤`;
+}
+
 /** 요일 한 글자. 날짜 칩이 `09-14` 와 `월` 을 위아래로 따로 그린다. */
 export function dowOf(ymd: string): string {
   const d = new Date(`${ymd}T00:00:00Z`);
