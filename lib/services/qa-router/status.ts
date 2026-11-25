@@ -165,6 +165,8 @@ export function nextExpectedPollAt({
 export function formatAgo(iso: string | null, now: Date): string {
   if (!iso) return '기록 없음';
   const sec = Math.floor((now.getTime() - new Date(iso).getTime()) / 1000);
+  // "0초 전 갱신" 은 숫자가 의미 없이 튄다
+  if (sec < 10) return '방금';
   if (sec < 60) return `${sec}초 전`;
   if (sec < 3600) return `${Math.floor(sec / 60)}분 전`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}시간 전`;
