@@ -225,6 +225,7 @@ export const KQ_CUSTOM_FIELDS = {
 // HMG Jira 커스텀 필드 (AUTOWAY 프로젝트)
 export const HMG_CUSTOM_FIELDS = {
   EPIC_LINK: 'customfield_10014',  // Epic Link (HMG 인스턴스)
+  TASK_TYPE: 'customfield_10626',  // Task Type (MEMBERSHIP 작업 구분: Planning/Design/Development 등)
   START_DATE: 'customfield_10187', // Start Date
   START_DATE_ALT: 'customfield_10753', // Start Date (duplicate)
   START_DATE_590: 'customfield_10590', // Start Date (세 번째 중복 필드)

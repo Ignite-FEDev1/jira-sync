@@ -25,7 +25,7 @@ const createIssueTypeIdCache: Map<string, string> = new Map();
  */
 const PREFERRED_ISSUETYPE_NAMES: Record<string, string[]> = {
   AUTOWAY: ['작업', 'Task', '업무', '스토리', 'Story', '버그', 'Bug'],
-  MEMBERSHIP: ['Dev Task', '작업', 'Task', '스토리', 'Story', '버그', 'Bug'],
+  MEMBERSHIP: ['작업', 'Task'],
 };
 
 const DEFAULT_PREFERRED_NAMES = [
@@ -261,6 +261,9 @@ export class HMGSyncService {
           summary: fehgTicket.fields.summary,
           ...mappedFields,
           ...sourceLinkFields,
+          ...(targetProjectKey === 'MEMBERSHIP' && {
+            [HMG_CUSTOM_FIELDS.TASK_TYPE]: { value: 'Development' },
+          }),
         },
       };
 
